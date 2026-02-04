@@ -1,0 +1,55 @@
+[
+  {
+    "id": "CONTRACT_NO_MISSING",
+    "severity": "high",
+    "message": "合同编号缺失",
+    "suggestion": "补充合同编号或上传完整合同",
+    "checks": [
+      { "field": "contract_no", "op": "missing" }
+    ],
+    "evidence": { "keyword": "合同号" }
+  },
+  {
+    "id": "CONTRACT_AMOUNT_MISSING",
+    "severity": "high",
+    "message": "合同金额缺失或为0",
+    "suggestion": "补充合同金额信息",
+    "checks": [
+      { "field": "total_amount", "op": "missing_or_zero" }
+    ],
+    "evidence": { "field": "total_amount", "keyword": "金额" }
+  },
+  {
+    "id": "CONTRACT_DATE_MISSING",
+    "severity": "medium",
+    "message": "合同日期缺失",
+    "suggestion": "补充签署日期",
+    "checks": [
+      { "field": "contract_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "日期" }
+  },
+  {
+    "id": "CONTRACT_VENDOR_MISSING",
+    "severity": "medium",
+    "message": "合同主体信息缺失",
+    "suggestion": "补充甲乙方名称",
+    "checks": [
+      { "field": "vendor", "op": "missing" }
+    ],
+    "evidence": { "keyword": "甲方" }
+  },
+  {
+    "id": "CONTRACT_AMOUNT_EXCEED",
+    "severity": "high",
+    "message": "合同金额超过ERP合同金额",
+    "suggestion": "核对ERP合同金额或进行补充审批",
+    "when": [
+      { "field": "erp.contract_amount", "op": "exists" }
+    ],
+    "checks": [
+      { "field": "total_amount", "op": "gt_field", "value_field": "erp.contract_amount" }
+    ],
+    "evidence": { "field": "total_amount" }
+  }
+]

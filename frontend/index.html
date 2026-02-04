@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- 保留你的图标 -->
+    <link rel="icon" type="image/svg+xml" href="/img_4.png" />
+
+    <!-- Viewport 设置：允许页面在移动端正常显示，但禁止用户缩放 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+
+    <title>imagine Agent</title>
+
+    <!-- 在 HTML 中直接加载 Tailwind -->
+    <script id="tailwind-script" src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              gray: { 900: '#111827', 950: '#030712' },
+            },
+            animation: {
+              'pulse-soft': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+              'float': 'float 6s ease-in-out infinite',
+            },
+            keyframes: {
+              float: {
+                '0%, 100%': { transform: 'translateY(0)' },
+                '50%': { transform: 'translateY(-10px)' },
+              }
+            }
+          },
+        },
+      };
+    </script>
+
+    <style>
+      /* 基础重置样式 */
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #ffffff;
+        -webkit-tap-highlight-color: transparent; /* 优化移动端点击体验 */
+      }
+
+      /* ✅ 修复：移除 overflow: hidden 和固定 height，允许页面自然滚动 */
+      html, body, #root {
+        width: 100%;
+        /* 使用 min-height 而不是 height，这样内容多时可以自动撑开 */
+        min-height: 100%;
+        min-height: 100dvh;
+        /* overflow: hidden;  <-- 删除这行，它是导致无法滚动的罪魁祸首 */
+      }
+
+      /* 隐藏滚动条但保留功能 (可选，看你喜好) */
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 4px;
+        height: 4px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background-color: rgba(156, 163, 175, 0.5);
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- 保留你的 React 入口 -->
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

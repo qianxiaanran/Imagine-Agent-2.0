@@ -1,0 +1,3 @@
+[submodule "ocr/deepseek_ocr"]
+	path = ocr/deepseek_ocr
+	url = https://github.com/deepseek-ai/DeepSeek-OCR.git

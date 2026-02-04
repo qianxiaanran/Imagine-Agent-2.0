@@ -1,0 +1,51 @@
+[
+  {
+    "id": "INV_AMOUNT_MISSING",
+    "severity": "high",
+    "message": "发票金额缺失或为0",
+    "suggestion": "核对票面金额并补充完整",
+    "checks": [
+      { "field": "total_amount", "op": "missing_or_zero" }
+    ],
+    "evidence": { "field": "total_amount", "keyword": "金额" }
+  },
+  {
+    "id": "INV_INVOICE_NO_MISSING",
+    "severity": "high",
+    "message": "发票号码缺失",
+    "suggestion": "补充发票号码或上传完整票据",
+    "checks": [
+      { "field": "invoice_no", "op": "missing" }
+    ],
+    "evidence": { "keyword": "发票号" }
+  },
+  {
+    "id": "INV_TAX_NO_MISSING",
+    "severity": "medium",
+    "message": "税号缺失",
+    "suggestion": "补充纳税人识别号",
+    "checks": [
+      { "field": "tax_no", "op": "missing" }
+    ],
+    "evidence": { "keyword": "税号" }
+  },
+  {
+    "id": "INV_DATE_MISSING",
+    "severity": "medium",
+    "message": "开票日期缺失",
+    "suggestion": "补充发票日期",
+    "checks": [
+      { "field": "invoice_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "日期" }
+  },
+  {
+    "id": "INV_AMOUNT_NEGATIVE",
+    "severity": "high",
+    "message": "发票金额为负数",
+    "suggestion": "确认金额是否填写错误",
+    "checks": [
+      { "field": "total_amount", "op": "lt", "value": 0 }
+    ]
+  }
+]

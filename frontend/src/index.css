@@ -1,0 +1,49 @@
+:root {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light;
+  color: #0f172a;
+  background-color: #ffffff;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ✅ 修复：移除强制的 overflow: hidden 和 height: 100vh */
+body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  min-height: 100vh; /* 改为最小高度 */
+  /* overflow: hidden; <-- 删除这行，允许 Body 滚动 */
+  display: block;
+}
+
+/* 确保根节点也能自适应 */
+#root {
+  width: 100%;
+  min-height: 100vh; /* 改为最小高度 */
+  margin: 0;
+  padding: 0;
+  text-align: left;
+}
+
+/* 滚动条样式优化 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.2);
+}

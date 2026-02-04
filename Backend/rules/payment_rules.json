@@ -1,0 +1,55 @@
+[
+  {
+    "id": "PAYMENT_PAYEE_MISSING",
+    "severity": "high",
+    "message": "收款方信息缺失",
+    "suggestion": "补充收款方名称或账户信息",
+    "checks": [
+      { "field": "payee", "op": "missing" }
+    ],
+    "evidence": { "keyword": "收款方" }
+  },
+  {
+    "id": "PAYMENT_ACCOUNT_MISSING",
+    "severity": "medium",
+    "message": "收款账户缺失",
+    "suggestion": "补充银行账号信息",
+    "checks": [
+      { "field": "bank_account", "op": "missing" }
+    ],
+    "evidence": { "keyword": "账号" }
+  },
+  {
+    "id": "PAYMENT_AMOUNT_MISSING",
+    "severity": "high",
+    "message": "付款金额缺失或为0",
+    "suggestion": "补充付款金额",
+    "checks": [
+      { "field": "total_amount", "op": "missing_or_zero" }
+    ],
+    "evidence": { "field": "total_amount" }
+  },
+  {
+    "id": "PAYMENT_DATE_MISSING",
+    "severity": "medium",
+    "message": "付款日期缺失",
+    "suggestion": "补充付款日期",
+    "checks": [
+      { "field": "payment_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "日期" }
+  },
+  {
+    "id": "PAYMENT_OVERPAY",
+    "severity": "high",
+    "message": "付款金额超过ERP合同金额",
+    "suggestion": "核对合同金额或拆分付款",
+    "when": [
+      { "field": "erp.contract_amount", "op": "exists" }
+    ],
+    "checks": [
+      { "field": "total_amount", "op": "gt_field", "value_field": "erp.contract_amount" }
+    ],
+    "evidence": { "field": "total_amount" }
+  }
+]

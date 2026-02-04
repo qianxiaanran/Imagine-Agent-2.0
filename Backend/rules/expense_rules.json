@@ -1,0 +1,42 @@
+[
+  {
+    "id": "EXPENSE_AMOUNT_MISSING",
+    "severity": "high",
+    "message": "报销金额缺失或为0",
+    "suggestion": "补充报销金额信息",
+    "checks": [
+      { "field": "total_amount", "op": "missing_or_zero" }
+    ],
+    "evidence": { "field": "total_amount" }
+  },
+  {
+    "id": "EXPENSE_DATE_MISSING",
+    "severity": "medium",
+    "message": "报销日期缺失",
+    "suggestion": "补充报销日期",
+    "checks": [
+      { "field": "payment_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "日期" }
+  },
+  {
+    "id": "EXPENSE_INVOICE_MISSING",
+    "severity": "medium",
+    "message": "报销凭证缺失",
+    "suggestion": "补充对应发票或凭证",
+    "checks": [
+      { "field": "invoice_no", "op": "missing" }
+    ],
+    "evidence": { "keyword": "发票" }
+  },
+  {
+    "id": "EXPENSE_AMOUNT_HIGH",
+    "severity": "medium",
+    "message": "报销金额偏高",
+    "suggestion": "建议人工复核金额合理性",
+    "checks": [
+      { "field": "total_amount", "op": "gt", "value": 5000 }
+    ],
+    "evidence": { "field": "total_amount" }
+  }
+]
