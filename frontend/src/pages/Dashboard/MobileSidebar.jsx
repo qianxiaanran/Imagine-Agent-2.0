@@ -590,7 +590,7 @@ const MobileSidebar = memo(({
 
                     <button
                       onClick={() => {
-                        onShowAppearance();
+                        onShowAppearance("personalization");
                         onClose();
                       }}
                       className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
@@ -621,7 +621,13 @@ const MobileSidebar = memo(({
                     )}
 
 
-                    <button className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
+                    <button
+                      onClick={() => {
+                        onShowAppearance("general");
+                        onClose();
+                      }}
+                      className="w-full flex items-center gap-3 px-4 py-3 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                    >
                       <Settings size={16} /> 设置
                     </button>
 

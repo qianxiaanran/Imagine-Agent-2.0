@@ -8,6 +8,7 @@ import {
   Search,
   Database,
   FileText,
+  ArrowUpRight,
 } from "lucide-react";
 
 /**
@@ -140,18 +141,20 @@ const Suggestions = memo(function Suggestions({
   return (
     <div className={`w-full ${className}`}>
       {showHeader && (
-        <div className="px-4 mb-3 flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-gray-600 dark:text-gray-300" />
+        <div className="px-4 mb-4 flex items-center gap-2.5">
+          <span className="inline-flex w-6 h-6 items-center justify-center rounded-full bg-white/85 dark:bg-white/10 border border-white/80 dark:border-white/15 shadow-sm">
+            <Sparkles className="w-3.5 h-3.5 text-gray-700 dark:text-gray-200" />
+          </span>
           <div className="text-sm font-semibold text-gray-800 dark:text-gray-100">
             {headerTitle}
           </div>
-          <div className="text-xs text-gray-500 dark:text-gray-400">
+          <div className="text-xs text-gray-500 dark:text-gray-400/90">
             点击即可填入输入框
           </div>
         </div>
       )}
 
-      <div className="w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-3 px-4">
+      <div className="w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-3.5 px-4">
         {visibleSuggestions.map((s) => {
           const Icon = s.Icon || Sparkles;
 
@@ -162,17 +165,21 @@ const Suggestions = memo(function Suggestions({
               disabled={disabled}
               onClick={() => !disabled && onSuggestionClick?.(s.text)}
               className={[
-                "group relative text-left w-full",
+                "group relative text-left w-full overflow-hidden",
                 "flex items-start gap-4",
-                "p-4 rounded-2xl",
-                "backdrop-blur-md",
-                "bg-white/70 dark:bg-white/5",
-                "border border-white/40 dark:border-white/10",
-                "shadow-sm hover:shadow-md",
-                "transition-all duration-200",
+                "p-4 rounded-[24px]",
+                "backdrop-blur-xl",
+                "bg-white/75 dark:bg-white/[0.06]",
+                "border border-white/70 dark:border-white/12",
+                "shadow-[0_10px_28px_-18px_rgba(15,23,42,0.5)] dark:shadow-[0_12px_28px_-18px_rgba(0,0,0,0.8)]",
+                "transition-[transform,box-shadow,background-color,border-color] duration-300",
                 "focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-0",
                 "focus-visible:ring-gray-900/15 dark:focus-visible:ring-white/20",
-                "hover:bg-white/85 dark:hover:bg-white/10",
+                "hover:-translate-y-0.5",
+                "hover:bg-white/90 dark:hover:bg-white/[0.09]",
+                "hover:border-white/90 dark:hover:border-white/20",
+                "hover:shadow-[0_20px_45px_-26px_rgba(15,23,42,0.7)] dark:hover:shadow-[0_22px_50px_-24px_rgba(0,0,0,0.9)]",
+                "active:scale-[0.99]",
                 disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer",
               ].join(" ")}
               aria-label={`建议：${s.title}`}
@@ -180,28 +187,36 @@ const Suggestions = memo(function Suggestions({
               <div
                 className={[
                   "shrink-0 mt-0.5",
-                  "w-10 h-10 rounded-xl",
+                  "w-11 h-11 rounded-2xl",
                   "flex items-center justify-center",
-                  "bg-gray-900/5 dark:bg-white/10",
-                  "border border-gray-900/5 dark:border-white/10",
+                  "bg-gradient-to-br from-white/95 to-white/60 dark:from-white/18 dark:to-white/[0.05]",
+                  "border border-white/85 dark:border-white/12",
+                  "shadow-[inset_0_1px_0_rgba(255,255,255,0.85)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.15)]",
                   "transition-transform duration-200",
-                  "group-hover:scale-[1.03]",
+                  "group-hover:scale-[1.05]",
                 ].join(" ")}
               >
-                <Icon className="w-5 h-5 text-gray-700 dark:text-gray-200" />
+                <Icon className="w-5 h-5 text-gray-700 dark:text-gray-100" />
               </div>
 
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-semibold text-gray-900 dark:text-white leading-snug">
                   {s.title}
                 </div>
-                <div className="mt-1 text-xs text-gray-600 dark:text-gray-300 leading-relaxed line-clamp-2">
+                <div className="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300 leading-relaxed line-clamp-2">
                   {s.text}
                 </div>
               </div>
 
-              <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                <div className="absolute -top-10 -right-10 w-28 h-28 rounded-full blur-2xl bg-gray-900/5 dark:bg-white/10" />
+              <div className="pointer-events-none absolute right-3 top-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/90 dark:bg-white/10 border border-white/80 dark:border-white/15">
+                  <ArrowUpRight className="w-3.5 h-3.5 text-gray-500 dark:text-gray-300" />
+                </span>
+              </div>
+
+              <div className="pointer-events-none absolute inset-0 rounded-[24px] opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                <div className="absolute inset-x-10 -top-10 h-16 rounded-full blur-2xl bg-white/40 dark:bg-white/12" />
+                <div className="absolute -bottom-12 -right-8 w-32 h-32 rounded-full blur-3xl bg-cyan-400/10 dark:bg-cyan-300/10" />
               </div>
             </button>
           );

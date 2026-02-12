@@ -112,7 +112,7 @@ const AudioPlayer = ({ src }) => {
   };
 
   return (
-    <div className="flex flex-col gap-3 w-full select-none bg-white/50 dark:bg-gray-800/50 rounded-xl p-3 border border-purple-100 dark:border-purple-900/30">
+    <div className="flex flex-col gap-3 w-full select-none bg-white/70 dark:bg-gray-900/60 rounded-xl p-3 border border-gray-200 dark:border-gray-700">
       <audio ref={audioRef} src={src} preload="metadata" />
       <div className="flex items-center gap-3 text-xs font-mono text-gray-500 dark:text-gray-400">
         <span className="w-10 text-right">{formatTime(progress)}</span>
@@ -127,7 +127,7 @@ const AudioPlayer = ({ src }) => {
           onChange={handleProgressChange}
           onMouseUp={handleSeekEnd}
           onTouchEnd={handleSeekEnd}
-          className="flex-1 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-600 dark:accent-purple-500 hover:accent-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500/20"
+          className="flex-1 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-gray-900 dark:accent-gray-200 hover:accent-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-500/20"
         />
         <span className="w-10">{formatTime(duration)}</span>
       </div>
@@ -135,14 +135,14 @@ const AudioPlayer = ({ src }) => {
         <div className="flex items-center gap-4">
           <button
             onClick={togglePlay}
-            className="p-2.5 rounded-full bg-purple-600 hover:bg-purple-700 text-white shadow-md hover:shadow-lg transition-all active:scale-95 flex items-center justify-center"
+            className="p-2.5 rounded-full bg-gray-900 hover:bg-black text-white shadow-md hover:shadow-lg transition-all active:scale-95 flex items-center justify-center"
             title={isPlaying ? "暂停" : "播放"}
           >
             {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" className="ml-0.5" />}
           </button>
           <button
             onClick={() => { if (audioRef.current) { audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 10); } }}
-            className="text-gray-500 hover:text-purple-600 dark:text-gray-400 dark:hover:text-purple-400 transition-colors p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full"
+            className="text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 transition-colors p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full"
             title="后退 10秒"
           >
             <RotateCcw size={18} />
@@ -150,15 +150,15 @@ const AudioPlayer = ({ src }) => {
         </div>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 group relative">
-            <button onClick={toggleMute} className="text-gray-400 hover:text-purple-600 dark:text-gray-500 dark:hover:text-purple-400 transition-colors">
+            <button onClick={toggleMute} className="text-gray-400 hover:text-gray-800 dark:text-gray-500 dark:hover:text-gray-200 transition-colors">
               {isMuted || volume === 0 ? <VolumeX size={18} /> : (volume < 0.5 ? <Volume1 size={18} /> : <Volume2 size={18} />)}
             </button>
             <div className="w-16 md:w-20 flex items-center">
-              <input type="range" min="0" max="1" step="0.05" value={isMuted ? 0 : volume} onChange={handleVolumeChange} className="w-full h-1 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-gray-400 hover:accent-purple-500" />
+              <input type="range" min="0" max="1" step="0.05" value={isMuted ? 0 : volume} onChange={handleVolumeChange} className="w-full h-1 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-gray-400 hover:accent-gray-700" />
             </div>
           </div>
           <div className="w-px h-4 bg-gray-300 dark:bg-gray-700 mx-1"></div>
-          <button onClick={toggleSpeed} className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/30 border border-purple-100 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/50 transition-colors w-[52px] justify-center">
+          <button onClick={toggleSpeed} className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-bold text-gray-700 dark:text-gray-200 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors w-[52px] justify-center">
             {speed}x
           </button>
         </div>
@@ -200,6 +200,8 @@ const AuditPanel = ({
   auditState,
   auditFile,
   onReset,
+  onErpAction,
+  isErpActionLoading = false,
   notice,
   fullWidth = false,
 }) => {
@@ -256,6 +258,28 @@ const AuditPanel = ({
     { key: "contract_no", label: "合同号" },
     { key: "vendor", label: "供应商" },
   ].filter((item) => extracted[item.key]);
+  const erpChecks = Array.isArray(result.erp_checks) ? result.erp_checks : [];
+  const failedErpChecks = erpChecks.filter((item) => item && item.passed === false);
+  const auditScore = Number.isFinite(Number(result.audit_score)) ? Number(result.audit_score) : null;
+  const erpTraceId = result.erp_trace_id || result?.erp_action?.trace_id || "";
+  const erpSyncStatus = String(result.erp_sync_status || result?.erp_action?.status || "").toLowerCase();
+  const sourceLabelMap = {
+    rule: "规则命中",
+    ai: "AI语义",
+    cross_doc: "跨单据",
+    anomaly: "异常检测",
+  };
+  const sourceStyleMap = {
+    rule: "bg-blue-50 text-blue-600 border-blue-100",
+    ai: "bg-indigo-50 text-indigo-600 border-indigo-100",
+    cross_doc: "bg-cyan-50 text-cyan-700 border-cyan-100",
+    anomaly: "bg-fuchsia-50 text-fuchsia-600 border-fuchsia-100",
+  };
+  const formatConfidence = (val) => {
+    const num = Number(val);
+    if (!Number.isFinite(num)) return "";
+    return `${Math.round(Math.max(0, Math.min(1, num)) * 100)}%`;
+  };
 
   const statusLabel = status === "uploading" ? "文件上传中" : (status === "pending" ? "排队中" : "审单进行中");
 
@@ -411,9 +435,50 @@ const AuditPanel = ({
                   {riskLabel}
                 </div>
               </div>
+              {auditScore !== null && (
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  审单评分：<span className="font-semibold text-gray-800 dark:text-gray-200">{auditScore}</span>
+                </div>
+              )}
               {result.summary && <div className="text-sm text-gray-600 dark:text-gray-300">{result.summary}</div>}
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 建议动作：<span className="text-gray-700 dark:text-gray-200 font-medium">{actionAdvice}</span>
+              </div>
+              <div className="pt-1 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onErpAction && onErpAction('approved')}
+                  disabled={isErpActionLoading}
+                  className="px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isErpActionLoading ? "回写中..." : "ERP回写：通过"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onErpAction && onErpAction('rejected')}
+                  disabled={isErpActionLoading}
+                  className="px-3 py-1.5 rounded-full text-xs font-medium bg-rose-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  ERP回写：驳回
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onErpAction && onErpAction('need_more')}
+                  disabled={isErpActionLoading}
+                  className="px-3 py-1.5 rounded-full text-xs font-medium bg-amber-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  ERP回写：补件
+                </button>
+                {erpTraceId && (
+                  <span className="text-[11px] text-gray-500 dark:text-gray-400 px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700">
+                    Trace: {erpTraceId}
+                  </span>
+                )}
+                {erpSyncStatus && (
+                  <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                    状态：{erpSyncStatus}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -431,6 +496,28 @@ const AuditPanel = ({
               </div>
             )}
 
+            {erpChecks.length > 0 && (
+              <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-medium text-gray-500 dark:text-gray-400">ERP 对账检查</div>
+                  <div className="text-[11px] text-gray-400">失败 {failedErpChecks.length} / {erpChecks.length}</div>
+                </div>
+                <div className="space-y-2">
+                  {erpChecks.slice(0, 6).map((check) => (
+                    <div key={check.id} className="text-xs rounded-lg border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/60 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-gray-700 dark:text-gray-200 font-medium">{check.name || check.id}</span>
+                        <span className={`px-2 py-0.5 rounded-full border ${check.passed ? "bg-emerald-50 text-emerald-600 border-emerald-100" : "bg-red-50 text-red-600 border-red-100"}`}>
+                          {check.passed ? "通过" : "失败"}
+                        </span>
+                      </div>
+                      {check.reason && <div className="text-gray-500 dark:text-gray-400 mt-1">{check.reason}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900">
               <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-800 text-sm font-medium text-gray-800 dark:text-gray-200">
                 问题清单
@@ -440,15 +527,20 @@ const AuditPanel = ({
                   <div className="text-sm text-gray-500 dark:text-gray-400">未发现需要提示的问题。</div>
                 )}
                 {sortedFindings.map((finding, idx) => {
-                  const key = finding.rule_id || `finding-${idx}`;
+                  const key = `${finding.rule_id || finding.type || 'finding'}-${idx}`;
                   const severity = String(finding.severity || "").toLowerCase();
+                  const source = String(finding.source || "rule").toLowerCase();
+                  const sourceLabel = sourceLabelMap[source] || "风险项";
                   const severityStyle = severity === "high"
                     ? "bg-red-50 text-red-600 border-red-100"
                     : (severity === "medium" ? "bg-amber-50 text-amber-600 border-amber-100" : "bg-emerald-50 text-emerald-600 border-emerald-100");
+                  const sourceStyle = sourceStyleMap[source] || "bg-gray-50 text-gray-600 border-gray-100";
                   const expanded = !!expandedFindings[key];
                   const evidence = finding.evidence || {};
                   const evidenceText = typeof evidence === "string" ? evidence : evidence.text;
                   const evidenceHighlight = typeof evidence === "string" ? "" : evidence.highlight;
+                  const confidenceText = formatConfidence(finding.confidence);
+                  const reasonText = finding.reason || "";
 
                   return (
                     <div key={key} className="rounded-lg border border-gray-100 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-900/30">
@@ -458,17 +550,24 @@ const AuditPanel = ({
                         className="w-full text-left px-3 py-3 flex items-start justify-between gap-3"
                       >
                         <div className="flex-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className={`px-2 py-0.5 rounded-full text-[10px] border ${severityStyle}`}>
                               {severity === "high" ? "高风险" : (severity === "medium" ? "中风险" : "低风险")}
                             </span>
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] border ${sourceStyle}`}>{sourceLabel}</span>
+                            {confidenceText && <span className="text-[10px] text-gray-400">置信度 {confidenceText}</span>}
                             <span className="text-sm font-medium text-gray-800 dark:text-gray-100">
                               {finding.message || "规则命中"}
                             </span>
                           </div>
+                          {reasonText && (
+                            <div className="text-xs text-gray-600 dark:text-gray-300 mt-1">
+                              触发原因：{reasonText}
+                            </div>
+                          )}
                           {finding.suggestion && (
                             <div className="text-xs text-gray-600 dark:text-gray-300 mt-1">
-                              建议：{finding.suggestion}
+                              建议动作：{finding.suggestion}
                             </div>
                           )}
                           {finding.rule_id && (
@@ -505,7 +604,8 @@ const AuditPanel = ({
           <button
             type="button"
             onClick={onReset}
-            className="px-4 py-2 rounded-lg text-sm font-medium bg-black text-white"
+            disabled={isErpActionLoading}
+            className="px-4 py-2 rounded-lg text-sm font-medium bg-black text-white disabled:opacity-50 disabled:cursor-not-allowed"
           >
             重新审单
           </button>
@@ -539,6 +639,8 @@ const ModePanel = ({
   onAuditDocTypeChange,
   onAuditFileSelect,
   onAuditReset,
+  onAuditErpAction,
+  isAuditErpActionLoading = false,
   ocrEngine,
   onOcrEngineChange,
   fullWidth = false,
@@ -556,21 +658,16 @@ const ModePanel = ({
         auditState={auditState}
         auditFile={auditFile}
         onReset={onAuditReset}
+        onErpAction={onAuditErpAction}
+        isErpActionLoading={isAuditErpActionLoading}
         notice={auditNotice}
         fullWidth={fullWidth}
       />
     );
   }
   const showEnhancedPanel = isMeetingMode || isOCRMode;
-  const panelTitle = isMeetingMode ? "会议纪要 · 转写区" : (isOCRMode ? "OCR 智能录入" : "内容面板");
+  const panelTitle = isMeetingMode ? "会议纪要 · 智能整理" : (isOCRMode ? "OCR 智能录入" : "内容面板");
   const statusLabel = isMeetingMode ? "转写中..." : "识别中...";
-  const guideTitle = isMeetingMode ? "会议纪要整理" : "OCR 识别与录入";
-  const guideDesc = isMeetingMode
-    ? "上传音频后自动转写，支持编辑补充，再生成纪要。"
-    : "上传图片或 PDF，自动识别文本，可直接修订并智能录入。";
-  const stepItems = isMeetingMode
-    ? ["上传音频", "自动转写", "生成纪要"]
-    : ["上传文件", "文本识别", "智能录入"];
   const contentLabel = isMeetingMode ? "转写内容" : "识别文本";
   const emptyTitle = isMeetingMode ? "等待转写内容" : "等待识别结果";
   const emptySubtitle = isMeetingMode
@@ -581,79 +678,187 @@ const ModePanel = ({
     : (isOCRMode
       ? "识别结果将显示在这里，可直接修订纠错。"
       : "请上传图片或PDF，OCR 识别文字将显示在这里...");
+  const ocrGuideTitle = "OCR 识别与录入";
+  const ocrGuideDesc = "上传图片或 PDF，自动识别文本，可直接修订并智能录入。";
+  const ocrStepItems = ["上传文件", "文本识别", "智能录入"];
   const charCount = (panelContent || "").replace(/\s/g, "").length;
   const widthClass = fullWidth ? "md:w-full md:border-r-0" : "md:w-1/2 md:border-r";
   const isOcrPreview = isOCRMode && ocrViewMode === "preview";
+  const hasPanelContent = Boolean((panelContent || "").trim());
+  const meetingStatusText = isUploadingFile
+    ? "正在解析语音，请稍候..."
+    : (hasPanelContent ? "转写已就绪，可直接生成纪要" : "请先上传录音文件");
+  const meetingSteps = [
+    { label: "上传录音", hint: "WAV / MP3 / M4A" },
+    { label: "整理转写", hint: "自动识别 + 可编辑" },
+    { label: "生成纪要", hint: "输出摘要与行动项" },
+  ];
+  const meetingActiveStep = isUploadingFile ? 1 : (hasPanelContent ? 2 : 0);
+  const secondaryActionClass = isMeetingMode
+    ? "flex items-center gap-2 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-100 border border-gray-200 dark:border-gray-700 px-3.5 py-2 rounded-full text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+    : "flex items-center gap-2 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-600 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm";
+  const primaryActionClass = isMeetingMode
+    ? "flex items-center gap-2 text-white px-5 py-2.5 rounded-full text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-gray-900 hover:bg-black shadow-[0_10px_24px_rgba(15,23,42,0.22)] hover:shadow-[0_14px_28px_rgba(15,23,42,0.3)]"
+    : `flex items-center gap-2 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow ${panelStyle.btnBg}`;
 
   return (
     <div className={`w-full ${widthClass} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
-      <div className={`px-4 py-3 border-b flex justify-between items-center ${panelStyle.headerBg} ${panelStyle.border}`}>
+      <div className={`px-4 py-3 border-b flex justify-between items-center gap-3 ${panelStyle.headerBg} ${panelStyle.border}`}>
         <div className={`flex items-center gap-2 font-medium ${panelStyle.headerText}`}>
           {isMeetingMode && <Zap size={18} />}
           {isOCRMode && <ScanText size={18} />}
           {isAuditMode && <ClipboardCheck size={18} />}
           <span className="truncate">{panelTitle}</span>
         </div>
-        {isOCRMode && (
-          <div className="flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-gray-900/50 p-0.5 text-[11px] text-gray-500">
-            {[
-              { key: "standard", label: "标准" },
-              { key: "vl", label: "VL" },
-            ].map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                onClick={() => onOcrEngineChange && onOcrEngineChange(item.key)}
-                className={`px-2 py-0.5 rounded-full ${
-                  (ocrEngine || "auto") === item.key ? "bg-gray-900 text-white" : "hover:text-gray-700 dark:hover:text-gray-200"
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        )}
-        {isUploadingFile && (
-          <span className={`text-xs flex items-center gap-1 ${panelStyle.headerText}`}>
-            <Loader2 size={12} className="animate-spin" /> {statusLabel}
-          </span>
-        )}
-      </div>
-      {showEnhancedPanel ? (
-        <div className="flex-1 p-4 md:p-5 flex flex-col gap-4 overflow-hidden">
-          <div className={`rounded-2xl border ${panelStyle.border} bg-gradient-to-br from-white to-gray-50/80 dark:from-gray-900 dark:to-gray-800/60 p-4`}>
-            <div className="flex items-start gap-3">
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${panelStyle.headerBg} ${panelStyle.headerText}`}>
-                {isMeetingMode ? <Zap size={16} /> : <ScanText size={16} />}
-              </div>
-              <div className="flex-1">
-                <div className="text-sm font-semibold text-gray-900 dark:text-white">{guideTitle}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{guideDesc}</div>
-              </div>
-              <div className="text-[11px] text-gray-400">{isMeetingMode ? "语音" : "图片/PDF"}</div>
-            </div>
-            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-gray-500 dark:text-gray-400">
-              {stepItems.map((item, idx) => (
-                <div key={item} className="rounded-full border border-gray-200 dark:border-gray-700 px-2.5 py-1 bg-white/70 dark:bg-gray-900/70 text-center">
-                  <span className="font-medium text-gray-700 dark:text-gray-200">{idx + 1}</span> {item}
-                </div>
+        <div className="flex items-center gap-2">
+          {isOCRMode && (
+            <div className="flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-gray-900/50 p-0.5 text-[11px] text-gray-500">
+              {[
+                { key: "standard", label: "标准" },
+                { key: "vl", label: "VL" },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => onOcrEngineChange && onOcrEngineChange(item.key)}
+                  className={`px-2 py-0.5 rounded-full ${
+                    (ocrEngine || "auto") === item.key ? "bg-gray-900 text-white" : "hover:text-gray-700 dark:hover:text-gray-200"
+                  }`}
+                >
+                  {item.label}
+                </button>
               ))}
             </div>
-          </div>
-
-          {isMeetingMode && audioFileUrl && (
-            <div className="border border-purple-100 dark:border-purple-900/50 bg-purple-50/30 dark:bg-purple-900/10 rounded-2xl p-3 animate-in slide-in-from-bottom-2">
-              <AudioPlayer src={audioFileUrl} />
-            </div>
           )}
-
-          <div className={`flex-1 rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden flex flex-col ${panelStyle.textareaBg}`}>
-            <div className="px-4 py-2.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <div className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                  {isOcrPreview ? "识别文本 · 预览" : contentLabel}
+          {isMeetingMode && (
+            <span className="hidden md:inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+              {isUploadingFile ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+              {meetingStatusText}
+            </span>
+          )}
+          {isUploadingFile && !isMeetingMode && (
+            <span className={`text-xs flex items-center gap-1 ${panelStyle.headerText}`}>
+              <Loader2 size={12} className="animate-spin" /> {statusLabel}
+            </span>
+          )}
+        </div>
+      </div>
+      {showEnhancedPanel ? (
+        isMeetingMode ? (
+          <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-4 custom-scrollbar bg-[radial-gradient(circle_at_top_right,rgba(17,24,39,0.06),transparent_45%)] dark:bg-[radial-gradient(circle_at_top_right,rgba(148,163,184,0.14),transparent_48%)]">
+            <section className="relative overflow-hidden rounded-3xl border border-gray-200/80 dark:border-gray-800/80 bg-white/90 dark:bg-gray-900/80 p-5 shadow-[0_14px_34px_rgba(15,23,42,0.08)] dark:shadow-[0_16px_34px_rgba(0,0,0,0.35)]">
+              <div className="pointer-events-none absolute -right-10 -top-14 h-36 w-36 rounded-full bg-gray-900/5 dark:bg-white/5" />
+              <div className="pointer-events-none absolute -left-10 -bottom-14 h-28 w-28 rounded-full bg-gray-200/60 dark:bg-gray-700/40" />
+              <div className="relative">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5 h-11 w-11 rounded-2xl bg-black text-white dark:bg-white dark:text-black flex items-center justify-center shadow-sm">
+                      <Zap size={18} />
+                    </div>
+                    <div>
+                      <div className="text-base font-semibold text-gray-900 dark:text-white">会议纪要工作台</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">上传录音后自动转写，编辑重点后可直接生成会议摘要。</div>
+                    </div>
+                  </div>
+                  <div className="rounded-full border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-900/80 px-3 py-1.5 text-[11px] text-gray-500 dark:text-gray-300">
+                    {isUploadingFile ? "处理中" : "待生成"}
+                  </div>
                 </div>
-                {isOCRMode && (
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {meetingSteps.map((step, idx) => {
+                    const isDone = idx < meetingActiveStep;
+                    const isActive = idx === meetingActiveStep;
+                    return (
+                      <div
+                        key={step.label}
+                        className={`rounded-2xl border px-3 py-2.5 transition-colors ${
+                          isDone
+                            ? "border-emerald-200 bg-emerald-50/80 dark:border-emerald-700/40 dark:bg-emerald-900/20"
+                            : (isActive
+                              ? "border-gray-300 bg-white dark:border-gray-600 dark:bg-gray-900/70 shadow-sm"
+                              : "border-gray-200/80 bg-white/70 dark:border-gray-700 dark:bg-gray-900/40")
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className={`h-5 w-5 rounded-full border flex items-center justify-center text-[10px] font-semibold ${
+                            isDone
+                              ? "bg-emerald-500 border-emerald-500 text-white"
+                              : "border-gray-300 text-gray-500 dark:border-gray-600 dark:text-gray-300"
+                          }`}>
+                            {isDone ? <CheckCircle2 size={12} /> : (idx + 1)}
+                          </div>
+                          <span className={`text-xs font-semibold ${isDone ? "text-emerald-700 dark:text-emerald-300" : "text-gray-700 dark:text-gray-200"}`}>{step.label}</span>
+                        </div>
+                        <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">{step.hint}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+
+            {audioFileUrl && (
+              <section className="border border-gray-200/90 dark:border-gray-800/90 bg-white/80 dark:bg-gray-900/70 rounded-3xl p-3 animate-in slide-in-from-bottom-2 shadow-[0_10px_24px_rgba(15,23,42,0.06)] dark:shadow-[0_12px_28px_rgba(0,0,0,0.28)]">
+                <div className="px-1 pb-2 text-xs text-gray-500 dark:text-gray-400">录音回放</div>
+                <AudioPlayer src={audioFileUrl} />
+              </section>
+            )}
+
+            <section className="rounded-3xl border border-gray-200/90 dark:border-gray-800/90 overflow-hidden flex flex-col bg-white/85 dark:bg-gray-900/75 shadow-[0_16px_30px_rgba(15,23,42,0.07)] dark:shadow-[0_18px_34px_rgba(0,0,0,0.3)]">
+              <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">会议转写稿</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">支持直接编辑修订，内容将用于纪要生成。</div>
+                </div>
+                <div className="rounded-full bg-gray-100 dark:bg-gray-800 px-3 py-1 text-xs text-gray-500 dark:text-gray-400 tabular-nums">{charCount} 字</div>
+              </div>
+              <div className="relative flex-1 min-h-[280px]">
+                <textarea
+                  className="w-full h-full min-h-[280px] resize-none border-0 bg-transparent px-4 py-4 text-sm leading-7 text-gray-700 dark:text-gray-300 custom-scrollbar focus:ring-0 focus:bg-white/90 dark:focus:bg-gray-900/70 transition-colors"
+                  value={panelContent}
+                  onChange={(e) => setPanelContent(e.target.value)}
+                  placeholder={contentPlaceholder}
+                  disabled={isUploadingFile}
+                />
+                {!hasPanelContent && (
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center">
+                    <div>
+                      <div className="text-sm font-medium text-gray-500 dark:text-gray-400">{emptyTitle}</div>
+                      <div className="text-xs text-gray-400 mt-1">{emptySubtitle}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          </div>
+        ) : (
+          <div className="flex-1 p-4 md:p-5 flex flex-col gap-4 overflow-hidden">
+            <div className={`rounded-2xl border ${panelStyle.border} bg-gradient-to-br from-white to-gray-50/80 dark:from-gray-900 dark:to-gray-800/60 p-4`}>
+              <div className="flex items-start gap-3">
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${panelStyle.headerBg} ${panelStyle.headerText}`}>
+                  <ScanText size={16} />
+                </div>
+                <div className="flex-1">
+                  <div className="text-sm font-semibold text-gray-900 dark:text-white">{ocrGuideTitle}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{ocrGuideDesc}</div>
+                </div>
+                <div className="text-[11px] text-gray-400">图片/PDF</div>
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-gray-500 dark:text-gray-400">
+                {ocrStepItems.map((item, idx) => (
+                  <div key={item} className="rounded-full border border-gray-200 dark:border-gray-700 px-2.5 py-1 bg-white/70 dark:bg-gray-900/70 text-center">
+                    <span className="font-medium text-gray-700 dark:text-gray-200">{idx + 1}</span> {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className={`flex-1 rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden flex flex-col ${panelStyle.textareaBg}`}>
+              <div className="px-4 py-2.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                    {isOcrPreview ? "识别文本 · 预览" : contentLabel}
+                  </div>
                   <div className="flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-gray-900/50 p-0.5 text-[11px] text-gray-500">
                     <button
                       type="button"
@@ -670,46 +875,46 @@ const ModePanel = ({
                       预览
                     </button>
                   </div>
+                </div>
+                <div className="text-xs text-gray-400">{charCount} 字</div>
+              </div>
+              <div className="relative flex-1">
+                {isOcrPreview ? (
+                  <div className="w-full h-full min-h-[220px] overflow-y-auto px-4 py-3 text-sm leading-relaxed text-gray-700 dark:text-gray-300 custom-scrollbar">
+                    {(panelContent || "").trim() ? (
+                      <MarkdownRenderer content={panelContent} />
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-center px-6">
+                        <div>
+                          <div className="text-sm font-medium text-gray-500 dark:text-gray-400">{emptyTitle}</div>
+                          <div className="text-xs text-gray-400 mt-1">{emptySubtitle}</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <textarea
+                      className="w-full h-full min-h-[220px] resize-none border-0 bg-transparent px-4 py-3 text-sm leading-relaxed text-gray-700 dark:text-gray-300 custom-scrollbar focus:ring-0 focus:bg-white/80 dark:focus:bg-gray-900/60 transition-colors"
+                      value={panelContent}
+                      onChange={(e) => setPanelContent(e.target.value)}
+                      placeholder={contentPlaceholder}
+                      disabled={isUploadingFile}
+                    />
+                    {!(panelContent || "").trim() && (
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center">
+                        <div>
+                          <div className="text-sm font-medium text-gray-500 dark:text-gray-400">{emptyTitle}</div>
+                          <div className="text-xs text-gray-400 mt-1">{emptySubtitle}</div>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
-              <div className="text-xs text-gray-400">{charCount} 字</div>
-            </div>
-            <div className="relative flex-1">
-              {isOcrPreview ? (
-                <div className="w-full h-full min-h-[220px] overflow-y-auto px-4 py-3 text-sm leading-relaxed text-gray-700 dark:text-gray-300 custom-scrollbar">
-                  {(panelContent || "").trim() ? (
-                    <MarkdownRenderer content={panelContent} />
-                  ) : (
-                    <div className="h-full flex items-center justify-center text-center px-6">
-                      <div>
-                        <div className="text-sm font-medium text-gray-500 dark:text-gray-400">{emptyTitle}</div>
-                        <div className="text-xs text-gray-400 mt-1">{emptySubtitle}</div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <>
-                  <textarea
-                    className="w-full h-full min-h-[220px] resize-none border-0 bg-transparent px-4 py-3 text-sm leading-relaxed text-gray-700 dark:text-gray-300 custom-scrollbar focus:ring-0 focus:bg-white/80 dark:focus:bg-gray-900/60 transition-colors"
-                    value={panelContent}
-                    onChange={(e) => setPanelContent(e.target.value)}
-                    placeholder={contentPlaceholder}
-                    disabled={isUploadingFile}
-                  />
-                  {!(panelContent || "").trim() && (
-                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6 text-center">
-                      <div>
-                        <div className="text-sm font-medium text-gray-500 dark:text-gray-400">{emptyTitle}</div>
-                        <div className="text-xs text-gray-400 mt-1">{emptySubtitle}</div>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
             </div>
           </div>
-        </div>
+        )
       ) : (
         <div className="flex-1 p-0 relative min-h-[200px] md:min-h-0">
           <textarea
@@ -721,12 +926,12 @@ const ModePanel = ({
           />
         </div>
       )}
-      <div className="px-4 py-3 bg-gray-50/80 dark:bg-gray-800/80 border-t border-gray-100 dark:border-gray-800 flex flex-wrap items-center justify-between gap-2 backdrop-blur-sm">
+      <div className={`px-4 py-3 border-t border-gray-100 dark:border-gray-800 flex flex-wrap items-center justify-between gap-2 backdrop-blur-sm ${isMeetingMode ? "bg-white/95 dark:bg-gray-900/95" : "bg-gray-50/80 dark:bg-gray-800/80"}`}>
         <div className="flex items-center gap-2">
-          <button onClick={handleManualSave} disabled={isProcessing || isUploadingFile || !panelContent.trim() || isSavingContext} className="flex items-center gap-2 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-600 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
+          <button onClick={handleManualSave} disabled={isProcessing || isUploadingFile || !panelContent.trim() || isSavingContext} className={secondaryActionClass}>
             {isSavingContext ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} <span className="hidden sm:inline">保存</span>
           </button>
-          <button onClick={handleExportWord} disabled={isProcessing || isUploadingFile || !panelContent.trim()} className="flex items-center gap-2 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-600 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm">
+          <button onClick={handleExportWord} disabled={isProcessing || isUploadingFile || !panelContent.trim()} className={secondaryActionClass}>
             <Download size={16} /> <span className="hidden sm:inline">导出</span>
           </button>
         </div>
@@ -735,24 +940,23 @@ const ModePanel = ({
             <button
               onClick={onOcrStore}
               disabled={isOcrSaving || isUploadingFile || !panelContent.trim()}
-              className="flex items-center gap-2 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-600 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              className={secondaryActionClass}
             >
               {isOcrSaving ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />} 数据库录入
             </button>
             <button
               onClick={handleGenerateSummary}
               disabled={isProcessing || isUploadingFile || !panelContent.trim()}
-              className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow ${panelStyle.btnBg}`}
+              className={primaryActionClass}
             >
               {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} 智能分析
             </button>
           </div>
         ) : (
-          <button onClick={handleGenerateSummary} disabled={isProcessing || isUploadingFile || !panelContent.trim()} className={`flex items-center gap-2 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow ${panelStyle.btnBg}`}>
+          <button onClick={handleGenerateSummary} disabled={isProcessing || isUploadingFile || !panelContent.trim()} className={primaryActionClass}>
             {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} {isMeetingMode ? "生成纪要" : (isAuditMode ? "提交审单" : "智能分析")}
           </button>
         )}
-
       </div>
     </div>
   );

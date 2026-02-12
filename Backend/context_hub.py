@@ -100,40 +100,60 @@ class ContextHub(BaseModel):
             return "search_global"
         return "none"
 
+    @staticmethod
+    def _slice_with_budget(text: str, budget: int) -> str:
+        if not text or budget <= 0:
+            return ""
+        if len(text) <= budget:
+            return text
+        trimmed = text[:budget]
+        last_break = trimmed.rfind("\n")
+        if last_break > max(0, budget - 200):
+            return trimmed[:last_break]
+        return trimmed
+
+    @staticmethod
+    def _estimate_budget(max_len: int, weights: Dict[str, float], key: str) -> int:
+        weight = weights.get(key, 0.0)
+        return max(0, int(max_len * weight))
+
     def get_combined_context(self, max_len=3000) -> str:
         """
-        根据策略智能组装上下文
+        根据策略智能组装上下文，动态预算：摘要优先 + 当前文档 > 历史 > 其他
         """
-        parts = []
+        parts: List[str] = []
 
-        # ✅ 记忆区块优先（短且稳定）
+        # 记忆区块（短且稳定）
+        memory_block = ""
         if self.memory_tokens:
-            parts.append("【长期记忆要点】\n" + "\n".join(self.memory_tokens[:12]))
+            memory_block += "【长期记忆要点】\n" + "\n".join(self.memory_tokens[:12])
         if self.long_term_memory:
-            parts.append("【长期记忆召回】\n" + "\n---\n".join(self.long_term_memory[:4]))
+            if memory_block:
+                memory_block += "\n\n"
+            memory_block += "【长期记忆召回】\n" + "\n---\n".join(self.long_term_memory[:4])
         if self.compressed_facts:
-            parts.append("【压缩事实】\n" + "\n".join(self.compressed_facts[:12]))
+            if memory_block:
+                memory_block += "\n\n"
+            memory_block += "【压缩事实】\n" + "\n".join(self.compressed_facts[:12])
 
         # 自动策略：根据当前数据自动选择
         strategy = self.context_strategy
         if strategy == "auto":
             strategy = self._resolve_auto_strategy()
 
-        # 策略 1: 专注当前文档 (或混合模式)
+        active_block = ""
         if strategy in ["focus_active", "hybrid"] and self.active_context_content:
-            content = self.active_context_content[:2000]  # 给当前文档更多配额
-            parts.append(f"【当前屏幕文档内容】\n{content}\n(用户正在阅读此文档)")
+            active_block = f"【当前屏幕文档内容】\n{self.active_context_content}\n(用户正在阅读此文档)"
 
-        # 策略 2: 全局检索 (或混合模式)
+        knowledge_block = ""
         if strategy in ["search_global", "hybrid"] and self.retrieved_knowledge:
-            knowledge_str = "\n".join(self.retrieved_knowledge)[:1500]
-            parts.append(f"【知识库参考资料】\n{knowledge_str}")
+            knowledge_block = "【知识库参考资料】\n" + "\n".join(self.retrieved_knowledge)
 
-        # 历史摘要总是作为背景
+        summary_block = ""
         if self.history_summary:
-            parts.append(f"【历史对话摘要】\n{self.history_summary}")
+            summary_block = f"【历史对话摘要】\n{self.history_summary}"
 
-        # Working Memory 只放关键字段，避免噪声
+        working_block = ""
         if self.working_memory:
             keys = [k for k in ["sql_executed", "db_result"] if k in self.working_memory]
             if keys:
@@ -145,7 +165,42 @@ class ContextHub(BaseModel):
                     s = str(v)
                     wm_lines.append(f"- {k}: {s[:800]}")
                 if wm_lines:
-                    parts.append("【本轮工作记忆】\n" + "\n".join(wm_lines))
+                    working_block = "【本轮工作记忆】\n" + "\n".join(wm_lines)
+
+        weights = {
+            "summary": 0.30,
+            "active": 0.35,
+            "knowledge": 0.18,
+            "memory": 0.12,
+            "working": 0.05
+        }
+
+        section_order = [
+            ("summary", summary_block),
+            ("active", active_block),
+            ("knowledge", knowledge_block),
+            ("memory", memory_block),
+            ("working", working_block),
+        ]
+
+        remaining = max_len
+        carry = 0
+        for key, block in section_order:
+            if not block:
+                carry += self._estimate_budget(max_len, weights, key)
+                continue
+            base_budget = self._estimate_budget(max_len, weights, key) + carry
+            carry = 0
+            budget = min(remaining, base_budget) if remaining > 0 else 0
+            trimmed = self._slice_with_budget(block, budget)
+            if not trimmed:
+                continue
+            parts.append(trimmed)
+            remaining -= len(trimmed)
+            if len(block) < base_budget:
+                carry += base_budget - len(block)
+            if remaining <= 0:
+                break
 
         full_context = "\n\n".join(parts)
         return full_context[:max_len]

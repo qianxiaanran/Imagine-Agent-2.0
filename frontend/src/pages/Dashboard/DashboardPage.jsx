@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy, useMemo, startTransition } from 'react';
+﻿import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy, useMemo } from 'react';
 import {
   Bot, Zap, FileText, Layout, PanelLeftOpen, ChevronDown, Check, User,
   BookOpen, X, Mic, StopCircle, ArrowRight, Plus,
@@ -12,18 +12,25 @@ import {
 
 import Sidebar from './Sidebar';
 import MobileSidebar from './MobileSidebar';
+import Suggestions from './Suggestions';
 // API Imports
 import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/apiClient';
 import userApi from '../../api/user';
 import historyApi from '../../api/history';
 import { convertWebMToWav } from '../../utils/audio';
+import {
+  APP_SETTINGS_UPDATED_EVENT,
+  DEFAULT_APP_SETTINGS,
+  loadAppSettings,
+  normalizeAppSettings,
+  buildChatPersonalizationPayload
+} from '../../utils/appSettings';
 
-const AppearanceModal = lazy(() => import('../../components/AppearanceModal'));
+const SettingsModal = lazy(() => import('../../components/SettingsModal'));
 const VoiceRecorder = lazy(() => import('../../components/VoiceRecorder'));
 const ShareModal = lazy(() => import('./ShareModal'));
 const OcrIngestModal = lazy(() => import('./OcrIngestModal'));
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
-const Suggestions = lazy(() => import('./Suggestions'));
 const SourcePanel = lazy(() => import('./SourcePanel'));
 const ModePanel = lazy(() => import('./ModePanel'));
 
@@ -40,8 +47,18 @@ const AUDIT_POLL_INTERVAL = 1500;
 const INSTANT_TRANSCRIBE_MAX_SECONDS = 75;
 const HISTORY_FIRST_PAINT_COUNT = 6;
 // const STREAM_UI_THROTTLE_MS = 24; // REMOVED: No longer using throttle
+const STREAM_UI_FLUSH_MS = 12;
 const MAX_CONTEXT_CHARS = 2000;
-const USER_MARKDOWN_HINT_RE = /```|`[^`]+`|\[[^\]]+\]\([^)]+\)|(^|\n)\s*[-*+]\s|(^|\n)\s*\d+\.\s|(^|\n)\s*>|(^|\n)\s*#/;
+const OCR_SUMMARY_STREAM_TIMEOUT_MS = 180000;
+const OCR_SUMMARY_IDLE_TIMEOUT_MS = 90000;
+const OCR_SUMMARY_RETRY_LIMIT = 1;
+const OCR_SUMMARY_RETRY_DELAY_MS = 800;
+const OCR_SUMMARY_DEFAULT_PROMPT = "请总结文档内容，给出结构化要点和结论。";
+const OCR_SUMMARY_BACKEND_OPTIONS = [
+  { value: "local", label: "Qwen 2.5-coder" },
+  { value: "cloud", label: "DeepSeek（云端）" },
+];
+const USER_MARKDOWN_HINT_RE = /```|`[^`]+`|\[[^\]]+\]\([^)]+\)|(^|\n)\s*[-*+]\s|(^|\n)\s*\d+\.\s|(^|\n)\s*>|(^|\n)\s*#|(^|\n)\s*\|.+\|\s*(\n|$)|(^|\n)\s*[-:\s|]{3,}\|[-:\s|]*/;
 const DETAIL_LEVEL_OPTIONS = ["精简", "标准", "详细", "非常详细"];
 const REPORT_STYLE_OPTIONS = ["咨询风", "管理层简报", "数据驱动", "叙事型", "执行导向", "学术/研究型"];
 const PPT_STRUCTURE_OPTIONS = ["问题-分析-方案", "现状-挑战-突破", "数据驱动", "项目汇报", "战略规划", "销售路演"];
@@ -93,6 +110,13 @@ const ONBOARDING_MESSAGES = [
   "顶部左侧的模式下拉可切换到报告/PPT/邮件写作、会议纪要、OCR、审单等场景。",
   "左侧栏（手机点左上角菜单）有新建/搜索聊天和历史会话，知识库入口也在这里；输入框左侧“＋”用于上传文件并启用引用文档/数据库/联网。"
 ];
+const MODEL_OPTIONS = [
+  { id: 0, name: "通用助手", icon: Bot },
+  { id: 1, name: "会议纪要", icon: Mic },
+  { id: 2, name: "OCR 识别", icon: ScanText },
+  { id: 3, name: "写作助手", icon: PencilLine },
+  { id: 4, name: "智能审单", icon: ClipboardCheck }
+];
 
 const isLikelyMarkdown = (text = '') => USER_MARKDOWN_HINT_RE.test(text);
 
@@ -115,24 +139,14 @@ const buildUserMessageContent = (attachments, text) => {
 // 🧜‍♂️ Mermaid 图表组件
 // --------------------------------------------------------------------------
 const PlainTextRenderer = ({ content, className = 'text-gray-800 dark:text-gray-200' }) => (
-    <div className={`whitespace-pre-wrap text-[15px] leading-relaxed ${className}`}>
+    <div className={`whitespace-pre-wrap text-[16px] leading-relaxed ${className}`}>
         {content || ''}
     </div>
 );
 
-const SuggestionsSkeleton = () => (
-    <div className="w-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-3 px-4">
-        {Array.from({ length: 4 }).map((_, idx) => (
-            <div
-                key={`skeleton-${idx}`}
-                className="h-[88px] rounded-2xl bg-gray-50 dark:bg-gray-800/40 border border-gray-100 dark:border-gray-700/50 animate-pulse"
-            />
-        ))}
-    </div>
-);
-
 const StructuredContent = ({ content, role, enableMarkdown = true, streaming = false }) => {
-    if (!enableMarkdown) {
+    // 对 user 侧保留性能优化；assistant 即使被“降级”也允许通过特征检测启用 Markdown。
+    if (!enableMarkdown && role !== 'assistant') {
         return <PlainTextRenderer content={content} />;
     }
 
@@ -321,7 +335,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [expandedSources, setExpandedSources] = useState({});
 
   const [historyRenderTarget, setHistoryRenderTarget] = useState(INITIAL_MESSAGE_COUNT);
-  const [isSuggestionsReady, setIsSuggestionsReady] = useState(false);
 
   // ✨ [新增] 模型后端状态 (local | cloud)
   const [llmBackend, setLlmBackend] = useState('local');
@@ -345,6 +358,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     error: null,
     error_message: null
   });
+  const [isAuditErpActionLoading, setIsAuditErpActionLoading] = useState(false);
   // ✨ 新增：音频文件播放 URL 状态
   const [audioFileUrl, setAudioFileUrl] = useState(null);
   // ✨ 新增：保存当前音频在服务端的存储路径
@@ -361,6 +375,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [isSavingContext, setIsSavingContext] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [appSettings, setAppSettings] = useState(() => loadAppSettings());
+  const [settingsModalState, setSettingsModalState] = useState({ isOpen: false, category: 'general' });
 
   const [userProfile, setUserProfile] = useState({ id: 'anonymous', name: 'User', avatar: '' });
   const [currentSessionId, setCurrentSessionId] = useState(null);
@@ -370,7 +386,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isMobileModelDropdownOpen, setIsMobileModelDropdownOpen] = useState(false);
-  const [showAppearanceModal, setShowAppearanceModal] = useState(false);
   const [shareModal, setShareModal] = useState({ isOpen: false, sessionId: null, title: "" });
   const [ocrIngestModal, setOcrIngestModal] = useState({ isOpen: false, content: "" });
   const [ocrEngine, setOcrEngine] = useState("pp-ocrv5");
@@ -396,12 +411,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [ocrSummaryInput, setOcrSummaryInput] = useState('');
   const [isOcrSummaryLoading, setIsOcrSummaryLoading] = useState(false);
   const [ocrSummaryFileId, setOcrSummaryFileId] = useState(null);
+  const [ocrSummaryBackend, setOcrSummaryBackend] = useState('local');
+  const [ocrSummaryFirstDone, setOcrSummaryFirstDone] = useState(false);
   const ocrSummaryAbortRef = useRef(null);
   const ocrSummaryContextRef = useRef('');
   const ocrSummaryBufferRef = useRef([]);
   const ocrSummaryDisplayRef = useRef('');
   const ocrSummaryRafRef = useRef(null);
   const ocrSummaryScrollRef = useRef(null);
+  const ocrSummaryLastChunkRef = useRef(0);
+  const ocrSummaryIdleTimerRef = useRef(null);
+  const ocrSummaryTimeoutRef = useRef(null);
+  const ocrSummaryLastFlushRef = useRef(0);
+  const ocrSummaryRequestLockRef = useRef(false);
 
   // ✨ 交互状态
   const [copiedIdx, setCopiedIdx] = useState(null);
@@ -418,6 +440,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState('chat');
   const fileInputRef = useRef(null);
   const messageInputRef = useRef(null);
   const auditPollRef = useRef(null);
@@ -426,11 +449,15 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   // ✨✨✨ SMOOTH STREAMING REFS ✨✨✨
   // streamBufferRef: 存储网络接收到但尚未显示的字符队列
-  const streamBufferRef = useRef([]);
+  const streamBufferRef = useRef('');
   // streamDisplayRef: 存储当前屏幕上已显示的完整文本（用于闭包中获取最新状态）
   const streamDisplayRef = useRef("");
   // rafIdRef: 存储动画帧ID
   const rafIdRef = useRef(null);
+  const streamLastFlushRef = useRef(0);
+  const trackedBlobUrlsRef = useRef(new Set());
+  const sessionClickHandlerRef = useRef(null);
+  const newChatHandlerRef = useRef(null);
 
 
   const dropdownRef = useRef(null);
@@ -442,6 +469,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const chatEndRef = useRef(null);
   const chatScrollRef = useRef(null);
   const abortControllerRef = useRef(null); // ✨ 控制打断的 Ref
+  const keyboardLockPrevRef = useRef({ body: null, html: null });
+  const virtualKeyboardEnabledRef = useRef(false);
 
   const historyExpandTaskRef = useRef(null);
   const autoProcessFilesRef = useRef(null);
@@ -455,8 +484,34 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const isKeyboardVisible = isMobileViewport && keyboardOffset > 80;
   const isSearchMode = currentMode === 'search'; // ✅ 搜索模式判断
 
+  const getVirtualKeyboardHeight = () => {
+    if (typeof navigator === 'undefined') return 0;
+    const vk = navigator.virtualKeyboard;
+    if (!vk || !vk.overlaysContent) return 0;
+    const rect = vk.boundingRect;
+    return Math.max(0, Math.round(rect?.height || 0));
+  };
+
   const showContentPanel = isMeetingMode || isOCRMode || isAuditMode || (panelContent && panelContent.length > 0);
+  const isAuditSinglePane = isAuditMode && showContentPanel;
+  const showMobileWorkspaceTabs = isMobileViewport && showContentPanel && !isAuditSinglePane;
+  const shouldRenderPanel = showContentPanel && (!showMobileWorkspaceTabs || mobileWorkspaceTab === 'panel');
+  const shouldRenderChat = !isAuditSinglePane && (!showMobileWorkspaceTabs || mobileWorkspaceTab === 'chat');
+  const mobilePanelTabLabel = isMeetingMode ? '工作台' : (isOCRMode ? '识别面板' : '上下文');
   const activeOcrFile = useMemo(() => ocrFiles.find((item) => item.id === activeOcrId) || null, [ocrFiles, activeOcrId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const syncSettings = (event) => {
+      if (event?.detail) {
+        setAppSettings(normalizeAppSettings(event.detail));
+        return;
+      }
+      setAppSettings(loadAppSettings());
+    };
+    window.addEventListener(APP_SETTINGS_UPDATED_EVENT, syncSettings);
+    return () => window.removeEventListener(APP_SETTINGS_UPDATED_EVENT, syncSettings);
+  }, []);
 
   useEffect(() => {
       if (!ocrPreviewRef.current) return;
@@ -629,19 +684,79 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       window.addEventListener('resize', handleResize);
       return () => window.removeEventListener('resize', handleResize);
   }, [activeOcrFile?.id, ocrPreviewSize.width, ocrPreviewSize.height]);
-  const isAuditSinglePane = isAuditMode && showContentPanel;
-  const shouldHideInputHint = isMobileViewport && (isKeyboardVisible || isInputFocused);
+  // Keep desktop input bar height stable: do not hide/show hint on focus.
+  const shouldHideInputHint = isMobileViewport;
+  const shouldLockSuggestionsScroll =
+    !isMobileViewport &&
+    chatHistory.length === 0 &&
+    !showContentPanel &&
+    !panelContent &&
+    !isUploadingFile &&
+    pendingFiles.length === 0;
   const inputBarStyle = {
-    paddingBottom: isKeyboardVisible ? '0px' : 'calc(env(safe-area-inset-bottom) + 16px)',
-    bottom: isKeyboardVisible ? keyboardOffset : 0,
+    paddingBottom: isMobileViewport
+      ? (isKeyboardVisible ? '0px' : 'env(safe-area-inset-bottom)')
+      : 'calc(env(safe-area-inset-bottom) + 16px)',
+    bottom: (isMobileViewport && isKeyboardVisible) ? `${keyboardOffset}px` : '0px',
+  };
+  const chatContentStyle = {
+    paddingTop: isMobileViewport ? '12px' : '16px',
+    paddingBottom: isMobileViewport
+      ? (isKeyboardVisible ? '112px' : '152px')
+      : '40px',
   };
   const normalizedVisibleCount = Math.min(visibleMessageCount, chatHistory.length);
   const visibleMessages = useMemo(() => {
     if (normalizedVisibleCount === 0) return [];
     return chatHistory.slice(-normalizedVisibleCount);
   }, [chatHistory, normalizedVisibleCount]);
+  const shouldPreloadMarkdown = useMemo(() => {
+    if (!chatHistory.length) return false;
+    return chatHistory
+      .slice(-MARKDOWN_MESSAGE_COUNT)
+      .some((msg) => msg?.role === 'assistant' && isLikelyMarkdown(msg?.content || ''));
+  }, [chatHistory]);
   const hasMoreMessages = chatHistory.length > normalizedVisibleCount;
   const showChatSkeleton = (isProfileLoading || isSessionsLoading) && chatHistory.length === 0;
+
+  useEffect(() => {
+    if (typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') return;
+    const nextBlobUrls = new Set();
+
+    pendingFiles.forEach((file) => {
+      const preview = file?.previewUrl;
+      if (typeof preview === 'string' && preview.startsWith('blob:')) {
+        nextBlobUrls.add(preview);
+      }
+    });
+
+    ocrFiles.forEach((file) => {
+      const preview = file?.previewUrl;
+      if (typeof preview === 'string' && preview.startsWith('blob:')) {
+        nextBlobUrls.add(preview);
+      }
+    });
+
+    if (typeof audioFileUrl === 'string' && audioFileUrl.startsWith('blob:')) {
+      nextBlobUrls.add(audioFileUrl);
+    }
+
+    trackedBlobUrlsRef.current.forEach((blobUrl) => {
+      if (!nextBlobUrls.has(blobUrl)) {
+        URL.revokeObjectURL(blobUrl);
+      }
+    });
+
+    trackedBlobUrlsRef.current = nextBlobUrls;
+  }, [pendingFiles, ocrFiles, audioFileUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (typeof URL === 'undefined' || typeof URL.revokeObjectURL !== 'function') return;
+      trackedBlobUrlsRef.current.forEach((blobUrl) => URL.revokeObjectURL(blobUrl));
+      trackedBlobUrlsRef.current.clear();
+    };
+  }, []);
 
   const resizeMessageInput = (element) => {
     if (!element) return;
@@ -665,23 +780,36 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       scrollToBottom(behavior);
   };
 
+  const flushStreamingUi = (force = false) => {
+      const now = performance.now ? performance.now() : Date.now();
+      if (!force && now - streamLastFlushRef.current < STREAM_UI_FLUSH_MS) return;
+      streamLastFlushRef.current = now;
+      setStreamingAssistantText(streamDisplayRef.current);
+      scrollToBottom("auto");
+  };
+
   // ✨✨✨ SMOOTH ANIMATION LOOP ✨✨✨
   // 启动平滑动画循环
   const startSmoothStream = () => {
     if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
+    streamLastFlushRef.current = 0;
 
     const animate = () => {
         if (streamBufferRef.current.length > 0) {
-            // 动态计算每次提取的字符数（自适应速度）
-            // 如果堆积了很多字符（网络太快），就多取一点，避免显示严重滞后
             const queueLength = streamBufferRef.current.length;
-            const charsToTake = queueLength > 50 ? 5 : (queueLength > 20 ? 2 : 1);
+            const charsToTake = queueLength > 1800 ? 64
+              : queueLength > 1000 ? 48
+              : queueLength > 500 ? 32
+              : queueLength > 220 ? 20
+              : queueLength > 90 ? 12
+              : queueLength > 24 ? 6
+              : 3;
 
-            const chunk = streamBufferRef.current.splice(0, charsToTake).join('');
+            const chunk = streamBufferRef.current.slice(0, charsToTake);
+            streamBufferRef.current = streamBufferRef.current.slice(charsToTake);
             streamDisplayRef.current += chunk;
 
-            setStreamingAssistantText(streamDisplayRef.current);
-            scrollToBottom("auto");
+            flushStreamingUi(streamBufferRef.current.length === 0);
         }
 
         rafIdRef.current = requestAnimationFrame(animate);
@@ -698,11 +826,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
       // 将缓冲区剩余所有内容一次性倒出
       if (streamBufferRef.current.length > 0) {
-          const remaining = streamBufferRef.current.join('');
-          streamBufferRef.current = [];
+          const remaining = streamBufferRef.current;
+          streamBufferRef.current = '';
           streamDisplayRef.current += remaining;
-          setStreamingAssistantText(streamDisplayRef.current);
       }
+      flushStreamingUi(true);
   };
 
 
@@ -762,6 +890,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   }, []);
 
   useEffect(() => {
+    if (!shouldPreloadMarkdown) return;
     let cancelled = false;
     const preload = () => {
       if (!cancelled) {
@@ -775,12 +904,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         window.cancelIdleCallback(id);
       };
     }
-    const id = setTimeout(preload, 400);
+    const id = setTimeout(preload, 200);
     return () => {
       cancelled = true;
       clearTimeout(id);
     };
-  }, []);
+  }, [shouldPreloadMarkdown]);
 
   useEffect(() => {
     let isActive = true;
@@ -839,6 +968,23 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       cancelProfile();
     };
   }, []);
+
+  useEffect(() => {
+    if (isProfileLoading || isSessionsLoading) return;
+    const uid = userProfile?.id;
+    if (!uid || uid === 'anonymous') return;
+    const storageKey = `${ONBOARDING_STORAGE_PREFIX}${uid}`;
+    try {
+      if (localStorage.getItem(storageKey)) {
+        setShowOnboarding(false);
+        return;
+      }
+    } catch (e) {
+      return;
+    }
+    if (sessionList.length > 0) return;
+    setShowOnboarding(true);
+  }, [isProfileLoading, isSessionsLoading, userProfile?.id, sessionList.length]);
 
   useEffect(() => {
     if (isProfileLoading || isSessionsLoading) return;
@@ -968,9 +1114,41 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   }, []);
 
   useEffect(() => {
+    if (!isMobileViewport || typeof navigator === 'undefined') return;
+    const vk = navigator.virtualKeyboard;
+    if (!vk) {
+      virtualKeyboardEnabledRef.current = false;
+      return;
+    }
+
+    const syncFromVirtualKeyboard = () => {
+      const height = getVirtualKeyboardHeight();
+      if (height >= 0) setKeyboardOffset(height);
+    };
+
+    try {
+      vk.overlaysContent = true;
+      virtualKeyboardEnabledRef.current = !!vk.overlaysContent;
+    } catch (e) {
+      virtualKeyboardEnabledRef.current = false;
+    }
+
+    syncFromVirtualKeyboard();
+    vk.addEventListener?.('geometrychange', syncFromVirtualKeyboard);
+    return () => {
+      vk.removeEventListener?.('geometrychange', syncFromVirtualKeyboard);
+    };
+  }, [isMobileViewport]);
+
+  useEffect(() => {
     const viewport = window.visualViewport;
     if (!viewport) return;
     const handleViewportChange = () => {
+      const virtualHeight = getVirtualKeyboardHeight();
+      if (virtualKeyboardEnabledRef.current && virtualHeight > 0) {
+        setKeyboardOffset(virtualHeight);
+        return;
+      }
       const offset = Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
       setKeyboardOffset(offset);
     };
@@ -982,6 +1160,53 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       viewport.removeEventListener('scroll', handleViewportChange);
     };
   }, []);
+
+  useEffect(() => {
+    if (!isMobileViewport) return;
+    const lockRef = keyboardLockPrevRef.current;
+    if (isKeyboardVisible) {
+      if (lockRef.body === null) lockRef.body = document.body.style.overflow || '';
+      if (lockRef.html === null) lockRef.html = document.documentElement.style.overflow || '';
+      document.body.style.overflow = 'hidden';
+      document.documentElement.style.overflow = 'hidden';
+      return;
+    }
+    if (lockRef.body !== null) {
+      document.body.style.overflow = lockRef.body;
+      lockRef.body = null;
+    }
+    if (lockRef.html !== null) {
+      document.documentElement.style.overflow = lockRef.html;
+      lockRef.html = null;
+    }
+  }, [isMobileViewport, isKeyboardVisible]);
+
+  useEffect(() => {
+    return () => {
+      const lockRef = keyboardLockPrevRef.current;
+      if (lockRef.body !== null) {
+        document.body.style.overflow = lockRef.body;
+        lockRef.body = null;
+      }
+      if (lockRef.html !== null) {
+        document.documentElement.style.overflow = lockRef.html;
+        lockRef.html = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isMobileViewport) return;
+    if (!showContentPanel) {
+      setMobileWorkspaceTab('chat');
+      return;
+    }
+    if (isMeetingMode || isOCRMode || isAuditMode) {
+      setMobileWorkspaceTab('panel');
+      return;
+    }
+    setMobileWorkspaceTab('chat');
+  }, [isMobileViewport, showContentPanel, isMeetingMode, isOCRMode, isAuditMode]);
 
   // 监听语音播放结束，重置图标状态
   useEffect(() => {
@@ -1142,14 +1367,92 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
   };
 
+  const extractOcrLinesFromData = (data) => {
+      if (!data) return [];
+      return data.lines
+          || data?.data?.lines
+          || data?.ocrData?.lines
+          || data?.ocrData?.data?.lines
+          || [];
+  };
+
+  const extractOcrTextFromData = (data) => {
+      if (!data) return '';
+      return data.text
+          || data?.data?.text
+          || data?.result?.text
+          || '';
+  };
+
+  const extractOcrPagesFromData = (data) => {
+      if (!data) return [];
+      return data.pages
+          || data?.data?.pages
+          || data?.ocrData?.pages
+          || data?.ocrData?.data?.pages
+          || [];
+  };
+
   const getOcrLines = (file) => {
       if (!file) return [];
       if (Array.isArray(file.lines) && file.lines.length) return file.lines;
-      return (file.ocrText || '')
+      const dataLines = extractOcrLinesFromData(file.ocrData);
+      if (Array.isArray(dataLines) && dataLines.length) return dataLines;
+      const text = file.ocrText || extractOcrTextFromData(file.ocrData);
+      return (text || '')
           .split(/\r?\n/)
           .filter((line) => line.trim())
-          .map((text) => ({ text }));
+          .map((textLine) => ({ text: textLine }));
   };
+
+  useEffect(() => {
+      if (!activeOcrFile) return;
+      const updates = {};
+
+      const hasLines = Array.isArray(activeOcrFile.lines) && activeOcrFile.lines.length > 0;
+      const dataLines = extractOcrLinesFromData(activeOcrFile.ocrData);
+      if (!hasLines && Array.isArray(dataLines) && dataLines.length) {
+          updates.lines = dataLines;
+      }
+
+      const hasText = Boolean((activeOcrFile.ocrText || '').trim());
+      const dataText = extractOcrTextFromData(activeOcrFile.ocrData);
+      if (!hasText && dataText) {
+          updates.ocrText = dataText;
+      }
+
+      const hasPages = Array.isArray(activeOcrFile.pages) && activeOcrFile.pages.length > 0;
+      if (!hasPages) {
+          let nextPages = extractOcrPagesFromData(activeOcrFile.ocrData);
+          if (!Array.isArray(nextPages) || nextPages.length === 0) {
+              const lines = updates.lines || activeOcrFile.lines || dataLines || [];
+              const boxes = (lines || []).flatMap((line) => Array.isArray(line.box) ? line.box : []);
+              const xs = boxes.map((p) => p[0]).filter((v) => Number.isFinite(v));
+              const ys = boxes.map((p) => p[1]).filter((v) => Number.isFinite(v));
+              if (xs.length && ys.length) {
+                  nextPages = [{
+                      page: 0,
+                      width: Math.ceil(Math.max(...xs)),
+                      height: Math.ceil(Math.max(...ys))
+                  }];
+              } else {
+                  const textLineCount = (lines || []).length || (dataText ? dataText.split(/\r?\n/).filter(Boolean).length : 0);
+                  nextPages = [{
+                      page: 0,
+                      width: 1000,
+                      height: Math.max(600, textLineCount * 22 + 40)
+                  }];
+              }
+          }
+          if (Array.isArray(nextPages) && nextPages.length) {
+              updates.pages = nextPages;
+          }
+      }
+
+      if (Object.keys(updates).length) {
+          updateOcrEntry(activeOcrFile.id, updates);
+      }
+  }, [activeOcrFile?.id, activeOcrFile?.ocrData]);
 
   const updateOcrLine = (fileId, lineIndex, newText) => {
       setOcrFiles((prev) => prev.map((item) => {
@@ -1169,6 +1472,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const riskLabel = riskMap[riskRaw] || '低风险';
       const passValue = typeof result.pass === 'boolean' ? result.pass : (riskRaw ? riskRaw === 'low' : true);
       const summary = result.summary ? String(result.summary) : '';
+      const auditScore = Number.isFinite(Number(result.audit_score)) ? Number(result.audit_score) : null;
+      const erpTrace = result.erp_trace_id ? String(result.erp_trace_id) : '';
       const findings = Array.isArray(result.findings) ? result.findings : [];
       const topFindings = findings.slice(0, 5).map((item, idx) => {
           const message = item?.message ? String(item.message) : '风险点';
@@ -1181,7 +1486,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           `风险等级：${riskLabel}`,
           `结论：${passValue ? '通过' : '需复核'}`,
       ];
+      if (auditScore !== null) lines.push(`审单评分：${auditScore}`);
       if (summary) lines.push(`摘要：${summary}`);
+      if (erpTrace) lines.push(`ERP Trace：${erpTrace}`);
       if (topFindings.length) {
           lines.push('问题：');
           lines.push(...topFindings);
@@ -1248,6 +1555,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
       setAuditFile(null);
       setAuditNotice('');
+      setIsAuditErpActionLoading(false);
       auditHistorySavedRef.current = null;
   };
 
@@ -1340,6 +1648,50 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (e?.target) e.target.value = '';
   };
 
+  const handleAuditErpAction = async (action, comment = '') => {
+      if (!auditState?.jobId || auditState?.status !== 'done' || isAuditErpActionLoading) return;
+      const allowed = ['approved', 'rejected', 'need_more'];
+      if (!allowed.includes(action)) {
+          showAuditNotice('ERP 回写动作不合法');
+          return;
+      }
+      setIsAuditErpActionLoading(true);
+      try {
+          const token = localStorage.getItem(AUTH_TOKEN_KEY);
+          const headers = {
+              'Content-Type': 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {})
+          };
+          const res = await fetch(`${API_BASE_URL}/api/audit/${auditState.jobId}/erp-action`, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                  action,
+                  operator_id: userProfile?.id || 'anonymous',
+                  comment: comment || ''
+              })
+          });
+          const data = await res.json();
+          if (!res.ok || !data?.success) {
+              throw new Error(data?.detail || data?.error || 'ERP 回写失败');
+          }
+          setAuditState((prev) => ({
+              ...prev,
+              result: data?.result || prev.result
+          }));
+          const traceId = data?.erp_action?.trace_id;
+          showAuditNotice(traceId ? `ERP 回写成功：${traceId}` : 'ERP 回写成功');
+      } catch (error) {
+          showAuditNotice(error?.message || 'ERP 回写失败');
+      } finally {
+          setIsAuditErpActionLoading(false);
+      }
+  };
+
+
+  const handleOpenSettingsModal = (category = 'general') => {
+      setSettingsModalState({ isOpen: true, category });
+  };
 
   const handleModelChange = (modelId) => {
       if (isProcessing) return;
@@ -1361,6 +1713,36 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setCurrentAudioPath(null);
       setPendingFiles([]);
       resetAuditState();
+      setOcrFiles([]);
+      setActiveOcrId(null);
+      setOcrPageIndex(0);
+      setSelectedOcrLine(null);
+      setEditingOcrLine(null);
+      setEditingOcrValue('');
+      setJsonEditError('');
+      setCopyToast('');
+      setIsOcrSummaryOpen(false);
+      setOcrSummaryMessages([]);
+      setOcrSummaryInput('');
+      setIsOcrSummaryLoading(false);
+      setOcrSummaryFileId(null);
+      setOcrSummaryBackend('local');
+      setOcrSummaryFirstDone(false);
+      ocrSummaryContextRef.current = '';
+      ocrSummaryBufferRef.current = [];
+      ocrSummaryDisplayRef.current = '';
+      if (ocrSummaryAbortRef.current) {
+          ocrSummaryAbortRef.current.abort();
+          ocrSummaryAbortRef.current = null;
+      }
+      if (ocrSummaryTimeoutRef.current) {
+          clearTimeout(ocrSummaryTimeoutRef.current);
+          ocrSummaryTimeoutRef.current = null;
+      }
+      if (ocrSummaryIdleTimerRef.current) {
+          clearInterval(ocrSummaryIdleTimerRef.current);
+          ocrSummaryIdleTimerRef.current = null;
+      }
 
       setReportStep('selection');
       setReportType(null);
@@ -1383,18 +1765,24 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     try {
       const uid = userProfile.id || 'anonymous';
       const messages = await historyApi.getSessionMessages(sessionId, uid);
+      const safeMessages = Array.isArray(messages)
+        ? messages
+        : (Array.isArray(messages?.data)
+          ? messages.data
+          : (Array.isArray(messages?.items) ? messages.items : []));
 
       let metaMsg = null;
       let contextMsg = null;
-      for (let i = messages.length - 1; i >= 0; i -= 1) {
-        const msg = messages[i];
+      for (let i = safeMessages.length - 1; i >= 0; i -= 1) {
+        const msg = safeMessages[i];
         if (!metaMsg && msg.role === 'meta' && msg.func_type === 'session_meta') metaMsg = msg;
         if (!contextMsg && msg.role === 'context') contextMsg = msg;
         if (metaMsg && contextMsg) break;
       }
 
-      let targetModel = selectedModel;
-      let targetMode = currentMode;
+      // 默认按“通用聊天”恢复，避免在 OCR/会议模式下点击普通聊天历史时看不到消息。
+      let targetModel = 0;
+      let targetMode = 'general';
       let loadedAudioPath = null;
       let savedBackend = 'local';
 
@@ -1415,6 +1803,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         else if (contextType === 'ocr_context') targetModel = 2;
         else if (contextType === 'audit_context') targetModel = 4;
         targetMode = 'general';
+      } else {
+        const latestChatLikeMsg = [...safeMessages].reverse().find((msg) => msg?.role === 'user' || msg?.role === 'assistant');
+        const inferredType = String(latestChatLikeMsg?.func_type || '').toLowerCase();
+        if (inferredType === 'database' || inferredType === 'rag' || inferredType === 'search') {
+          targetMode = inferredType;
+        } else if (inferredType === 'meeting') {
+          targetModel = 1;
+        } else if (inferredType === 'audit') {
+          targetModel = 4;
+          targetMode = 'general';
+        }
       }
 
       if (targetMode === 'audit') targetMode = 'general';
@@ -1423,13 +1822,28 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setLlmBackend(savedBackend);
       if (targetMode && targetMode !== currentMode) onModeChange(targetMode);
 
-      const chatMsgs = messages.filter(m => m.role !== 'context' && m.role !== 'meta');
+      const chatMsgs = safeMessages.filter((m) => m.role !== 'context' && m.role !== 'meta');
+      const normalizedChatMsgs = chatMsgs.length > 0
+        ? chatMsgs.map((msg) => ({
+            ...msg,
+            role: msg?.role === 'user' ? 'user' : 'assistant',
+            content: typeof msg?.content === 'string'
+              ? msg.content
+              : (msg?.content == null ? '' : JSON.stringify(msg.content))
+          }))
+        : (safeMessages.length > 0
+          ? [{
+              role: 'assistant',
+              content: '该历史会话未找到可展示的对话消息（仅包含上下文/元数据）。'
+            }]
+          : [{
+              role: 'assistant',
+              content: '该历史会话暂无内容。'
+            }]);
       setHistoryRenderTarget(HISTORY_FIRST_PAINT_COUNT);
-      startTransition(() => {
-        setChatHistory(chatMsgs);
-        setVisibleMessageCount(Math.min(HISTORY_FIRST_PAINT_COUNT, chatMsgs.length));
-        setExpandedSources({});
-      });
+      setChatHistory(normalizedChatMsgs);
+      setVisibleMessageCount(Math.min(HISTORY_FIRST_PAINT_COUNT, normalizedChatMsgs.length));
+      setExpandedSources({});
       scheduleHistoryExpand();
       setPanelContent(contextMsg ? contextMsg.content : '');
       setCurrentSessionId(sessionId);
@@ -1518,6 +1932,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
     } catch (e) {
       console.error("Failed to load session", e);
+      setChatHistory([{
+        role: 'assistant',
+        content: '历史会话加载失败，请重试。'
+      }]);
+      setVisibleMessageCount(1);
+      setExpandedSources({});
     } finally {
       setIsProcessing(false);
     }
@@ -1551,13 +1971,24 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       window.speechSynthesis.cancel();
   };
 
-  const models = [
-    { id: 0, name: '通用企业问答 (推荐)', icon: Bot },
-    { id: 1, name: '企业会议纪要总结', icon: Zap },
-    { id: 2, name: '文档智能录入 (OCR)', icon: ScanText },
-    { id: 4, name: '智能审单 Agent', icon: ClipboardCheck },
-    { id: 3, name: '报告/PPT/邮件写作', icon: Layout },
-  ];
+  sessionClickHandlerRef.current = handleSessionClick;
+  newChatHandlerRef.current = handleNewChat;
+
+  const models = useMemo(() => {
+    if (appSettings?.showAdvancedModels === false) {
+      return MODEL_OPTIONS.filter((item) => item.id === 0);
+    }
+    return MODEL_OPTIONS;
+  }, [appSettings?.showAdvancedModels]);
+  const selectedModelInfo = useMemo(() => {
+    return models.find((m) => m.id === selectedModel) || MODEL_OPTIONS[0];
+  }, [models, selectedModel]);
+
+  useEffect(() => {
+    if (!models.some((item) => item.id === selectedModel)) {
+      setSelectedModel(0);
+    }
+  }, [models, selectedModel]);
 
   const savePanelContext = async (sid, content, type = 'context_save') => {
       if (!sid || !content) return;
@@ -2145,6 +2576,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     const hasPendingUpload = pendingFiles.some(pf => pf.status && pf.status !== 'done');
     if ((!textToSend.trim() && pendingFiles.length === 0) || isProcessing || isUploadingFile || hasPendingUpload) return;
 
+    if (isMobileViewport && showMobileWorkspaceTabs) {
+      setMobileWorkspaceTab('chat');
+    }
+
     const filesToDisplay = [...pendingFiles];
     const filesToProcess = pendingFiles.filter(pf => !pf.uploaded);
     const uploadedContext = pendingFiles
@@ -2181,7 +2616,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
     // ✨✨✨ RESET STREAMING STATE ✨✨✨
     setStreamingAssistantText('');
-    streamBufferRef.current = [];
+    streamBufferRef.current = '';
     streamDisplayRef.current = "";
 
     // 启动动画循环
@@ -2190,6 +2625,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     // ✨ 创建新的 AbortController
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    let shouldPostProcessReply = false;
 
     // ✨ 关键修复：定义外部累加变量，避免闭包陷阱
     // let currentText = ""; // 移除：使用 streamBufferRef 代替
@@ -2259,7 +2695,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             mode: effectiveMode,
             context_content: contextToSend,
             // ✨ 传递用户选择的后端 (local / cloud)
-            model_backend: effectiveBackend
+            model_backend: effectiveBackend,
+            personalization: buildChatPersonalizationPayload(appSettings)
          };
 
          // ✨ 传递 signal 以支持取消
@@ -2279,6 +2716,47 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
          // let currentText = ""; // 移除内部定义，使用外部定义的 currentText
          let buffer = "";
          let sessionAssigned = false;
+         const processMainStreamLine = (line) => {
+            if (!line || !line.trim()) return;
+            try {
+                const json = JSON.parse(line);
+                if (json.t === 'c') {
+                    const newChunk = typeof json.v === 'string' ? json.v : String(json.v || '');
+                    streamBufferRef.current += newChunk;
+                } else if (json.t === 'm') {
+                    if (json.src) {
+                         setChatHistory(prev => {
+                             const newHistory = [...prev];
+                             if (newHistory.length > 0) {
+                                 newHistory[newHistory.length - 1] = { ...newHistory[newHistory.length - 1], sources: json.src };
+                             }
+                             return newHistory;
+                         });
+                    }
+                    if (json.sid && !sessionAssigned) {
+                        sessionAssigned = true;
+                        if (!currentSessionId) {
+                            setCurrentSessionId(json.sid);
+                            saveSessionMeta(json.sid, selectedModel, effectiveMode, currentAudioPath, effectiveBackend);
+                            if (activePanelContent && activePanelContent.trim()) {
+                                let type = 'context_save';
+                                if (isMeetingMode) type = 'voice_context';
+                                if (isOCRMode) type = 'ocr_context';
+                                if (isAuditMode) type = 'audit_context';
+                                savePanelContext(json.sid, activePanelContent, type);
+                            }
+                        }
+                    }
+                    if (json.end) {
+                        shouldPostProcessReply = true;
+                        const uid = userProfile.id || 'anonymous';
+                        if (uid && uid !== 'anonymous') {
+                            historyApi.getSessions(uid).then(sessions => setSessionList(sessions || []));
+                        }
+                    }
+                }
+            } catch (e) {}
+         };
 
          while (!done) {
             const { value, done: doneReading } = await reader.read();
@@ -2289,47 +2767,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             buffer = lines.pop();
 
             for (const line of lines) {
-                if (!line.trim()) continue;
-                try {
-                    const json = JSON.parse(line);
-                    if (json.t === 'c') {
-                        // ✨✨✨ PUSH TO BUFFER INSTEAD OF SETTING STATE ✨✨✨
-                        const newChars = json.v.split('');
-                        streamBufferRef.current.push(...newChars);
-
-                    } else if (json.t === 'm') {
-                        if (json.src) {
-                             setChatHistory(prev => {
-                                 const newHistory = [...prev];
-                                 if (newHistory.length > 0) {
-                                     newHistory[newHistory.length - 1] = { ...newHistory[newHistory.length - 1], sources: json.src };
-                                 }
-                                 return newHistory;
-                             });
-                        }
-                        if (json.sid && !sessionAssigned) {
-                            sessionAssigned = true;
-                            if (!currentSessionId) {
-                                setCurrentSessionId(json.sid);
-                                saveSessionMeta(json.sid, selectedModel, effectiveMode, currentAudioPath, effectiveBackend);
-                                if (activePanelContent && activePanelContent.trim()) {
-                                    let type = 'context_save';
-                                    if (isMeetingMode) type = 'voice_context';
-                                    if (isOCRMode) type = 'ocr_context';
-                                    if (isAuditMode) type = 'audit_context';
-                                    savePanelContext(json.sid, activePanelContent, type);
-                                }
-                            }
-                        }
-                        if (json.end) {
-                            const uid = userProfile.id || 'anonymous';
-                            if (uid && uid !== 'anonymous') {
-                                historyApi.getSessions(uid).then(sessions => setSessionList(sessions || []));
-                            }
-                        }
-                    }
-                } catch (e) {}
+                processMainStreamLine(line);
             }
+         }
+
+         // 处理 decoder/缓冲区尾包，避免最后一段无换行时被丢弃
+         const tailChunk = decoder.decode();
+         if (tailChunk) buffer += tailChunk;
+         if (buffer && buffer.trim()) {
+             const tailLines = buffer.split('\n').filter((line) => line && line.trim());
+             tailLines.forEach(processMainStreamLine);
          }
     } catch (e) {
       if (e.name === 'AbortError') {
@@ -2370,8 +2817,31 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       // 3. 最后清除流式缓冲
       setStreamingAssistantText('');
-      streamBufferRef.current = [];
+      streamBufferRef.current = '';
       streamDisplayRef.current = "";
+
+      if (shouldPostProcessReply && finalContent && finalContent.trim()) {
+        if (
+          appSettings.desktopNotifications &&
+          typeof window !== 'undefined' &&
+          'Notification' in window &&
+          Notification.permission === 'granted' &&
+          document.hidden
+        ) {
+          try {
+            // eslint-disable-next-line no-new
+            new Notification('助手回复完成', {
+              body: finalContent.slice(0, 120),
+            });
+          } catch {
+            // ignore
+          }
+        }
+        if (appSettings.autoReadReplies) {
+          setSpeakingIdx(null);
+          speakTextWithSettings(finalContent);
+        }
+      }
 
       abortControllerRef.current = null;
     }
@@ -2548,22 +3018,44 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
   };
 
+  const pickSpeechVoice = () => {
+      if (typeof window === 'undefined' || !window.speechSynthesis) return null;
+      const voices = window.speechSynthesis.getVoices() || [];
+      const preferredName = appSettings?.voiceName;
+      if (preferredName && preferredName !== 'auto') {
+          const exact = voices.find((v) => v.name === preferredName);
+          if (exact) return exact;
+      }
+      const language = appSettings?.replyLanguage || 'zh-CN';
+      if (language === 'en-US') {
+          return voices.find((v) => /en/i.test(v.lang)) || voices[0] || null;
+      }
+      return voices.find((v) => /zh|cn/i.test(v.lang)) || voices[0] || null;
+  };
+
+  const speakTextWithSettings = (content, onEnd) => {
+      if (!content || typeof window === 'undefined' || !window.speechSynthesis) return;
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(content);
+      const selectedVoice = pickSpeechVoice();
+      if (selectedVoice) utterance.voice = selectedVoice;
+      utterance.onend = () => {
+          onEnd?.();
+      };
+      utterance.onerror = () => {
+          onEnd?.();
+      };
+      window.speechSynthesis.speak(utterance);
+  };
+
   const handleSpeak = (content, idx) => {
       if (speakingIdx === idx) {
           window.speechSynthesis.cancel();
           setSpeakingIdx(null);
-      } else {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(content);
-          // 尝试使用中文语音
-          const voices = window.speechSynthesis.getVoices();
-          const zhVoice = voices.find(v => v.lang.includes('zh') || v.lang.includes('CN'));
-          if (zhVoice) utterance.voice = zhVoice;
-
-          utterance.onend = () => setSpeakingIdx(null);
-          setSpeakingIdx(idx);
-          window.speechSynthesis.speak(utterance);
+          return;
       }
+      setSpeakingIdx(idx);
+      speakTextWithSettings(content, () => setSpeakingIdx(null));
   };
 
   const handleRegenerate = () => {
@@ -2637,6 +3129,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const startOcrSummaryStream = () => {
       if (ocrSummaryRafRef.current) cancelAnimationFrame(ocrSummaryRafRef.current);
       const animate = () => {
+          const now = performance.now ? performance.now() : Date.now();
+          if (now - ocrSummaryLastFlushRef.current < 32 && ocrSummaryBufferRef.current.length < 30) {
+              ocrSummaryRafRef.current = requestAnimationFrame(animate);
+              return;
+          }
           if (ocrSummaryBufferRef.current.length > 0) {
               const queueLength = ocrSummaryBufferRef.current.length;
               const charsToTake = queueLength > 50 ? 6 : (queueLength > 20 ? 3 : 1);
@@ -2645,6 +3142,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               updateOcrSummaryDisplay(ocrSummaryDisplayRef.current);
               scrollOcrSummaryToBottom();
           }
+          ocrSummaryLastFlushRef.current = now;
           ocrSummaryRafRef.current = requestAnimationFrame(animate);
       };
       ocrSummaryRafRef.current = requestAnimationFrame(animate);
@@ -2671,14 +3169,27 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   };
 
   const sendOcrSummaryMessage = async (message, options = {}) => {
-      const { silentUser = false } = options;
+      const {
+          silentUser = false,
+          backendOverride = null,
+          resetConversation = false
+      } = options;
       const trimmed = (message || '').trim();
-      if (!trimmed || isOcrSummaryLoading) return;
+      if (!trimmed || isOcrSummaryLoading || ocrSummaryRequestLockRef.current) return;
+      ocrSummaryRequestLockRef.current = true;
+      const backendToUse = backendOverride || ocrSummaryBackend || 'local';
 
-      if (!silentUser) {
-          setOcrSummaryMessages(prev => [...prev, { role: 'user', content: trimmed }]);
+      if (resetConversation) {
+          if (!silentUser) {
+              setOcrSummaryMessages([{ role: 'user', content: trimmed }, { role: 'assistant', content: '' }]);
+          } else {
+              setOcrSummaryMessages([{ role: 'assistant', content: '' }]);
+          }
+      } else if (!silentUser) {
+          setOcrSummaryMessages(prev => [...prev, { role: 'user', content: trimmed }, { role: 'assistant', content: '' }]);
+      } else {
+          setOcrSummaryMessages(prev => [...prev, { role: 'assistant', content: '' }]);
       }
-      setOcrSummaryMessages(prev => [...prev, { role: 'assistant', content: '' }]);
       setIsOcrSummaryLoading(true);
       ocrSummaryBufferRef.current = [];
       ocrSummaryDisplayRef.current = "";
@@ -2687,66 +3198,161 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (ocrSummaryAbortRef.current) {
           ocrSummaryAbortRef.current.abort();
       }
-      const controller = new AbortController();
-      ocrSummaryAbortRef.current = controller;
+      const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      try {
-          const token = localStorage.getItem(AUTH_TOKEN_KEY);
-          const headers = { 'Content-Type': 'application/json' };
-          if (token) headers['Authorization'] = `Bearer ${token}`;
+      const contextContent = (ocrSummaryContextRef.current || '').slice(0, MAX_CONTEXT_CHARS);
+      const payload = {
+          message: trimmed,
+          modelId: String(selectedModel || 0),
+          session_id: `ocr-summary-${Date.now()}`,
+          user_id: 'anonymous',
+          mode: 'ocr_summary',
+          context_content: contextContent,
+          model_backend: backendToUse,
+          personalization: buildChatPersonalizationPayload(appSettings)
+      };
 
-          const contextContent = (ocrSummaryContextRef.current || '').slice(0, MAX_CONTEXT_CHARS);
-          const payload = {
-              message: trimmed,
-              modelId: String(selectedModel || 0),
-              session_id: `ocr-summary-${Date.now()}`,
-              user_id: 'anonymous',
-              mode: 'ocr_summary',
-              context_content: contextContent,
-              model_backend: llmBackend
+      const runStreamAttempt = async () => {
+          const controller = new AbortController();
+          ocrSummaryAbortRef.current = controller;
+          ocrSummaryLastChunkRef.current = Date.now();
+
+          const clearTimers = () => {
+              if (ocrSummaryTimeoutRef.current) {
+                  clearTimeout(ocrSummaryTimeoutRef.current);
+                  ocrSummaryTimeoutRef.current = null;
+              }
+              if (ocrSummaryIdleTimerRef.current) {
+                  clearInterval(ocrSummaryIdleTimerRef.current);
+                  ocrSummaryIdleTimerRef.current = null;
+              }
           };
 
-          const response = await fetch(`${API_BASE_URL}/api/chat`, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify(payload),
-              signal: controller.signal
-          });
+          clearTimers();
+          ocrSummaryTimeoutRef.current = setTimeout(() => controller.abort(), OCR_SUMMARY_STREAM_TIMEOUT_MS);
+          ocrSummaryIdleTimerRef.current = setInterval(() => {
+              if (Date.now() - ocrSummaryLastChunkRef.current > OCR_SUMMARY_IDLE_TIMEOUT_MS) {
+                  controller.abort();
+              }
+          }, 1000);
 
-          if (!response.ok || !response.body) {
-              throw new Error('API Error');
-          }
+          let receivedAny = false;
+          let receivedEnd = false;
+          try {
+              const response = await fetch(`${API_BASE_URL}/api/chat`, {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify(payload),
+                  signal: controller.signal
+              });
 
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let done = false;
-          let buffer = '';
+              if (!response.ok || !response.body) {
+                  throw new Error('API Error');
+              }
 
-          while (!done) {
-              const { value, done: doneReading } = await reader.read();
-              done = doneReading;
-              const chunkValue = decoder.decode(value || new Uint8Array(), { stream: true });
-              buffer += chunkValue;
-              const lines = buffer.split('\n');
-              buffer = lines.pop();
-
-              for (const line of lines) {
-                  if (!line.trim()) continue;
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              let done = false;
+              let buffer = '';
+              const processOcrSummaryStreamLine = (line) => {
+                  if (!line || !line.trim()) return;
                   try {
                       const json = JSON.parse(line);
                       if (json.t === 'c') {
+                          receivedAny = true;
+                          ocrSummaryLastChunkRef.current = Date.now();
                           appendOcrSummaryChunk(json.v || '');
+                      } else if (json.t === 'm') {
+                          if (json.end) {
+                              receivedEnd = true;
+                          }
                       }
                   } catch (e) {
                       // ignore
                   }
+              };
+
+              while (!done) {
+                  const { value, done: doneReading } = await reader.read();
+                  done = doneReading;
+                  const chunkValue = decoder.decode(value || new Uint8Array(), { stream: true });
+                  buffer += chunkValue;
+                  const lines = buffer.split('\n');
+                  buffer = lines.pop();
+
+                  for (const line of lines) {
+                      processOcrSummaryStreamLine(line);
+                  }
+              }
+
+              // 处理 decoder/缓冲区尾包，避免最后一段无换行时被丢弃
+              const tailChunk = decoder.decode();
+              if (tailChunk) buffer += tailChunk;
+              if (buffer && buffer.trim()) {
+                  const tailLines = buffer.split('\n').filter((line) => line && line.trim());
+                  tailLines.forEach(processOcrSummaryStreamLine);
+              }
+          } catch (error) {
+              if (controller.signal.aborted) {
+                  return {
+                      receivedAny,
+                      completed: false,
+                      aborted: true
+                  };
+              }
+              throw error;
+          } finally {
+              clearTimers();
+          }
+
+          return {
+              receivedAny,
+              completed: receivedEnd,
+              aborted: false
+          };
+      };
+
+      let attempt = 0;
+      let completed = false;
+      let hadAnyContent = false;
+      let interrupted = false;
+      try {
+          while (attempt <= OCR_SUMMARY_RETRY_LIMIT && !completed) {
+              if (attempt > 0) {
+                  // 失败重试时清空上一轮半截输出，避免重复拼接。
+                  ocrSummaryBufferRef.current = [];
+                  ocrSummaryDisplayRef.current = '';
+                  updateOcrSummaryDisplay('');
+              }
+              try {
+                  const result = await runStreamAttempt();
+                  hadAnyContent = hadAnyContent || !!result?.receivedAny;
+                  completed = !!result?.completed;
+                  interrupted = !!result?.aborted;
+              } catch (e) {
+                  completed = false;
+                  interrupted = false;
+              }
+              if (!completed && attempt < OCR_SUMMARY_RETRY_LIMIT) {
+                  await delay(OCR_SUMMARY_RETRY_DELAY_MS);
+              }
+              attempt += 1;
+          }
+          if (!completed) {
+              if (hadAnyContent || interrupted) {
+                  appendOcrSummaryChunk('\n（输出中断，已自动重试仍未完成，请点击“重新总结”）');
+              } else {
+                  appendOcrSummaryChunk('\n（生成失败，请稍后重试）');
               }
           }
-      } catch (e) {
-          appendOcrSummaryChunk('\n（生成失败，请稍后重试）');
       } finally {
           setIsOcrSummaryLoading(false);
           stopOcrSummaryStream();
+          ocrSummaryRequestLockRef.current = false;
+          if (!ocrSummaryFirstDone) setOcrSummaryFirstDone(true);
       }
   };
 
@@ -2760,13 +3366,36 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const currentId = activeOcrFile?.id || 'active';
       if (ocrSummaryFileId !== currentId) {
           setOcrSummaryFileId(currentId);
+          setOcrSummaryBackend('local');
+          setOcrSummaryFirstDone(false);
           setOcrSummaryMessages([]);
           setOcrSummaryInput('');
+          setIsOcrSummaryOpen(true);
           setTimeout(() => {
-              sendOcrSummaryMessage('请总结文档内容，给出结构化要点和结论。', { silentUser: true });
+              sendOcrSummaryMessage(OCR_SUMMARY_DEFAULT_PROMPT, {
+                silentUser: true,
+                backendOverride: 'local',
+                resetConversation: true
+              });
           }, 0);
+          return;
       }
       setIsOcrSummaryOpen(true);
+  };
+
+  const handleRegenerateOcrSummary = () => {
+      if (isOcrSummaryLoading) return;
+      const text = getActiveOcrText();
+      if (!text) {
+          alert('暂无可总结的识别内容');
+          return;
+      }
+      ocrSummaryContextRef.current = text;
+      setOcrSummaryInput('');
+      sendOcrSummaryMessage(OCR_SUMMARY_DEFAULT_PROMPT, {
+          silentUser: true,
+          resetConversation: true
+      });
   };
 
   const handleCloseOcrSummary = () => {
@@ -2774,8 +3403,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           ocrSummaryAbortRef.current.abort();
           ocrSummaryAbortRef.current = null;
       }
+      if (ocrSummaryTimeoutRef.current) {
+          clearTimeout(ocrSummaryTimeoutRef.current);
+          ocrSummaryTimeoutRef.current = null;
+      }
+      if (ocrSummaryIdleTimerRef.current) {
+          clearInterval(ocrSummaryIdleTimerRef.current);
+          ocrSummaryIdleTimerRef.current = null;
+      }
       stopOcrSummaryStream();
       setIsOcrSummaryLoading(false);
+      ocrSummaryRequestLockRef.current = false;
       setIsOcrSummaryOpen(false);
   };
 
@@ -2798,45 +3436,60 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const renderReportWizard = () => {
       if (reportStep === 'selection') {
         return (
-            <div className="h-full flex flex-col items-center justify-center p-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <div className="text-center mb-10">
-                    <h2 className="text-3xl font-bold text-gray-800 dark:text-white mb-3">想要写点什么？</h2>
-                    <p className="text-gray-500 dark:text-gray-400">选择一个场景，为您定制专业的写作框架</p>
+            <div className="h-full w-full overflow-y-auto bg-gradient-to-b from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 p-5 md:p-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="max-w-6xl mx-auto">
+                <div className="text-center mb-10 md:mb-12">
+                    <span className="inline-flex items-center rounded-full border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-900/80 px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-300 mb-4">写作助手</span>
+                    <h2 className="text-3xl md:text-4xl font-bold text-gray-900 dark:text-white mb-3">选择写作场景</h2>
+                    <p className="text-gray-500 dark:text-gray-400">选择一个场景，为你生成更完整、更可执行的写作框架</p>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl w-full">
-                    <button onClick={() => { setReportType('report'); setReportStep('form'); }} className="group flex flex-col items-center p-8 bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 dark:hover:border-blue-500 hover:shadow-xl transition-all duration-300">
-                        <div className="w-16 h-16 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><FileText size={32} className="text-blue-600 dark:text-blue-400" /></div>
-                        <h3 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">报告大纲</h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400 text-center">适用于年度总结、项目汇报、调研报告等长文档规划。</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-6 w-full">
+                    <button onClick={() => { setReportType('report'); setReportStep('form'); }} className="group relative flex h-full flex-col items-start p-7 bg-white/90 dark:bg-gray-900/70 backdrop-blur rounded-3xl border border-gray-200/70 dark:border-gray-700/70 hover:border-blue-400 dark:hover:border-blue-500 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300">
+                        <div className="w-14 h-14 rounded-2xl bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><FileText size={28} className="text-blue-600 dark:text-blue-300" /></div>
+                        <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2 text-left">报告大纲</h3>
+                        <p className="text-sm text-gray-500 dark:text-gray-400 text-left leading-relaxed">适用于年度总结、项目汇报、调研报告等长文档规划。</p>
+                        <span className="mt-5 inline-flex items-center gap-1 text-xs font-semibold text-blue-600 dark:text-blue-300">立即开始 <ArrowRight size={13} /></span>
                     </button>
-                    <button onClick={() => { setReportType('ppt'); setReportStep('form'); }} className="group flex flex-col items-center p-8 bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-purple-500 dark:hover:border-purple-500 hover:shadow-xl transition-all duration-300">
-                        <div className="w-16 h-16 rounded-full bg-purple-50 dark:bg-purple-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><Layout size={32} className="text-purple-600 dark:text-purple-400" /></div>
-                        <h3 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">PPT 大纲</h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400 text-center">自动规划演示文稿结构，分配页码，提炼每页核心观点。</p>
+                    <button onClick={() => { setReportType('ppt'); setReportStep('form'); }} className="group relative flex h-full flex-col items-start p-7 bg-white/90 dark:bg-gray-900/70 backdrop-blur rounded-3xl border border-gray-200/70 dark:border-gray-700/70 hover:border-purple-400 dark:hover:border-purple-500 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300">
+                        <div className="w-14 h-14 rounded-2xl bg-purple-50 dark:bg-purple-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><Layout size={28} className="text-purple-600 dark:text-purple-300" /></div>
+                        <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2 text-left">PPT 大纲</h3>
+                        <p className="text-sm text-gray-500 dark:text-gray-400 text-left leading-relaxed">自动规划演示文稿结构，分配页码，提炼每页核心观点。</p>
+                        <span className="mt-5 inline-flex items-center gap-1 text-xs font-semibold text-purple-600 dark:text-purple-300">立即开始 <ArrowRight size={13} /></span>
                     </button>
-                    <button onClick={() => { setReportType('email'); setReportStep('form'); }} className="group flex flex-col items-center p-8 bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-green-500 dark:hover:border-green-500 hover:shadow-xl transition-all duration-300">
-                        <div className="w-16 h-16 rounded-full bg-green-50 dark:bg-green-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><Mail size={32} className="text-green-600 dark:text-green-400" /></div>
-                        <h3 className="text-xl font-semibold text-gray-800 dark:text-white mb-2">邮件起草</h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400 text-center">根据对象和语气，快速起草正式、得体的职场沟通邮件。</p>
+                    <button onClick={() => { setReportType('email'); setReportStep('form'); }} className="group relative flex h-full flex-col items-start p-7 bg-white/90 dark:bg-gray-900/70 backdrop-blur rounded-3xl border border-gray-200/70 dark:border-gray-700/70 hover:border-green-400 dark:hover:border-green-500 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300">
+                        <div className="w-14 h-14 rounded-2xl bg-green-50 dark:bg-green-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><Mail size={28} className="text-green-600 dark:text-green-300" /></div>
+                        <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2 text-left">邮件起草</h3>
+                        <p className="text-sm text-gray-500 dark:text-gray-400 text-left leading-relaxed">根据对象和语气，快速起草正式、得体的职场沟通邮件。</p>
+                        <span className="mt-5 inline-flex items-center gap-1 text-xs font-semibold text-green-600 dark:text-green-300">立即开始 <ArrowRight size={13} /></span>
                     </button>
+                </div>
                 </div>
             </div>
         );
     }
     if (reportStep === 'form') {
-        const inputClass = "w-full p-3 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-gray-800 dark:text-gray-100";
-        const labelClass = "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5";
+        const inputClass = "w-full px-3.5 py-3 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all text-gray-800 dark:text-gray-100 placeholder:text-gray-400";
+        const labelClass = "block text-xs font-semibold tracking-wide uppercase text-gray-600 dark:text-gray-300 mb-1.5";
         return (
-            <div className="h-full flex flex-col items-center justify-center p-4 animate-in fade-in zoom-in-95 duration-300">
-                <div className="w-full max-w-2xl bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-800 overflow-hidden flex flex-col max-h-full">
-                    <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center gap-3 bg-gray-50/50 dark:bg-gray-800/30">
+            <div className="h-full w-full overflow-y-auto px-3 py-4 md:px-6 md:py-6 bg-gradient-to-b from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 animate-in fade-in zoom-in-95 duration-300">
+                <div className="w-full max-w-6xl mx-auto bg-white/95 dark:bg-gray-900/90 rounded-3xl shadow-xl border border-gray-100 dark:border-gray-800 overflow-hidden flex flex-col backdrop-blur">
+                    <div className="px-5 md:px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center gap-3 bg-white/85 dark:bg-gray-900/80 backdrop-blur sticky top-0 z-10">
                         <button onClick={() => setReportStep('selection')} className="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 transition-colors"><ArrowLeft size={20} /></button>
+                        <div className="min-w-0">
                         <h3 className="text-lg font-bold text-gray-800 dark:text-white flex items-center gap-2">
                            {reportType === 'report' ? '配置报告参数' : (reportType === 'ppt' ? '配置 PPT 大纲' : '配置邮件信息')}
                         </h3>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">填写越具体，生成结果越贴近你的业务语境</p>
+                        </div>
+                        <span className="ml-auto hidden md:inline-flex items-center rounded-full border border-gray-200 dark:border-gray-700 px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-300 bg-white dark:bg-gray-900">
+                            {reportType === 'report' ? 'Report' : (reportType === 'ppt' ? 'Slides' : 'Email')}
+                        </span>
                     </div>
-                    <div className="p-6 overflow-y-auto custom-scrollbar space-y-5">
-                        <div>
+                    <div className="p-6 md:p-7 custom-scrollbar space-y-5 xl:space-y-0 xl:grid xl:grid-cols-2 xl:gap-x-6 xl:gap-y-5">
+                        <div className="xl:col-span-2 rounded-xl border border-gray-200/80 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/40 px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
+                            建议先填写主题、受众、目标，再补充关键数据与约束条件。
+                        </div>
+                        <div className="xl:col-span-2">
                             <label className={labelClass}>模型选择</label>
                             <select
                                 className={inputClass}
@@ -3003,7 +3656,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                             </>
                         )}
                     </div>
-                    <div className="p-6 border-t border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/30 flex justify-end">
+                    <div className="px-5 md:px-6 py-4 border-t border-gray-100 dark:border-gray-800 bg-white/80 dark:bg-gray-900/80 backdrop-blur flex items-center justify-between">
+                        <span className="hidden md:block text-xs text-gray-500 dark:text-gray-400">可先生成一版，再在对话区继续迭代细化。</span>
                         <button onClick={handleSubmitReportForm} className={`px-6 py-2.5 rounded-xl font-medium text-white shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center gap-2 ${reportType === 'report' ? 'bg-blue-600 hover:bg-blue-700' : (reportType === 'ppt' ? 'bg-purple-600 hover:bg-purple-700' : 'bg-green-600 hover:bg-green-700')}`}>
                             <Sparkles size={18} /> 开始生成
                         </button>
@@ -3015,34 +3669,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   };
 
   const getPanelStyles = () => {
-      if (isMeetingMode) return { border: 'border-purple-100 dark:border-purple-900/50', headerBg: 'bg-purple-50/50 dark:bg-purple-900/20', headerText: 'text-purple-800 dark:text-purple-300', btnBg: 'bg-purple-600 hover:bg-purple-700', textareaBg: 'bg-white/50 dark:bg-gray-900/50' };
+      if (isMeetingMode) return { border: 'border-gray-200 dark:border-gray-800', headerBg: 'bg-gray-50/80 dark:bg-gray-900/60', headerText: 'text-gray-800 dark:text-gray-200', btnBg: 'bg-gray-900 hover:bg-black', textareaBg: 'bg-white/60 dark:bg-gray-900/60' };
       if (isAuditMode) return { border: 'border-teal-100 dark:border-teal-900/50', headerBg: 'bg-teal-50/50 dark:bg-teal-900/20', headerText: 'text-teal-800 dark:text-teal-300', btnBg: 'bg-teal-600 hover:bg-teal-700', textareaBg: 'bg-white/50 dark:bg-gray-900/50' };
       return { border: 'border-orange-100 dark:border-orange-900/50', headerBg: 'bg-orange-50/50 dark:bg-orange-900/20', headerText: 'text-orange-800 dark:text-orange-300', btnBg: 'bg-orange-600 hover:bg-orange-700', textareaBg: 'bg-white/50 dark:bg-gray-900/50' };
   };
   const panelStyle = getPanelStyles();
   const showEmptyState = chatHistory.length === 0 && !showContentPanel && !panelContent && !isUploadingFile && pendingFiles.length === 0;
-  useEffect(() => {
-    if (!showEmptyState || isMobileViewport) {
-      setIsSuggestionsReady(false);
-      return;
-    }
-    let cancelled = false;
-    const reveal = () => {
-      if (!cancelled) setIsSuggestionsReady(true);
-    };
-    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
-      const id = window.requestIdleCallback(reveal, { timeout: 1200 });
-      return () => {
-        cancelled = true;
-        window.cancelIdleCallback(id);
-      };
-    }
-    const id = setTimeout(reveal, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(id);
-    };
-  }, [showEmptyState, isMobileViewport]);
   const greetingName = userProfile?.name && userProfile.name !== 'User' ? userProfile.name : '';
   const greetingText = greetingName ? `${greetingName}，你好` : '你好';
   const mobileQuickActions = [
@@ -3054,10 +3686,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   ];
 
   const emptyStateContent = isMobileViewport ? (
-    <div className="w-full min-h-[62vh] -mx-4 px-6 flex flex-col justify-start pt-12 pb-10">
+    <div className="w-full -mx-4 px-6 flex flex-col justify-start pt-4 pb-2">
       <div>
-        <div className="text-base text-gray-500 dark:text-gray-400">{greetingText}</div>
-        <h2 className="mt-2 text-[26px] leading-tight font-semibold text-gray-900 dark:text-white">
+        <div className="home-hero-kicker text-base text-gray-500 dark:text-gray-400">{greetingText}</div>
+        <h2 className="home-hero-title mt-2 text-[26px] leading-tight text-gray-900 dark:text-white">
           需要我为你做些什么？
         </h2>
       </div>
@@ -3077,18 +3709,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     </div>
   ) : (
     <div className="h-full flex flex-col items-center justify-center pt-4 sm:pt-5">
-       <div className="w-16 h-16 bg-white dark:bg-gray-800 rounded-full shadow-sm border border-gray-100 dark:border-gray-700 flex items-center justify-center mb-6">{React.createElement(models.find(m => m.id === selectedModel).icon, { size: 32, className: "text-gray-800 dark:text-white" })}</div>
-       <h2 className="text-2xl font-medium text-gray-800 dark:text-white mb-8 text-center px-4">
+       <div className="w-16 h-16 bg-white dark:bg-gray-800 rounded-full shadow-sm border border-gray-100 dark:border-gray-700 flex items-center justify-center mb-6">{React.createElement(selectedModelInfo.icon, { size: 32, className: "text-gray-800 dark:text-white" })}</div>
+       <h2 className="home-hero-title text-2xl text-gray-800 dark:text-white mb-8 text-center px-4">
            {isMeetingMode ? "上传录音，一键总结" : (isAuditMode ? "智能审单 & 风险合规检测" : (isOCRMode ? "图片/PDF 转文字 & 智能分析" : "今天有什么计划?"))}
        </h2>
-       {isSuggestionsReady ? (
-         <Suspense fallback={<SuggestionsSkeleton />}>
-           <Suggestions onSuggestionClick={handleSuggestionClick} />
-         </Suspense>
-       ) : (
-         <SuggestionsSkeleton />
-       )}
-    </div>
+       <Suggestions onSuggestionClick={handleSuggestionClick} />
+     </div>
   );
 
   const renderOcrWorkspace = () => {
@@ -3662,6 +4288,39 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                 <X size={18} />
               </button>
             </div>
+            <div className="px-4 py-2 border-b border-gray-100 dark:border-gray-800">
+              {ocrSummaryFirstDone ? (
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                    <Cpu size={13} />
+                    <span>总结模型</span>
+                    <select
+                      value={ocrSummaryBackend}
+                      onChange={(e) => setOcrSummaryBackend(e.target.value)}
+                      disabled={isOcrSummaryLoading}
+                      className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-700 dark:text-gray-200 outline-none focus:ring-2 focus:ring-indigo-500/20"
+                    >
+                      {OCR_SUMMARY_BACKEND_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>{item.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRegenerateOcrSummary}
+                    disabled={isOcrSummaryLoading}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50/80 dark:hover:bg-indigo-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    重新总结
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  <Cpu size={13} />
+                  <span>首次总结默认使用 Qwen 2.5-coder</span>
+                </div>
+              )}
+            </div>
             <div ref={ocrSummaryScrollRef} className="flex-1 overflow-auto px-4 py-3 space-y-4">
               {ocrSummaryMessages.length === 0 && (
                 <div className="text-sm text-gray-400">正在生成总结...</div>
@@ -3754,7 +4413,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         onSessionClick={handleSessionClick}
         onNewChat={handleNewChat}
         onLogout={onLogout}
-        onShowAppearance={() => setShowAppearanceModal(true)}
+        onShowAppearance={handleOpenSettingsModal}
         currentMode={currentMode}
         onModeChange={onModeChange}
         isLoading={isProfileLoading || isSessionsLoading}
@@ -3770,7 +4429,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         onSessionClick={handleSessionClick}
         userProfile={userProfile}
         onLogout={onLogout}
-        onShowAppearance={() => setShowAppearanceModal(true)}
+        onShowAppearance={handleOpenSettingsModal}
         currentMode={currentMode}
         onModeChange={onModeChange}
         isLoadingSessions={isSessionsLoading}
@@ -3785,10 +4444,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             <button onClick={() => setIsMobileSidebarOpen(true)} className="text-gray-600 dark:text-gray-300 p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"><PanelLeftOpen size={24} /></button>
             <div className="relative" ref={mobileDropdownRef}>
                 <button onClick={() => setIsMobileModelDropdownOpen(!isMobileModelDropdownOpen)} className="flex items-center gap-1.5 font-bold text-gray-800 dark:text-white text-lg active:opacity-70 transition-opacity">
-                  {models.find(m => m.id === selectedModel)?.name.split(' ')[0]} <span className="text-xs font-normal text-gray-500 bg-gray-100 dark:bg-gray-800 dark:text-gray-400 px-1.5 py-0.5 rounded-full">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isMobileModelDropdownOpen ? 'rotate-180' : ''}`} />
+                  {selectedModelInfo?.name.split(' ')[0]} <span className="text-xs font-normal text-gray-500 bg-gray-100 dark:bg-gray-800 dark:text-gray-400 px-1.5 py-0.5 rounded-full">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isMobileModelDropdownOpen ? 'rotate-180' : ''}`} />
                 </button>
                 {isMobileModelDropdownOpen && (
-                  <div className="absolute top-full left-0 mt-2 w-[260px] bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 z-50">
+                  <div className="absolute top-full left-0 mt-2 w-[min(88vw,280px)] max-h-[65vh] overflow-y-auto bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 animate-in fade-in slide-in-from-top-2 duration-200 z-50">
                     <div className="p-1.5 space-y-0.5">
                       {models.map((model) => (
                         <div key={model.id} className={`flex items-center gap-3 px-3 py-3 rounded-lg cursor-pointer transition-colors ${selectedModel === model.id ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { handleModelChange(model.id); setIsMobileModelDropdownOpen(false); }}>
@@ -3814,7 +4473,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               {!isSidebarOpen && <button onClick={() => setIsSidebarOpen(true)} className="mr-3 p-2 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"><PanelLeftOpen size={20} /></button>}
               <div className="relative" ref={dropdownRef}>
                 <button className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-100/80 dark:hover:bg-gray-800/80 transition-colors text-lg font-semibold text-gray-700 dark:text-gray-200 group" onClick={() => setIsDropdownOpen(!isDropdownOpen)}>
-                  {models.find(m => m.id === selectedModel)?.name.split(' ')[0]} <span className="text-gray-400 text-base font-normal">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isDropdownOpen ? 'rotate-180' : ''}`} />
+                  {selectedModelInfo?.name.split(' ')[0]} <span className="text-gray-400 text-base font-normal">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isDropdownOpen ? 'rotate-180' : ''}`} />
                 </button>
                 {isDropdownOpen && (
                   <div className="absolute top-full left-0 mt-2 w-[320px] bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 z-50">
@@ -3853,7 +4512,35 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                 renderOcrWorkspace()
             ) : (
             <>
-              {showContentPanel && (
+              {showMobileWorkspaceTabs && (
+                <div className="md:hidden px-4 py-2 border-b border-gray-100 dark:border-gray-800 bg-white/95 dark:bg-gray-950/95">
+                  <div className="grid grid-cols-2 gap-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/90 dark:bg-gray-900/70 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setMobileWorkspaceTab('panel')}
+                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        mobileWorkspaceTab === 'panel'
+                          ? 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm'
+                          : 'text-gray-500 dark:text-gray-400'
+                      }`}
+                    >
+                      {mobilePanelTabLabel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setMobileWorkspaceTab('chat')}
+                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        mobileWorkspaceTab === 'chat'
+                          ? 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm'
+                          : 'text-gray-500 dark:text-gray-400'
+                      }`}
+                    >
+                      对话
+                    </button>
+                  </div>
+                </div>
+              )}
+              {shouldRenderPanel && (
                   <Suspense fallback={
                       <div className={`w-full ${isAuditSinglePane ? 'md:w-full md:border-r-0' : 'md:w-1/2 md:border-r'} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
                           <div className={`px-4 py-3 border-b flex justify-between items-center ${panelStyle.headerBg} ${panelStyle.border}`}>
@@ -3893,19 +4580,29 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           onAuditDocTypeChange={setAuditDocType}
                           onAuditFileSelect={handleAuditFileSelect}
                           onAuditReset={resetAuditState}
+                          onAuditErpAction={handleAuditErpAction}
+                          isAuditErpActionLoading={isAuditErpActionLoading}
                           fullWidth={isAuditSinglePane}
                       />
                   </Suspense>
               )}
 
-              {!isAuditSinglePane && (
+              {shouldRenderChat && (
               <div className={`flex flex-col h-full relative transition-all duration-300 ${showContentPanel ? 'w-full md:w-1/2' : 'w-full'}`}>
                   {isReportMode && chatHistory.length === 0 ? (
                       renderReportWizard()
                   ) : (
                       <>
-                          <div ref={chatScrollRef} className="flex-1 overflow-y-auto w-full custom-scrollbar">
-                          <div className={`mx-auto w-full px-4 sm:px-0 pb-32 md:pb-10 pt-4 ${showContentPanel ? 'max-w-full px-4' : 'max-w-3xl'}`}>
+                          <div
+                            ref={chatScrollRef}
+                            className={`flex-1 w-full custom-scrollbar ${
+                              shouldLockSuggestionsScroll ? "overflow-y-hidden overscroll-none" : "overflow-y-auto overscroll-contain"
+                            }`}
+                          >
+                          <div
+                            className={`mx-auto w-full px-4 sm:px-0 ${showContentPanel ? 'max-w-full px-4' : 'max-w-3xl'}`}
+                            style={chatContentStyle}
+                          >
                             {chatHistory.length === 0 ? (
                               showChatSkeleton ? (
                                 <div className="w-full space-y-4 px-4 py-6">
@@ -3930,7 +4627,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                 )}
                                 {visibleMessages.map((msg, idx) => {
                                   const messageIndex = chatHistory.length - visibleMessages.length + idx;
-                                  const allowMarkdown = messageIndex >= chatHistory.length - MARKDOWN_MESSAGE_COUNT;
+                                  const allowMarkdown = msg.role === 'assistant'
+                                    ? (messageIndex >= chatHistory.length - MARKDOWN_MESSAGE_COUNT || isLikelyMarkdown(msg?.content || ''))
+                                    : (messageIndex >= chatHistory.length - MARKDOWN_MESSAGE_COUNT);
                                   const sourcesExpanded = !!expandedSources[messageIndex];
                                   const isUserMessage = msg.role === 'user';
                                   const isEditing = isUserMessage && editingMessageIndex === messageIndex;
@@ -3944,7 +4643,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                         {msg.role === 'user' ? <User size={16} className="text-gray-600 dark:text-gray-300"/> : <Bot size={16} />}
                                       </div>
                                       <div className="flex flex-col gap-1.5 max-w-full w-full">
-                                          <div className={`rounded-2xl text-[15px] ${msg.role === 'user' ? `bg-[#f4f4f4] dark:bg-gray-800 text-gray-900 dark:text-white rounded-tr-sm self-end ${userBubbleSize} ${userBubblePadding}` : 'py-2 px-3 text-gray-800 dark:text-gray-200 w-full'}`}>
+                                          <div className={`rounded-2xl text-[16px] ${msg.role === 'user' ? `bg-[#f4f4f4] dark:bg-gray-800 text-gray-900 dark:text-white rounded-tr-sm self-end ${userBubbleSize} ${userBubblePadding}` : 'py-2 px-3 text-gray-800 dark:text-gray-200 w-full'}`}>
                                             {isEditing ? (
                                               <div className="w-full">
                                                 {editingMessageAttachments.length > 0 && (
@@ -3962,7 +4661,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                                   onChange={(e) => setEditingMessageText(e.target.value)}
                                                   rows={3}
                                                   autoFocus
-                                                  className="w-full bg-transparent resize-none outline-none text-[15px] leading-relaxed text-gray-900 dark:text-white"
+                                                  className="w-full bg-transparent resize-none outline-none text-[16px] leading-relaxed text-gray-900 dark:text-white"
                                                 />
                                                 <div className="mt-3 flex items-center justify-end gap-2">
                                                   <button
@@ -4003,7 +4702,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                           </div>
 
                                           {msg.role === 'user' && !isEditing && msg.content && (
-                                            <div className="flex items-center gap-1 self-end mt-0.5 opacity-0 translate-y-1 pointer-events-none transition-all duration-200 group-hover:opacity-100 group-hover:translate-y-0 group-hover:pointer-events-auto">
+                                            <div
+                                              className={`flex items-center gap-1 self-end mt-0.5 transition-all duration-200 ${
+                                                isMobileViewport
+                                                  ? 'opacity-100 pointer-events-auto'
+                                                  : 'opacity-0 translate-y-1 pointer-events-none group-hover:opacity-100 group-hover:translate-y-0 group-hover:pointer-events-auto'
+                                              }`}
+                                            >
                                               <button
                                                 onClick={() => handleCopy(msg.content, messageIndex)}
                                                 className={`p-1 rounded-md border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-800 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-700 transition-colors ${copiedIdx === messageIndex ? 'text-green-500' : ''}`}
@@ -4149,7 +4854,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                           </button>
 
                                           {isBackendDropdownOpen && (
-                                              <div className="absolute top-full left-0 mt-1 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-100 dark:border-gray-700 py-1 z-50 animate-in fade-in zoom-in-95 duration-200 origin-top-left">
+                                              <div className={`absolute bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-100 dark:border-gray-700 py-1 z-50 animate-in fade-in zoom-in-95 duration-200 ${
+                                                isMobileViewport
+                                                  ? 'bottom-full left-0 mb-2 w-56 origin-bottom-left'
+                                                  : 'top-full left-0 mt-1 w-48 origin-top-left'
+                                              }`}>
                                                   <button
                                                       onClick={() => { setLlmBackend('local'); setIsBackendDropdownOpen(false); }}
                                                       className={`w-full text-left px-3 py-2 text-xs font-medium flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-gray-700/50 ${llmBackend === 'local' ? 'text-purple-600 bg-purple-50 dark:bg-purple-900/20' : 'text-gray-700 dark:text-gray-300'}`}
@@ -4228,7 +4937,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
                                         {/* ✨ Plus Menu Dropdown */}
                                         {isPlusMenuOpen && (
-                                            <div className="absolute bottom-full left-0 mb-3 w-56 bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-bottom-2 p-1.5 flex flex-col gap-0.5 z-50">
+                                            <div
+                                              className={`bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-bottom-2 p-1.5 flex flex-col gap-0.5 z-50 ${
+                                                isMobileViewport
+                                                  ? 'fixed left-3 right-3 bottom-[calc(env(safe-area-inset-bottom)+88px)] max-h-[55vh] overflow-y-auto'
+                                                  : 'absolute bottom-full left-0 mb-3 w-56'
+                                              }`}
+                                            >
                                                 <button
                                                     onClick={() => { if (fileInputRef.current) fileInputRef.current.click(); setIsPlusMenuOpen(false); }}
                                                     className="flex items-center gap-3 px-3 py-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50 rounded-xl text-left text-sm font-medium text-gray-700 dark:text-gray-200 transition-colors group"
@@ -4299,7 +5014,20 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       onChange={(e) => setInputValue(e.target.value)}
                                       onFocus={() => setIsInputFocused(true)}
                                       onBlur={() => setIsInputFocused(false)}
-                                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }}
+                                      onKeyDown={(e) => {
+                                        if (e.key !== 'Enter') return;
+                                        if (appSettings.enterToSend !== false) {
+                                          if (!e.shiftKey) {
+                                            e.preventDefault();
+                                            handleSendMessage();
+                                          }
+                                          return;
+                                        }
+                                        if (e.ctrlKey || e.metaKey) {
+                                          e.preventDefault();
+                                          handleSendMessage();
+                                        }
+                                      }}
                                       style={{ minHeight: '48px' }}
 
                                       onInput={(e) => resizeMessageInput(e.target)}
@@ -4349,7 +5077,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         )}
         </div>
         <Suspense fallback={null}>
-            <AppearanceModal isOpen={showAppearanceModal} onClose={() => setShowAppearanceModal(false)} />
+            <SettingsModal
+              isOpen={settingsModalState.isOpen}
+              initialCategory={settingsModalState.category}
+              onClose={() => setSettingsModalState((prev) => ({ ...prev, isOpen: false }))}
+              userProfile={userProfile}
+              onLogout={onLogout}
+              onSettingsChange={(next) => setAppSettings(normalizeAppSettings(next || DEFAULT_APP_SETTINGS))}
+            />
             <ShareModal isOpen={shareModal.isOpen} onClose={() => setShareModal({ isOpen: false, sessionId: null, title: "" })} sessionId={shareModal.sessionId} sessionTitle={shareModal.title} userId={userProfile?.id || "anonymous"} />
             <OcrIngestModal
               isOpen={ocrIngestModal.isOpen}
@@ -4366,3 +5101,5 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 };
 
 export default DashboardPage;
+
+

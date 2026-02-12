@@ -4,8 +4,13 @@ const historyApi = {
   getSessions: (userId) =>
     apiClient(`/api/history/sessions?user_id=${userId}`, { method: 'GET' }),
 
-  getSessionMessages: (sessionId, userId) =>
-    apiClient(`/api/history/${sessionId}?user_id=${userId}`, { method: 'GET' }),
+  getSessionMessages: async (sessionId, userId) => {
+    const result = await apiClient(`/api/history/${sessionId}?user_id=${userId}`, { method: 'GET' });
+    if (Array.isArray(result)) return result;
+    if (Array.isArray(result?.data)) return result.data;
+    if (Array.isArray(result?.items)) return result.items;
+    return [];
+  },
 
   // ✨ 新增: 删除会话
   deleteSession: (sessionId, userId) =>

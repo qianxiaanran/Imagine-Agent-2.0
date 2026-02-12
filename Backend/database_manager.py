@@ -1,10 +1,13 @@
 import os
 import re
 import ast
+import time
+import hashlib
 import urllib.parse
 import logging
+from collections import OrderedDict
 from datetime import datetime
-from typing import Generator, Optional
+from typing import Any, Dict, Generator, Optional, Union
 
 # ✅ [修复] 兼容 LangChain 新旧版本的导入路径
 try:
@@ -98,6 +101,13 @@ TABLE_KEYWORDS = {
 
 DB_PROMPT_TABLE_FILTER = os.getenv("DB_PROMPT_TABLE_FILTER", "true").lower() != "false"
 DB_RESULT_PROMPT_MAX_CHARS = int(os.getenv("DB_RESULT_PROMPT_MAX_CHARS", "3000"))
+DB_AUTO_LIMIT = int(os.getenv("DB_AUTO_LIMIT", "200"))
+DB_SQL_CACHE_SIZE = int(os.getenv("DB_SQL_CACHE_SIZE", "256"))
+DB_SQL_CACHE_TTL = int(os.getenv("DB_SQL_CACHE_TTL", "300"))
+DB_RESULT_CACHE_SIZE = int(os.getenv("DB_RESULT_CACHE_SIZE", "128"))
+DB_RESULT_CACHE_TTL = int(os.getenv("DB_RESULT_CACHE_TTL", "120"))
+DB_SUMMARY_CACHE_SIZE = int(os.getenv("DB_SUMMARY_CACHE_SIZE", "128"))
+DB_SUMMARY_CACHE_TTL = int(os.getenv("DB_SUMMARY_CACHE_TTL", "300"))
 
 # ============================================================
 # 🧭 DDL 与 规范定义 (已根据 SQL 脚本更新)
@@ -182,6 +192,162 @@ def _validate_table_whitelist(sql: str) -> tuple[bool, str]:
         return False, f"SQL 校验拦截：禁止访问未授权的表: {', '.join(unauthorized)}"
 
     return True, ""
+
+
+_AGG_FUNC_PATTERN = re.compile(r"\b(count|sum|avg|min|max)\s*\(", re.IGNORECASE)
+
+
+class TTLCache:
+    def __init__(self, maxsize: int = 128, ttl: int = 300):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._data: OrderedDict[str, tuple[object, float]] = OrderedDict()
+
+    def get(self, key: str):
+        if not key:
+            return None
+        item = self._data.get(key)
+        if not item:
+            return None
+        value, expires_at = item
+        if expires_at and expires_at < time.time():
+            self._data.pop(key, None)
+            return None
+        self._data.move_to_end(key)
+        return value
+
+    def set(self, key: str, value):
+        if not key:
+            return
+        expires_at = time.time() + self.ttl if self.ttl > 0 else 0
+        self._data[key] = (value, expires_at)
+        self._data.move_to_end(key)
+        while len(self._data) > self.maxsize:
+            self._data.popitem(last=False)
+
+
+_SQL_CACHE = TTLCache(DB_SQL_CACHE_SIZE, DB_SQL_CACHE_TTL)
+_SQL_RESULT_CACHE = TTLCache(DB_RESULT_CACHE_SIZE, DB_RESULT_CACHE_TTL)
+_SUMMARY_CACHE = TTLCache(DB_SUMMARY_CACHE_SIZE, DB_SUMMARY_CACHE_TTL)
+
+
+def _select_tables_for_query(user_query: str) -> list[str]:
+    q = (user_query or "").lower()
+    if not q:
+        return TABLE_ORDER.copy()
+
+    selected = set()
+
+    # Direct table name hits
+    for t in TABLE_ORDER:
+        if t in q:
+            selected.add(t)
+
+    # Keyword hits
+    for t, keywords in TABLE_KEYWORDS.items():
+        for kw in keywords:
+            if kw.lower() in q:
+                selected.add(t)
+                break
+
+    if not selected:
+        return TABLE_ORDER.copy()
+
+    # Expand related tables for joins
+    related = set()
+    for t in list(selected):
+        related.update(TABLE_RELATED.get(t, set()))
+    selected |= related
+
+    return [t for t in TABLE_ORDER if t in selected]
+
+
+def _build_db_spec(selected_tables: list[str]) -> str:
+    tables = [t for t in TABLE_ORDER if t in set(selected_tables)]
+    if not tables:
+        tables = TABLE_ORDER
+
+    lines = [
+        "================【Enterprise DB Schema (Whitelisted)】================",
+        "Only use the tables listed below. Do NOT access system tables.",
+    ]
+
+    for i, t in enumerate(tables, 1):
+        schema = TABLE_SCHEMAS.get(t, t)
+        lines.append(f"{i}) {schema}")
+
+    relations = [
+        rel for a, b, rel in TABLE_RELATIONS
+        if a in tables and b in tables
+    ]
+    if relations:
+        lines.append("")
+        lines.append("----------------【Relationships】----------------")
+        for rel in relations:
+            lines.append(f"- {rel}")
+
+    return "\n".join(lines)
+
+
+def _truncate_result_text(result_text: str, max_chars: int) -> tuple[str, bool]:
+    if not result_text:
+        return "", False
+    if len(result_text) <= max_chars:
+        return result_text, False
+    return result_text[:max_chars], True
+
+
+def _is_simple_aggregate_sql(sql: str) -> bool:
+    if not sql:
+        return False
+    s = sql.lower()
+    if "group by" in s:
+        return False
+    return bool(_AGG_FUNC_PATTERN.search(sql))
+
+
+def _extract_single_value(result_text: str) -> Optional[str]:
+    try:
+        data = ast.literal_eval(result_text)
+        if isinstance(data, list) and data:
+            row = data[0]
+            if isinstance(row, (list, tuple)) and len(row) == 1:
+                return str(row[0])
+            if not isinstance(row, (list, tuple, dict)):
+                return str(row)
+    except Exception:
+        return None
+    return None
+
+
+_LIMIT_HINT_PATTERN = re.compile(
+    r"(limit\s+\d+|top\s+\d+|前\s*\d+|最近\s*\d+|只要\s*\d+|仅\s*\d+|\d+\s*条|\d+\s*行|\d+\s*个|\d+\s*条记录|\d+\s*个记录)",
+    re.IGNORECASE,
+)
+_NO_LIMIT_HINT_PATTERN = re.compile(r"(全部|所有|全量|不限|完整|全部记录|所有记录)", re.IGNORECASE)
+
+
+def _user_specified_limit(user_query: str) -> bool:
+    q = (user_query or "").strip().lower()
+    if not q:
+        return False
+    if _LIMIT_HINT_PATTERN.search(q):
+        return True
+    if _NO_LIMIT_HINT_PATTERN.search(q):
+        return True
+    return False
+
+
+def _ensure_limit(sql: str, user_query: str, limit_value: int) -> str:
+    if not sql:
+        return sql
+    if limit_value <= 0:
+        return sql
+    if re.search(r"\blimit\b|\bfetch\s+first\b|\btop\s+\d+", sql, re.IGNORECASE):
+        return sql
+    if _user_specified_limit(user_query):
+        return sql
+    return f"{sql} LIMIT {limit_value}"
 
 
 _AGG_FUNC_PATTERN = re.compile(r"\b(count|sum|avg|min|max)\s*\(", re.IGNORECASE)
@@ -298,7 +464,13 @@ class DatabaseManager:
             print(f"❌ [Database] 连接失败: {e}")
             self.db = None
 
-    def query_fast(self, db_name: str, user_query: str, model_type: str = "local") -> Generator[str, None, None]:
+    def query_fast(
+        self,
+        db_name: str,
+        user_query: str,
+        model_type: str = "local",
+        response_instruction: Optional[str] = None,
+    ) -> Generator[Union[str, Dict[str, Any]], None, None]:
         """
         ✅ 只查询一次版本：
         - 只生成一次 SQL
@@ -333,16 +505,20 @@ class DatabaseManager:
 请直接输出 SQL：
 """
 
-        # 1) 只生成一次 SQL
-        try:
-            if not HumanMessage:
-                yield "❌ HumanMessage 模块加载失败，无法构建提示词。"
+        # 1) 只生成一次 SQL（带缓存）
+        cache_key = f"{db_name}::{model_type}::{(user_query or '').strip()}"
+        raw_sql = _SQL_CACHE.get(cache_key)
+        if not raw_sql:
+            try:
+                if not HumanMessage:
+                    yield "❌ HumanMessage 模块加载失败，无法构建提示词。"
+                    return
+                response = target_llm.invoke([HumanMessage(content=sql_gen_prompt)])
+                raw_sql = _clean_sql(response.content)
+            except Exception as e:
+                yield f"⚠️ 模型生成异常: {e}"
                 return
-            response = target_llm.invoke([HumanMessage(content=sql_gen_prompt)])
-            raw_sql = _clean_sql(response.content)
-        except Exception as e:
-            yield f"⚠️ 模型生成异常: {e}"
-            return
+            raw_sql = _ensure_limit(raw_sql, user_query, DB_AUTO_LIMIT)
 
         # 2) 安全校验 (SELECT 限制)
         if not _is_safe_readonly_sql(raw_sql):
@@ -356,13 +532,35 @@ class DatabaseManager:
             yield f"🚫 {table_err_msg}"
             return
 
-        # 4) 只执行一次 SQL
-        print(f"🔍 [DB] 执行 SQL (via {model_type}): {raw_sql}")
-        try:
-            query_result = self.db.run(raw_sql)
-        except Exception as db_err:
-            yield f"❌ 查询失败: {db_err}"
-            return
+        if cache_key and raw_sql:
+            _SQL_CACHE.set(cache_key, raw_sql)
+
+        # 将本次执行 SQL 作为“来源”事件回传给上层，用于前端来源面板展示
+        sql_text = (raw_sql or "").strip()
+        if sql_text:
+            yield {
+                "type": "source",
+                "source": {
+                    "type": "sql",
+                    "title": "SQL 查询语句",
+                    "name": "SQL 查询语句",
+                    "sql": sql_text,
+                    "snippet": f"```sql\n{sql_text}\n```",
+                },
+            }
+
+        # 4) 只执行一次 SQL（结果缓存）
+        result_cache_key = f"{db_name}::{raw_sql}"
+        query_result = _SQL_RESULT_CACHE.get(result_cache_key)
+        if query_result is None:
+            print(f"🔍 [DB] 执行 SQL (via {model_type}): {raw_sql}")
+            try:
+                query_result = self.db.run(raw_sql)
+            except Exception as db_err:
+                yield f"❌ 查询失败: {db_err}"
+                return
+            if query_result:
+                _SQL_RESULT_CACHE.set(result_cache_key, query_result)
 
         if not query_result:
             yield "未查询到数据。"
@@ -374,20 +572,37 @@ class DatabaseManager:
                 yield f"结果：{single_value}"
                 return
 
-        # 5) 成功后进行总结（只总结一次）
+        # 5) 成功后进行总结（只总结一次，带缓存）
         data_text, truncated = _truncate_result_text(query_result, DB_RESULT_PROMPT_MAX_CHARS)
         truncate_note = "（数据已截断，仅供总结）" if truncated else ""
+        response_pref = (response_instruction or "").strip()
         summary_prompt = f"用户问: {user_query}\nSQL: {raw_sql}\n数据{truncate_note}: {data_text}\n请简洁专业地回答。"
+        if response_pref:
+            summary_prompt += f"\n\n请同时遵循以下输出偏好（仅影响表达，不改变事实与结论）：\n{response_pref}"
+
+        summary_hash = hashlib.sha256(f"{user_query}::{raw_sql}::{data_text}::{response_pref}".encode("utf-8")).hexdigest()
+        summary_cache_key = f"{db_name}::{summary_hash}"
+        cached_summary = _SUMMARY_CACHE.get(summary_cache_key)
+        if cached_summary:
+            yield cached_summary
+            return
 
         # 总结也使用流式
+        summary_chunks = []
         try:
             for chunk in target_llm.stream([HumanMessage(content=summary_prompt)]):
                 if hasattr(chunk, "content"):
+                    summary_chunks.append(chunk.content)
                     yield chunk.content
                 elif isinstance(chunk, str):
+                    summary_chunks.append(chunk)
                     yield chunk
         except Exception as e:
             yield f"总结生成失败: {e}"
+            return
+
+        if summary_chunks:
+            _SUMMARY_CACHE.set(summary_cache_key, "".join(summary_chunks))
 
         return
 

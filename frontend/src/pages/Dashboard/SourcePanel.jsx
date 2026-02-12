@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import {
   Info,
   Globe,
@@ -8,6 +8,8 @@ import {
   ScanText,
   BookOpen,
 } from 'lucide-react';
+
+const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
 
 const normalizeLink = (link) => {
   if (!link || typeof link !== 'string') return null;
@@ -36,6 +38,7 @@ const SourcePanel = ({ sources }) => {
           来源</span>
         <div className="flex flex-wrap gap-2">
           {sources.map((src, i) => {
+            const sourceObj = (typeof src === 'object' && src !== null) ? src : null;
             const linkValue = (typeof src === 'object' && src !== null)
               ? (src.link || src.url || src.href || src.uri)
               : (isProbablyUrl(src) ? src : null);
@@ -43,6 +46,34 @@ const SourcePanel = ({ sources }) => {
             const label = (typeof src === 'object' && src !== null)
               ? (src.title || src.name || src.domain || src.link || src.url || src.href || src.uri || JSON.stringify(src))
               : (typeof src === 'string' ? src : JSON.stringify(src));
+            const snippet = (typeof src === 'object' && src !== null)
+              ? (src.snippet || src.excerpt || src.summary || '')
+              : '';
+            const sourceType = String(sourceObj?.type || '').toLowerCase();
+            const sqlText = String(sourceObj?.sql || sourceObj?.query || sourceObj?.statement || '').trim();
+            const sqlMarkdown = String(sourceObj?.markdown || '').trim() || (sqlText ? `\`\`\`sql\n${sqlText}\n\`\`\`` : '');
+            const lowerSrc = label.toLowerCase();
+            const isSqlSource = sourceType === 'sql' || Boolean(sqlMarkdown) || lowerSrc.includes('sql');
+
+            if (isSqlSource) {
+              const content = sqlMarkdown || snippet || label;
+              return (
+                <div
+                  key={i}
+                  className="w-full rounded-lg border border-blue-100 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-900/20 overflow-hidden"
+                >
+                  <div className="px-3 py-2 text-xs font-semibold text-blue-700 dark:text-blue-300 flex items-center gap-1.5 border-b border-blue-100 dark:border-blue-800">
+                    <Database size={12} />
+                    {label || 'SQL 查询语句'}
+                  </div>
+                  <div className="px-3 py-2 text-xs text-gray-700 dark:text-gray-200 bg-white/80 dark:bg-gray-900/40">
+                    <Suspense fallback={<pre className="whitespace-pre-wrap break-words text-[11px] leading-relaxed">{content}</pre>}>
+                      <MarkdownRenderer content={content} />
+                    </Suspense>
+                  </div>
+                </div>
+              );
+            }
 
             if (href) {
               return (
@@ -62,8 +93,6 @@ const SourcePanel = ({ sources }) => {
                 </a>
               );
             }
-
-            const lowerSrc = label.toLowerCase();
 
             let icon = <FileText size={12} className="text-gray-500" />;
             let bgClass = "bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-300";
@@ -88,9 +117,16 @@ const SourcePanel = ({ sources }) => {
             }
 
             return (
-              <div key={i} className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium ${bgClass} ${borderClass} transition-colors hover:opacity-80`}>
+              <div key={i} className={`inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium ${bgClass} ${borderClass} transition-colors hover:opacity-80`}>
                 {icon}
-                <span className="truncate max-w-[200px]" title={label}>{label}</span>
+                <div className="flex flex-col min-w-0">
+                  <span className="truncate max-w-[220px]" title={label}>{label}</span>
+                  {snippet && (
+                    <span className="text-[10px] text-gray-500 dark:text-gray-400 truncate max-w-[220px]" title={snippet}>
+                      {snippet}
+                    </span>
+                  )}
+                </div>
               </div>
             );
           })}

@@ -2,6 +2,7 @@ import apiClient from './apiClient';
 
 const authApi = {
   sendCode: (phone) => apiClient('/api/auth/send_code', { method: 'POST', body: JSON.stringify({ phone }) }),
+  checkAccount: (phone) => apiClient('/api/auth/check_account', { method: 'POST', body: JSON.stringify({ phone }) }),
 
   login: (account, password) => apiClient('/api/auth/login', { method: 'POST', body: JSON.stringify({ account, password }) }),
 

@@ -334,7 +334,7 @@ class AgentState(TypedDict):
     final_response: str
     explain_steps: List[str]
     # ✅ 新增：存储 RAG 检索到的来源 (Source Files)
-    sources: Optional[List[str]]
+    sources: Optional[List[Dict[str, Any]]]
     # ✅ 新增：模型后端选择
     model_backend: str
 
@@ -351,6 +351,63 @@ def parse_action_json(llm_output: str) -> Dict:
         return json.loads(llm_output)
     except:
         return {}
+
+
+def _make_snippet(text: Optional[str], limit: int = 90) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit] + "..."
+
+
+def _build_source_meta(meta: Dict[str, Any], content: Optional[str]) -> Dict[str, Any]:
+    file_name = (
+        meta.get("file_name")
+        or meta.get("source")
+        or meta.get("filename")
+        or meta.get("title")
+        or "文档"
+    )
+    src_type = meta.get("type")
+    page_display = None
+    if src_type != "ocr":
+        file_lower = str(file_name).lower()
+        is_pdf = file_lower.endswith(".pdf")
+        page_index = meta.get("page_index")
+        if page_index is not None:
+            try:
+                page_display = int(page_index) + 1
+            except Exception:
+                page_display = None
+        else:
+            raw_page = meta.get("page") if "page" in meta else meta.get("page_number")
+            try:
+                raw_page = int(raw_page)
+                if is_pdf and raw_page >= 0:
+                    page_display = raw_page + 1
+                else:
+                    page_display = raw_page if raw_page > 0 else 1
+            except Exception:
+                page_display = None
+
+    title = file_name
+    if page_display:
+        title = f"{file_name} · 第{page_display}页"
+
+    snippet = meta.get("snippet") or _make_snippet(content)
+    source = {
+        "title": title,
+        "file_name": file_name,
+        "page": page_display,
+        "snippet": snippet,
+    }
+    if meta.get("source"):
+        source["source"] = meta.get("source")
+    if src_type:
+        source["type"] = src_type
+    return source
 
 
 # ============================================================
@@ -500,7 +557,8 @@ def context_processor_node(state: AgentState):
     model_backend = state.get("model_backend", "local")  # ✅ 获取 model_backend
 
     steps = []
-    found_sources = []
+    found_sources: List[Dict[str, Any]] = []
+    found_source_keys = set()
 
     # 修复点 2: 更新摘要 (Short-term Memory)
     # ✅ 传入 model_backend，确保记忆总结也使用 DeepSeek
@@ -523,15 +581,12 @@ def context_processor_node(state: AgentState):
             for d in docs:
                 doc_texts.append(d.page_content)
                 # ✅ 提取来源信息 (Source Metadata)
-                meta = d.metadata
-                src = meta.get("source") or meta.get("file_name") or meta.get("filename") or meta.get("title")
-                if src:
-                    # 尝试格式化页码
-                    page = meta.get("page") if "page" in meta else meta.get("page_number")
-                    if page is not None:
-                        src = f"{src} (第{page}页)"
-                    if src not in found_sources:
-                        found_sources.append(src)
+                meta = d.metadata or {}
+                src_obj = _build_source_meta(meta, d.page_content)
+                src_key = f"{src_obj.get('file_name')}|{src_obj.get('page')}|{src_obj.get('snippet')}"
+                if src_key and src_key not in found_source_keys:
+                    found_sources.append(src_obj)
+                    found_source_keys.add(src_key)
 
             hub.retrieved_knowledge = doc_texts
             steps.append(f"长期记忆检索: 找到 {len(docs)} 条相关知识")

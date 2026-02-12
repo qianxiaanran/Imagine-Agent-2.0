@@ -1,7 +1,8 @@
 import tempfile
 import os
+import re
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Iterable
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from supabase_client import require_supabase
@@ -26,7 +27,7 @@ except ImportError:
         print("❌ [Documents] 无法导入 RecursiveCharacterTextSplitter")
         RecursiveCharacterTextSplitter = None
 
-# 1. 文本切分器配置
+# 1. 文本切分器配置（保留默认，实际切分使用自适应构建）
 if RecursiveCharacterTextSplitter:
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 else:
@@ -34,6 +35,135 @@ else:
 
 # 2. Embedding 模型 (单例模式)
 _embeddings = None
+
+
+def _make_document(text: str, metadata: dict):
+    if Document:
+        return Document(page_content=text, metadata=metadata)
+
+    class SimpleDoc:
+        def __init__(self, page_content, metadata):
+            self.page_content = page_content
+            self.metadata = metadata
+
+    return SimpleDoc(page_content=text, metadata=metadata)
+
+
+def _estimate_chunk_params(total_len: int) -> tuple[int, int]:
+    if total_len >= 200000:
+        return 1200, 120
+    if total_len >= 80000:
+        return 900, 90
+    if total_len >= 30000:
+        return 700, 70
+    if total_len >= 10000:
+        return 600, 60
+    return 500, 50
+
+
+def _build_splitter(chunk_size: int, overlap: int):
+    if not RecursiveCharacterTextSplitter:
+        return None
+    separators = ["\n\n", "\n", "。", "；", "，", " ", ""]
+    return RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=overlap,
+        separators=separators
+    )
+
+
+_CONTRACT_HINT_RE = re.compile(r"(合同|协议|条款|甲方|乙方|第[一二三四五六七八九十百千万0-9]+条)")
+_HEADING_RE = re.compile(r"^\s*(第[一二三四五六七八九十百千万0-9]+[条章节]|[一二三四五六七八九十]+、|\d+\.\s+|\d+\)\s+)")
+
+
+def _is_table_like(text: str) -> bool:
+    if not text:
+        return False
+    return text.count("|") >= 6 or text.count("\t") >= 3
+
+
+def _split_by_headings(text: str) -> list[str]:
+    if not text:
+        return []
+    lines = text.splitlines()
+    sections = []
+    current = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and _HEADING_RE.match(stripped):
+            if current:
+                sections.append("\n".join(current).strip())
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        sections.append("\n".join(current).strip())
+    return [s for s in sections if s]
+
+
+def _adaptive_split_documents(docs: Iterable, filename: str) -> list:
+    docs = list(docs or [])
+    if not docs:
+        return []
+
+    total_len = sum(len(getattr(d, "page_content", "") or "") for d in docs)
+    chunk_size, overlap = _estimate_chunk_params(total_len)
+    splitter = _build_splitter(chunk_size, overlap)
+
+    all_chunks = []
+    for doc in docs:
+        content = getattr(doc, "page_content", "") or ""
+        if not content.strip():
+            continue
+        metadata = dict(getattr(doc, "metadata", {}) or {})
+        page = metadata.get("page", 0)
+
+        is_contract = _CONTRACT_HINT_RE.search(content) is not None
+        is_table = _is_table_like(content)
+
+        sections = [content]
+        if is_contract:
+            split_sections = _split_by_headings(content)
+            if len(split_sections) >= 2:
+                sections = split_sections
+        elif is_table:
+            # 表格类：优先按空行切分，避免条目被打散
+            sections = [s for s in re.split(r"\n{2,}", content) if s.strip()]
+
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+            if splitter and len(section) > chunk_size * 1.4:
+                # 使用 splitter 二次拆分，保留 page 元数据
+                temp_doc = _make_document(section, metadata)
+                for piece in splitter.split_documents([temp_doc]):
+                    all_chunks.append(piece)
+            else:
+                all_chunks.append(_make_document(section, metadata))
+
+    return all_chunks
+
+
+def _adaptive_split_text(text: str) -> list[str]:
+    if not text or not text.strip():
+        return []
+    total_len = len(text)
+    chunk_size, overlap = _estimate_chunk_params(total_len)
+    splitter = _build_splitter(chunk_size, overlap)
+    if splitter:
+        return splitter.split_text(text)
+    # fallback: naive split
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+
+def _make_snippet(text: str, limit: int = 90) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit] + "..."
 
 
 def _get_torch_device() -> str:
@@ -111,6 +241,18 @@ def get_embeddings():
     return _embeddings
 
 
+def warmup_embeddings():
+    """
+    预热 Embedding 模型，降低首轮请求延迟。
+    """
+    try:
+        model = get_embeddings()
+        _ = model.embed_query("warmup")
+        print("✅ [Warmup] Embedding warmup completed", flush=True)
+    except Exception as e:
+        print(f"⚠️ [Warmup] Embedding warmup failed: {e}", flush=True)
+
+
 def load_documents(file_bytes: bytes, filename: str):
     ext = os.path.splitext(filename)[1].lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
@@ -160,14 +302,11 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
     PreviewText 用于首次上传时直接给 LLM 提供上下文，解决"总结全文"类问题检索不到的尴尬。
     """
     try:
-        if not text_splitter:
-            return False, "TextSplitter 未初始化", None
-
         print(f"📂 [Logic] 开始处理文件: {filename}", flush=True)
         docs = load_documents(file_bytes, filename)
         if not docs: return False, "空文件", None
 
-        chunks = text_splitter.split_documents(docs)
+        chunks = _adaptive_split_documents(docs, filename)
         print(f"✂️  [Logic] 已切分为 {len(chunks)} 个片段", flush=True)
 
         if not chunks: return False, "无法切分", None
@@ -187,12 +326,35 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
 
         records = []
         for i, (text, vector, chunk) in enumerate(zip(texts, vectors, chunks)):
+            meta = dict(chunk.metadata or {}) if hasattr(chunk, "metadata") else {}
+            raw_page = meta.get("page", meta.get("page_number", 0))
+            page_index = None
+            page_display = None
+            try:
+                page_index = int(raw_page)
+            except Exception:
+                page_index = raw_page
+            if isinstance(page_index, int):
+                page_display = page_index + 1 if filename.lower().endswith(".pdf") else page_index
+            else:
+                page_display = page_index
+
+            file_name = meta.get("file_name") or meta.get("source") or filename
+            title = meta.get("title") or filename
+            meta.update({
+                "source": filename,
+                "file_name": file_name,
+                "title": title,
+                "page": page_display,
+                "page_index": page_index,
+                "chunk_index": i,
+                "snippet": _make_snippet(text),
+            })
             records.append({
                 "content": text,
                 "metadata": {
-                    "source": filename,
-                    "user_id": user_id,
-                    "page": chunk.metadata.get("page", 0)
+                    **meta,
+                    "user_id": user_id
                 },
                 "embedding": vector
             })
@@ -226,10 +388,7 @@ def store_text_to_vector_store(
     if not text or not text.strip():
         return False, "empty", 0
     try:
-        if not text_splitter:
-            return False, "TextSplitter 未初始化", 0
-
-        chunks = text_splitter.split_text(text)
+        chunks = _adaptive_split_text(text)
         if not chunks:
             return False, "empty", 0
 
@@ -238,15 +397,20 @@ def store_text_to_vector_store(
         timestamp = datetime.utcnow().isoformat() + "Z"
 
         records = []
-        for chunk, vector in zip(chunks, vectors):
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
             metadata = {
                 "source": source,
                 "type": "ocr",
                 "user_id": user_id,
                 "timestamp": timestamp,
+                "page": 0,
+                "page_index": 0,
+                "chunk_index": i,
+                "snippet": _make_snippet(chunk),
             }
             if title:
                 metadata["title"] = title
+                metadata["file_name"] = title
             if session_id:
                 metadata["session_id"] = session_id
 
@@ -265,9 +429,61 @@ def store_text_to_vector_store(
         return False, str(e), 0
 
 
-def search_user_documents(user_id: str, query: str, k: int = 4, match_threshold: float = 0.3):
+def _extract_tags_from_query(query: str) -> List[str]:
+    if not query:
+        return []
+    tags = []
+    for match in re.findall(r"(?:#|标签[:：=]|tag[:：=])([\\w\\u4e00-\\u9fff_-]+)", query):
+        if match and match not in tags:
+            tags.append(match)
+    return tags
+
+
+def _normalize_tags(raw_tags) -> List[str]:
+    if not raw_tags:
+        return []
+    if isinstance(raw_tags, str):
+        parts = re.split(r"[，,;；\s]+", raw_tags)
+        return [p.strip() for p in parts if p.strip()]
+    if isinstance(raw_tags, list):
+        return [str(t).strip() for t in raw_tags if str(t).strip()]
+    return []
+
+
+def _title_filename_boost(query: str, title: str) -> float:
+    if not query or not title:
+        return 0.0
+    q = query.lower()
+    t = title.lower()
+    t = re.sub(r"\.[a-z0-9]{1,5}$", "", t)
+    if t and t in q:
+        return 0.3
+    tokens = [x for x in re.split(r"[^a-z0-9\\u4e00-\\u9fff]+", t) if len(x) >= 2]
+    for token in tokens:
+        if token in q:
+            return 0.18
+    return 0.0
+
+
+def _content_boost(query: str, content: str) -> float:
+    if not query or not content:
+        return 0.0
+    q = query.lower()
+    c = content.lower()
+    if q in c:
+        return 0.1
+    return 0.0
+
+
+def search_user_documents(
+    user_id: str,
+    query: str,
+    k: int = 4,
+    match_threshold: float = 0.3,
+    tags: Optional[List[str]] = None
+):
     """
-    使用原生 RPC 调用检索
+    使用原生 RPC 调用检索（增强：标题/文件名加权 + 显式标签过滤）
     """
     try:
         print(f"🔍 [Search] 正在为用户 {user_id} 检索: {query}", flush=True)
@@ -275,42 +491,74 @@ def search_user_documents(user_id: str, query: str, k: int = 4, match_threshold:
         embeddings_model = get_embeddings()
         query_vector = embeddings_model.embed_query(query)
 
+        # 拉更多候选，便于加权与过滤
+        fetch_k = max(k * 3, k)
         rpc_params = {
             "query_embedding": query_vector,
             "match_threshold": float(match_threshold),
-            "match_count": k,
+            "match_count": fetch_k,
             "filter": {"user_id": user_id}
         }
 
         sb = require_supabase()
         response = sb.rpc("match_documents", rpc_params).execute()
 
-        documents = []
-        if response.data:
-            for item in response.data:
-                # 兼容性处理：如果 Document 加载失败，使用简单的 dict 或对象
-                if Document:
-                    doc = Document(
-                        page_content=item.get("content", ""),
-                        metadata=item.get("metadata", {})
-                    )
-                else:
-                    # 极简兜底对象
-                    class SimpleDoc:
-                        def __init__(self, page_content, metadata):
-                            self.page_content = page_content
-                            self.metadata = metadata
-                    doc = SimpleDoc(
-                        page_content=item.get("content", ""),
-                        metadata=item.get("metadata", {})
-                    )
-                documents.append(doc)
-
-            print(f"✅ [Search] 检索完成，找到 {len(documents)} 条相关片段", flush=True)
-            return documents
-        else:
+        result_items = response.data or []
+        if not result_items:
             print("⚠️ [Search] 未找到匹配的文档片段", flush=True)
             return []
+
+        explicit_tags = tags or _extract_tags_from_query(query)
+        explicit_tags = _normalize_tags(explicit_tags)
+
+        scored_docs = []
+        for item in result_items:
+            content = item.get("content", "") or ""
+            metadata = dict(item.get("metadata") or {})
+
+            file_name = metadata.get("file_name") or metadata.get("source") or metadata.get("title") or "文档"
+            title = metadata.get("title") or file_name
+            page = metadata.get("page", metadata.get("page_number", 0))
+            metadata.setdefault("file_name", file_name)
+            metadata.setdefault("title", title)
+            metadata.setdefault("page", page)
+            metadata.setdefault("snippet", _make_snippet(content))
+
+            meta_tags = _normalize_tags(metadata.get("tags"))
+            if explicit_tags:
+                if not meta_tags or not any(t in meta_tags for t in explicit_tags):
+                    continue
+
+            base = item.get("similarity")
+            if base is None:
+                base = item.get("score")
+            if base is None and item.get("distance") is not None:
+                try:
+                    base = 1 - float(item.get("distance"))
+                except Exception:
+                    base = 0.0
+            base = float(base) if base is not None else 0.0
+
+            boost = 0.0
+            boost += _title_filename_boost(query, title)
+            boost += _title_filename_boost(query, file_name)
+            boost += _content_boost(query, content)
+            if explicit_tags:
+                boost += 0.08
+
+            score = base + boost
+            doc = _make_document(content, metadata)
+            scored_docs.append((score, doc))
+
+        if not scored_docs:
+            print("⚠️ [Search] 标签过滤后无结果", flush=True)
+            return []
+
+        scored_docs.sort(key=lambda x: x[0], reverse=True)
+        documents = [doc for _, doc in scored_docs[:k]]
+
+        print(f"✅ [Search] 检索完成，找到 {len(documents)} 条相关片段", flush=True)
+        return documents
 
     except Exception as e:
         print(f"❌ [Search] 检索发生严重错误: {e}", flush=True)

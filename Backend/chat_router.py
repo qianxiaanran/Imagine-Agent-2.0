@@ -5,6 +5,7 @@ import json
 import re
 import urllib.parse
 import os
+import hashlib
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 
@@ -23,12 +24,17 @@ SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "")
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "2000"))
 FAST_CHAT_DIRECT = os.getenv("FAST_CHAT_DIRECT", "true").lower() != "false"
 FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "4"))
+PROMPT_LAYOUT_VERSION = "v1"
+CONTEXT_EVENT_SCAN_LIMIT = int(os.getenv("CONTEXT_EVENT_SCAN_LIMIT", "30"))
+CONTEXT_COMPACTION_SCAN_LIMIT = int(os.getenv("CONTEXT_COMPACTION_SCAN_LIMIT", "80"))
+CONTEXT_COMPACTION_TRIGGER_CHARS = int(os.getenv("CONTEXT_COMPACTION_TRIGGER_CHARS", "8000"))
+CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL", "8"))
 
 # -----------------------------------------------------------------------------
 
 from supabase_client import require_supabase
 from history_manager import get_history, get_history_limited, get_user_sessions, delete_session, rename_session
-from deepseek_llm import ask_llm_stream
+from deepseek_llm import ask_llm_stream, ask_llm
 
 # 引入我们新构建的模块（仅在 LangGraph 路径需要）
 from context_hub import ContextHub
@@ -86,6 +92,7 @@ class ChatRequest(BaseModel):
     context_content: Optional[str] = None
     # 显式文件列表 (预留)
     files: List[str] = []
+    personalization: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RenameRequest(BaseModel):
@@ -128,6 +135,21 @@ def _sanitize_history_content(text: str) -> str:
     return s.strip()
 
 
+def _looks_like_meeting_minutes(text: str) -> bool:
+    if not text:
+        return False
+    s = str(text)
+    markers = [
+        "会议主题",
+        "关键决策",
+        "行动项",
+        "风险与待确认事项",
+        "会议纪要",
+    ]
+    hit_count = sum(1 for marker in markers if marker in s)
+    return hit_count >= 2
+
+
 def _truncate_context(text: Optional[str], max_len: int = MAX_CONTEXT_CHARS) -> str:
     if not text:
         return ""
@@ -137,7 +159,424 @@ def _truncate_context(text: Optional[str], max_len: int = MAX_CONTEXT_CHARS) -> 
     return s[:max_len]
 
 
-def _get_plain_history(user_id: str, session_id: str, limit: int = 4) -> str:
+_ALLOWED_STYLE_TONES = {"default", "concise", "warm", "direct"}
+_ALLOWED_TRAIT_LEVELS = {"default", "low", "medium", "high"}
+_ALLOWED_REPLY_LANGUAGES = {"zh-CN", "en-US"}
+
+
+def _safe_pref_text(value: Any, max_len: int = 300) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:max_len]
+
+
+def _normalize_personalization(raw: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    data = raw or {}
+    style_tone = str(data.get("styleTone") or "default")
+    trait_warm = str(data.get("traitWarm") or "default")
+    trait_enthusiasm = str(data.get("traitEnthusiasm") or "default")
+    trait_titles = str(data.get("traitTitles") or "default")
+    trait_emoji = str(data.get("traitEmoji") or "default")
+    reply_language = str(data.get("replyLanguage") or "zh-CN")
+
+    if style_tone not in _ALLOWED_STYLE_TONES:
+        style_tone = "default"
+    if trait_warm not in _ALLOWED_TRAIT_LEVELS:
+        trait_warm = "default"
+    if trait_enthusiasm not in _ALLOWED_TRAIT_LEVELS:
+        trait_enthusiasm = "default"
+    if trait_titles not in _ALLOWED_TRAIT_LEVELS:
+        trait_titles = "default"
+    if trait_emoji not in _ALLOWED_TRAIT_LEVELS:
+        trait_emoji = "default"
+    if reply_language not in _ALLOWED_REPLY_LANGUAGES:
+        reply_language = "zh-CN"
+
+    return {
+        "styleTone": style_tone,
+        "traitWarm": trait_warm,
+        "traitEnthusiasm": trait_enthusiasm,
+        "traitTitles": trait_titles,
+        "traitEmoji": trait_emoji,
+        "replyLanguage": reply_language,
+        "aboutNickname": _safe_pref_text(data.get("aboutNickname"), max_len=80),
+        "customInstruction": _safe_pref_text(data.get("customInstruction"), max_len=600),
+    }
+
+
+def _build_personalization_system_prompt(preferences: Dict[str, str]) -> Optional[str]:
+    if not preferences:
+        return None
+
+    lines: List[str] = []
+
+    reply_language = preferences.get("replyLanguage", "zh-CN")
+    if reply_language == "en-US":
+        lines.append("Default reply language: English. Switch language only when user explicitly asks.")
+
+    style_tone = preferences.get("styleTone", "default")
+    if style_tone == "concise":
+        lines.append("Keep responses concise, practical, and execution-focused.")
+    elif style_tone == "warm":
+        lines.append("Use a warm and supportive tone while staying clear and actionable.")
+    elif style_tone == "direct":
+        lines.append("State conclusions directly, then give key reasons and concrete steps.")
+
+    trait_warm = preferences.get("traitWarm", "default")
+    if trait_warm == "low":
+        lines.append("Use neutral tone; avoid overly emotional wording.")
+    elif trait_warm == "medium":
+        lines.append("Use moderate empathy in wording.")
+    elif trait_warm == "high":
+        lines.append("Use clearly warm and considerate wording where natural.")
+
+    trait_enthusiasm = preferences.get("traitEnthusiasm", "default")
+    if trait_enthusiasm == "low":
+        lines.append("Keep emotional intensity low and steady.")
+    elif trait_enthusiasm == "medium":
+        lines.append("Use moderate enthusiasm in expression.")
+    elif trait_enthusiasm == "high":
+        lines.append("Use energetic and proactive language.")
+
+    trait_titles = preferences.get("traitTitles", "default")
+    if trait_titles == "low":
+        lines.append("Prefer short paragraphs; use headings/lists only when necessary.")
+    elif trait_titles == "medium":
+        lines.append("Use headings/lists in a balanced way for readability.")
+    elif trait_titles == "high":
+        lines.append("Proactively use clear headings and bullet points.")
+
+    trait_emoji = preferences.get("traitEmoji", "default")
+    if trait_emoji == "low":
+        lines.append("Do not use emoji.")
+    elif trait_emoji == "medium":
+        lines.append("Use emoji sparingly, only when helpful.")
+    elif trait_emoji == "high":
+        lines.append("You may use a few suitable emoji, but keep business readability.")
+
+    nickname = preferences.get("aboutNickname", "")
+    if nickname:
+        lines.append(f"When appropriate, address the user as: {nickname}")
+
+    custom_instruction = preferences.get("customInstruction", "")
+    if custom_instruction:
+        lines.append(f"Custom user instruction: {custom_instruction}")
+
+    if not lines:
+        return None
+
+    return (
+        "Follow these user preferences for response style only. "
+        "Do not alter factuality, safety, or policy boundaries.\n- "
+        + "\n- ".join(lines)
+    )
+
+
+def _merge_system_prompt(base_prompt: Optional[str], preference_prompt: Optional[str]) -> Optional[str]:
+    if base_prompt and preference_prompt:
+        return f"{base_prompt}\n\n{preference_prompt}"
+    return base_prompt or preference_prompt
+
+
+def _stable_json_dumps(data: Dict[str, Any]) -> str:
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _safe_json_loads(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, str):
+        return {}
+    text = raw.strip()
+    if not text:
+        return {}
+    code_match = re.search(r"```json\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
+    if code_match:
+        text = code_match.group(1).strip()
+    if "{" in text and "}" in text:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start:end + 1]
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalize_text_list(value: Any, max_items: int = 8, max_len: int = 160) -> List[str]:
+    items: List[str] = []
+    if isinstance(value, list):
+        for it in value:
+            if not isinstance(it, str):
+                continue
+            s = " ".join(it.strip().split())
+            if not s:
+                continue
+            s = s[:max_len]
+            if s not in items:
+                items.append(s)
+            if len(items) >= max_items:
+                break
+    return items
+
+
+def _normalize_compaction_payload(
+        payload: Dict[str, Any],
+        source_chars: int,
+        source_messages: int,
+) -> Dict[str, Any]:
+    summary = _safe_pref_text(payload.get("summary"), max_len=1200)
+    if not summary:
+        summary = _safe_pref_text(payload.get("abstract"), max_len=1200)
+    normalized = {
+        "v": 1,
+        "summary": summary,
+        "facts": _normalize_text_list(payload.get("facts"), max_items=10, max_len=180),
+        "preferences": _normalize_text_list(payload.get("preferences"), max_items=8, max_len=140),
+        "constraints": _normalize_text_list(payload.get("constraints"), max_items=8, max_len=180),
+        "open_items": _normalize_text_list(payload.get("open_items"), max_items=8, max_len=180),
+        "source_chars": int(max(0, source_chars)),
+        "source_messages": int(max(0, source_messages)),
+        "layout_version": PROMPT_LAYOUT_VERSION,
+    }
+    return normalized
+
+
+def _build_compaction_context_block(payload: Optional[Dict[str, Any]]) -> str:
+    data = payload or {}
+    if not isinstance(data, dict):
+        return ""
+    summary = _safe_pref_text(data.get("summary"), max_len=1200)
+    facts = _normalize_text_list(data.get("facts"), max_items=10, max_len=180)
+    preferences = _normalize_text_list(data.get("preferences"), max_items=8, max_len=140)
+    constraints = _normalize_text_list(data.get("constraints"), max_items=8, max_len=180)
+    open_items = _normalize_text_list(data.get("open_items"), max_items=8, max_len=180)
+    if not any([summary, facts, preferences, constraints, open_items]):
+        return ""
+
+    sections: List[str] = []
+    if summary:
+        sections.append("Summary:\n" + summary)
+    if facts:
+        sections.append("Facts:\n- " + "\n- ".join(facts))
+    if preferences:
+        sections.append("Preferences:\n- " + "\n- ".join(preferences))
+    if constraints:
+        sections.append("Constraints:\n- " + "\n- ".join(constraints))
+    if open_items:
+        sections.append("OpenItems:\n- " + "\n- ".join(open_items))
+    return "\n\n".join(sections)
+
+
+def _build_cache_friendly_prompt(
+        user_message: str,
+        session_state: str = "",
+        summary_context: str = "",
+        recent_history: str = "",
+) -> str:
+    def section(name: str, content: str, allow_empty: bool = False) -> str:
+        body = (content or "").strip()
+        if not body and not allow_empty:
+            body = "(empty)"
+        return f"[{name}]\n{body}"
+
+    blocks = [
+        section("PromptLayout", f"version={PROMPT_LAYOUT_VERSION}"),
+        section("SessionState", session_state),
+        section("SummaryContext", summary_context),
+        section("RecentHistory", recent_history),
+        section("User", user_message),
+        section("Assistant", "", allow_empty=True),
+    ]
+    return "\n\n".join(blocks)
+
+
+def _read_recent_history_records(user_id: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
+    if user_id == "anonymous":
+        return []
+    try:
+        return get_history_limited(user_id, session_id, limit=limit) or []
+    except Exception:
+        return []
+
+
+def _append_meta_history_event(user_id: str, session_id: str, func_type: str, payload: Dict[str, Any]):
+    if user_id == "anonymous":
+        return
+    try:
+        sb = require_supabase()
+        sb.table("history").insert({
+            "user_id": user_id,
+            "session_id": session_id,
+            "role": "meta",
+            "content": _stable_json_dumps(payload),
+            "func_type": func_type,
+        }).execute()
+    except Exception as e:
+        print(f"⚠️ Context event save failed ({func_type}): {e}")
+
+
+def _latest_meta_event(records: List[Dict[str, Any]], func_type: str) -> Optional[Dict[str, Any]]:
+    target = (func_type or "").strip().lower()
+    for r in reversed(records):
+        if (r.get("role") or "").strip().lower() != "meta":
+            continue
+        if ((r.get("func_type") or "").strip().lower()) != target:
+            continue
+        data = _safe_json_loads(r.get("content"))
+        if data:
+            return data
+    return None
+
+
+def _build_context_event_payload(
+        mode: str,
+        model_id: str,
+        model_backend: str,
+        context_content: str,
+        personalization: Dict[str, str],
+) -> Dict[str, Any]:
+    base = {
+        "v": 1,
+        "mode": mode or "general",
+        "model_id": model_id or "",
+        "model_backend": model_backend or "local",
+        "has_context": bool((context_content or "").strip()),
+        "context_chars": len(context_content or ""),
+        "reply_language": personalization.get("replyLanguage", "zh-CN"),
+        "style_tone": personalization.get("styleTone", "default"),
+    }
+    payload = dict(base)
+    payload["sig"] = hashlib.sha1(_stable_json_dumps(base).encode("utf-8")).hexdigest()
+    payload["layout_version"] = PROMPT_LAYOUT_VERSION
+    return payload
+
+
+def _maybe_append_context_event(
+        user_id: str,
+        session_id: str,
+        mode: str,
+        model_id: str,
+        model_backend: str,
+        context_content: str,
+        personalization: Dict[str, str],
+):
+    if user_id == "anonymous":
+        return
+    records = _read_recent_history_records(user_id, session_id, limit=CONTEXT_EVENT_SCAN_LIMIT)
+    latest = _latest_meta_event(records, "context_event")
+    payload = _build_context_event_payload(
+        mode=mode,
+        model_id=model_id,
+        model_backend=model_backend,
+        context_content=context_content,
+        personalization=personalization,
+    )
+    if latest and latest.get("sig") == payload.get("sig"):
+        return
+    _append_meta_history_event(user_id, session_id, "context_event", payload)
+
+
+def _collect_compaction_source_lines(records: List[Dict[str, Any]], mode: Optional[str]) -> List[str]:
+    lines: List[str] = []
+    current_mode = (mode or "").strip().lower()
+    for r in records:
+        role = (r.get("role") or "").strip().lower()
+        if role == "meta":
+            continue
+        func_type = (r.get("func_type") or "").strip().lower()
+        if current_mode != "meeting" and func_type == "meeting":
+            continue
+        content = _sanitize_history_content(r.get("content"))
+        if not content:
+            continue
+        if current_mode != "meeting" and role == "assistant" and _looks_like_meeting_minutes(content):
+            continue
+        if role == "user":
+            lines.append(f"User: {content}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {content}")
+        elif role == "context":
+            lines.append(f"Context: {content}")
+    return lines
+
+
+def _messages_since_last_compaction(records: List[Dict[str, Any]]) -> int:
+    count = 0
+    for r in reversed(records):
+        role = (r.get("role") or "").strip().lower()
+        func_type = (r.get("func_type") or "").strip().lower()
+        if role == "meta" and func_type == "context_compaction":
+            break
+        if role in {"user", "assistant", "context"}:
+            count += 1
+    return count
+
+
+def _maybe_compact_context(
+        user_id: str,
+        session_id: str,
+        mode: Optional[str],
+        model_backend: str,
+) -> Optional[Dict[str, Any]]:
+    if user_id == "anonymous":
+        return None
+
+    records = _read_recent_history_records(user_id, session_id, limit=CONTEXT_COMPACTION_SCAN_LIMIT)
+    if not records:
+        return None
+
+    latest_payload = _latest_meta_event(records, "context_compaction")
+    source_lines = _collect_compaction_source_lines(records, mode=mode)
+    if not source_lines:
+        return latest_payload
+
+    source_text = "\n".join(source_lines).strip()
+    source_chars = len(source_text)
+    if source_chars < CONTEXT_COMPACTION_TRIGGER_CHARS:
+        return latest_payload
+
+    since_last = _messages_since_last_compaction(records)
+    if latest_payload and since_last < CONTEXT_COMPACTION_MIN_INTERVAL:
+        return latest_payload
+
+    compact_prompt = (
+        "You are a context compactor for an enterprise assistant.\n"
+        "Summarize the dialogue into stable, reusable state as strict JSON.\n"
+        "Required JSON keys: summary, facts, preferences, constraints, open_items.\n"
+        "- Keep facts verifiable and concise.\n"
+        "- Keep user preferences and hard constraints explicit.\n"
+        "- Do not include tool logs, status lines, or transient debug text.\n"
+        "- Use Chinese output in JSON values.\n\n"
+        f"Conversation:\n{source_text[:12000]}\n\n"
+        "Return JSON only."
+    )
+
+    try:
+        raw = ask_llm(compact_prompt, model_type=model_backend)
+        parsed = _safe_json_loads(raw)
+        normalized = _normalize_compaction_payload(
+            parsed,
+            source_chars=source_chars,
+            source_messages=len(source_lines),
+        )
+        has_content = bool(
+            normalized.get("summary")
+            or normalized.get("facts")
+            or normalized.get("preferences")
+            or normalized.get("constraints")
+            or normalized.get("open_items")
+        )
+        if not has_content:
+            return latest_payload
+        _append_meta_history_event(user_id, session_id, "context_compaction", normalized)
+        return normalized
+    except Exception as e:
+        print(f"⚠️ Context compaction failed: {e}")
+        return latest_payload
+
+
+def _get_plain_history(user_id: str, session_id: str, limit: int = 4, mode: Optional[str] = None) -> str:
     """获取纯文本历史，用于 LLM 生成搜索词"""
     if user_id == "anonymous":
         return ""
@@ -146,9 +585,13 @@ def _get_plain_history(user_id: str, session_id: str, limit: int = 4) -> str:
         # 取最近几条
         recent = records[-limit:]
         history_str = ""
+        current_mode = (mode or "").strip().lower()
         for r in recent:
             raw_role = r.get('role')
             if raw_role == 'meta':
+                continue
+            raw_func_type = (r.get("func_type") or "").strip().lower()
+            if current_mode != "meeting" and raw_func_type == "meeting":
                 continue
             if raw_role == 'user':
                 role = "User"
@@ -160,6 +603,8 @@ def _get_plain_history(user_id: str, session_id: str, limit: int = 4) -> str:
                 role = "Assistant"
 
             content = _sanitize_history_content(r.get('content'))
+            if current_mode != "meeting" and role == "Assistant" and _looks_like_meeting_minutes(content):
+                continue
             if content:
                 history_str += f"{role}: {content}\n"
         return history_str
@@ -167,7 +612,7 @@ def _get_plain_history(user_id: str, session_id: str, limit: int = 4) -> str:
         return ""
 
 
-def _get_langchain_history(user_id: str, session_id: str, limit: int = 6):
+def _get_langchain_history(user_id: str, session_id: str, limit: int = 6, mode: Optional[str] = None):
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
     if user_id == "anonymous":
@@ -175,9 +620,15 @@ def _get_langchain_history(user_id: str, session_id: str, limit: int = 6):
     try:
         records = get_history_limited(user_id, session_id, limit=limit)
         messages = []
+        current_mode = (mode or "").strip().lower()
         for r in records[-limit:]:
             role = r.get('role')
             content = _sanitize_history_content(r.get('content'))
+            raw_func_type = (r.get("func_type") or "").strip().lower()
+            if current_mode != "meeting" and raw_func_type == "meeting":
+                continue
+            if current_mode != "meeting" and role == 'assistant' and _looks_like_meeting_minutes(content):
+                continue
             if not content:
                 continue
             if role == 'user':
@@ -208,10 +659,71 @@ def _normalize_mode(mode: Optional[str]) -> str:
     return m
 
 
-def _to_text_and_sources(items) -> tuple[list[str], list[str]]:
+def _safe_int(value) -> Optional[int]:
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _make_snippet(text: Optional[str], limit: int = 90) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit] + "..."
+
+
+def _build_doc_source(metadata: Dict[str, Any], content: Optional[str]) -> Dict[str, Any]:
+    file_name = (
+        metadata.get("file_name")
+        or metadata.get("source")
+        or metadata.get("filename")
+        or metadata.get("title")
+        or "文档"
+    )
+    src_type = metadata.get("type")
+    page_display = None
+    if src_type != "ocr":
+        file_lower = str(file_name).lower()
+        is_pdf = file_lower.endswith(".pdf")
+        page_index = metadata.get("page_index")
+        if page_index is not None:
+            page_num = _safe_int(page_index)
+            if page_num is not None:
+                page_display = page_num + 1
+        else:
+            raw_page = metadata.get("page") if "page" in metadata else metadata.get("page_number")
+            page_num = _safe_int(raw_page)
+            if page_num is not None:
+                if is_pdf and page_num >= 0:
+                    page_display = page_num + 1
+                else:
+                    page_display = page_num if page_num > 0 else 1
+
+    title = file_name
+    if page_display:
+        title = f"{file_name} · 第{page_display}页"
+
+    snippet = metadata.get("snippet") or _make_snippet(content)
+    source = {
+        "title": title,
+        "file_name": file_name,
+        "page": page_display,
+        "snippet": snippet,
+    }
+    if metadata.get("source"):
+        source["source"] = metadata.get("source")
+    if src_type:
+        source["type"] = src_type
+    return source
+
+
+def _to_text_and_sources(items) -> tuple[list[str], list[Dict[str, Any]]]:
     """把 search_user_documents 的返回值（可能是 Document 对象或字符串）统一成文本列表 + 来源列表。"""
     texts: list[str] = []
-    srcs: list[str] = []
+    srcs: list[Dict[str, Any]] = []
     if not items:
         return texts, srcs
 
@@ -233,24 +745,14 @@ def _to_text_and_sources(items) -> tuple[list[str], list[str]]:
             texts.append(page_content.strip())
 
         # 组装来源（尽量友好，不抛异常）
-        src = None
         if isinstance(metadata, dict):
-            src = (
-                    metadata.get("source")
-                    or metadata.get("file_name")
-                    or metadata.get("filename")
-                    or metadata.get("path")
-                    or metadata.get("title")
-            )
-            # 页码/片段信息
-            page = metadata.get("page") if "page" in metadata else metadata.get("page_number")
-            if src and page is not None:
-                try:
-                    src = f"{src} (第{int(page)}页)"
-                except Exception:
-                    src = f"{src} (第{page}页)"
-        if isinstance(src, str) and src.strip():
-            if src not in srcs:
+            src = _build_doc_source(metadata, page_content if isinstance(page_content, str) else None)
+            src_key = f"{src.get('file_name')}|{src.get('page')}|{src.get('snippet')}"
+            existing_keys = {
+                f"{s.get('file_name')}|{s.get('page')}|{s.get('snippet')}"
+                for s in srcs
+            }
+            if src_key and src_key not in existing_keys:
                 srcs.append(src)
 
     return texts, srcs
@@ -615,7 +1117,14 @@ async def chat(
     def _stream(gen, media_type: str = "application/x-ndjson"):
         return StreamingResponse(gen, media_type=media_type, headers=stream_headers)
 
-    def _should_flush(buf: str, min_chars: int = 8, max_chars: int = 64) -> bool:
+    def _should_flush(
+            buf: str,
+            min_chars: int = 8,
+            max_chars: int = 64,
+            immediate: bool = False,
+    ) -> bool:
+        if immediate:
+            return bool(buf)
         if len(buf) >= max_chars:
             return True
         if len(buf) >= min_chars:
@@ -625,15 +1134,17 @@ async def chat(
                 return True
         return False
 
-    def _make_text_buffer(min_chars: int = 8, max_chars: int = 64):
+    def _make_text_buffer(min_chars: int = 8, max_chars: int = 64, immediate: bool = False):
         buf = ""
 
         def push(text: str) -> Optional[str]:
             nonlocal buf
             if not text:
                 return None
+            if immediate:
+                return text
             buf += text
-            if _should_flush(buf, min_chars, max_chars):
+            if _should_flush(buf, min_chars, max_chars, immediate=immediate):
                 out = buf
                 buf = ""
                 return out
@@ -641,6 +1152,8 @@ async def chat(
 
         def flush() -> Optional[str]:
             nonlocal buf
+            if immediate:
+                return None
             if buf:
                 out = buf
                 buf = ""
@@ -666,9 +1179,25 @@ async def chat(
 
     # 获取模型后端设置
     model_backend = req.model_backend or "local"
+    model_id = (req.modelId or "").strip()
 
     mode = _normalize_mode(req.mode)
+    # Hard guard: when meeting model is selected, force meeting mode to avoid accidental RAG routing.
+    if mode == "general" and model_id == "1":
+        mode = "meeting"
+        print("🔒 [Router] Force mode -> meeting (modelId=1)")
     context_content = _truncate_context(req.context_content)
+    personalization = _normalize_personalization(req.personalization)
+    personalization_system_prompt = _build_personalization_system_prompt(personalization)
+    _maybe_append_context_event(
+        user_id=user_id,
+        session_id=session_id,
+        mode=mode,
+        model_id=model_id,
+        model_backend=model_backend,
+        context_content=context_content,
+        personalization=personalization,
+    )
 
     print(f"🚀 [Chat] New Request: User={user_id}, Session={session_id}, Mode={mode}, Backend={model_backend}")
 
@@ -679,9 +1208,15 @@ async def chat(
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
         full_reply = ""
-        push_chunk, flush_chunk = _make_text_buffer()
+        push_chunk, flush_chunk = _make_text_buffer(immediate=True)
         try:
-            history_text = _get_plain_history(user_id, session_id, limit=FAST_CHAT_HISTORY_LIMIT)
+            active_mode = (return_mode or func_type or mode or "chat")
+            history_text = _get_plain_history(
+                user_id,
+                session_id,
+                limit=FAST_CHAT_HISTORY_LIMIT,
+                mode=active_mode,
+            )
             context_text = (context_content or "").strip()
 
             summary_context = ""
@@ -694,7 +1229,12 @@ async def chat(
                     ui_mode=mode
                 )
                 if memory_summary:
-                    history_msgs = _get_langchain_history(user_id, session_id, limit=6)
+                    history_msgs = _get_langchain_history(
+                        user_id,
+                        session_id,
+                        limit=6,
+                        mode=active_mode,
+                    )
                     if history_msgs:
                         hub.history_summary = memory_summary.update_from_messages(
                             user_id=user_id,
@@ -714,10 +1254,15 @@ async def chat(
                 prompt_parts.append(f"SummaryContext:\n{summary_context}")
             if history_text:
                 prompt_parts.append(f"RecentHistory:\n{history_text}")
+            system_prompt = _merge_system_prompt(None, personalization_system_prompt)
             prompt_parts.append(f"User: {message}\nAssistant:")
             prompt = "\n\n".join(prompt_parts)
 
-            for chunk in ask_llm_stream(prompt, model_type=model_backend):
+            for chunk in ask_llm_stream(
+                prompt,
+                system_prompt=system_prompt,
+                model_type=model_backend,
+            ):
                 if chunk:
                     full_reply += chunk
                     out = push_chunk(chunk)
@@ -795,7 +1340,7 @@ async def chat(
         try:
             # === Step 1: 智能生成搜索词 (Query Optimization) ===
             # 获取少量历史记录，用于补全上下文
-            history_text = _get_plain_history(user_id, session_id, limit=4)
+            history_text = _get_plain_history(user_id, session_id, limit=4, mode="search")
 
             yield json.dumps({"t": "c", "v": "> 🤔 正在规划搜索策略...\n\n"}, ensure_ascii=False) + "\n"
 
@@ -974,7 +1519,11 @@ Answer:
 # === Step 5: 流式输出回答 ===
             # DB 模式更强调“快出字”，合并阈值更小
             push_chunk, flush_chunk = _make_text_buffer(min_chars=1, max_chars=32)
-            for chunk in ask_llm_stream(prompt, model_type=model_backend):
+            for chunk in ask_llm_stream(
+                prompt,
+                system_prompt=personalization_system_prompt,
+                model_type=model_backend,
+            ):
                 if chunk:
                     full_reply_clean += chunk
                     out = push_chunk(chunk)
@@ -1018,17 +1567,33 @@ Answer:
 
         full_reply = ""
         try:
-            # 可选：把“来源”发给前端（用于参考来源面板）
-            yield json.dumps({"t": "m", "sid": session_id, "src": [f"database:{DEFAULT_DB_NAME}"]},
-                             ensure_ascii=False) + "\n"
+            # 来源：先发数据库信息，后续收到 SQL 事件后会追加
+            db_sources: List[Dict[str, Any]] = [{
+                "type": "database",
+                "title": f"数据库：{DEFAULT_DB_NAME}",
+                "name": DEFAULT_DB_NAME,
+            }]
+            yield json.dumps({"t": "m", "sid": session_id, "src": db_sources}, ensure_ascii=False) + "\n"
 
             # ✅ 修复：传递 model_type 参数给 query_fast
-            push_chunk, flush_chunk = _make_text_buffer()
-            for event in db_manager.query_fast(DEFAULT_DB_NAME, message, model_type=model_backend):
+            push_chunk, flush_chunk = _make_text_buffer(immediate=True)
+            for event in db_manager.query_fast(
+                DEFAULT_DB_NAME,
+                message,
+                model_type=model_backend,
+                response_instruction=personalization_system_prompt,
+            ):
                 if isinstance(event, dict) and event.get("type") == "status":
                     status_msg = event.get("message")
                     if status_msg:
                         yield json.dumps({"t": "m", "sid": session_id, "status": status_msg}, ensure_ascii=False) + "\n"
+                        await asyncio.sleep(0)
+                    continue
+                if isinstance(event, dict) and event.get("type") == "source":
+                    source_item = event.get("source")
+                    if isinstance(source_item, dict) and source_item:
+                        db_sources.append(source_item)
+                        yield json.dumps({"t": "m", "sid": session_id, "src": db_sources}, ensure_ascii=False) + "\n"
                         await asyncio.sleep(0)
                     continue
                 chunk = event
@@ -1195,7 +1760,7 @@ Answer:
 
             # 4) 流式输出
             # ✅ 使用 model_backend
-            push_chunk, flush_chunk = _make_text_buffer()
+            push_chunk, flush_chunk = _make_text_buffer(immediate=True)
             for chunk in ask_llm_stream(prompt, model_type=model_backend):
                 if chunk:
                     full_reply += chunk
@@ -1263,7 +1828,7 @@ Answer:
         )
 
         # 3. 准备 Graph 状态输入
-        history_msgs = _get_langchain_history(user_id, session_id)
+        history_msgs = _get_langchain_history(user_id, session_id, mode=mode)
 
         initial_state = {
             "hub": hub,
@@ -1295,6 +1860,25 @@ Answer:
             final_intent = final_state.get("intent", "general")
             explain_steps = final_state.get("explain_steps", [])
             sources = final_state.get("sources", [])
+            compaction_payload = _maybe_compact_context(
+                user_id=user_id,
+                session_id=session_id,
+                mode=mode,
+                model_backend=model_backend,
+            )
+            session_state_text = _build_compaction_context_block(compaction_payload)
+            recent_history_for_layout = _get_plain_history(
+                user_id=user_id,
+                session_id=session_id,
+                limit=FAST_CHAT_HISTORY_LIMIT,
+                mode=mode,
+            )
+            final_prompt = _build_cache_friendly_prompt(
+                user_message=message,
+                session_state=session_state_text,
+                summary_context=final_prompt,
+                recent_history=recent_history_for_layout,
+            )
 
             # ✨ [新特性] 展示 Agent 思考过程 (Explainable AI)
             if explain_steps:
@@ -1312,7 +1896,11 @@ Answer:
 
             # 使用用户选择的后端模型 (local / cloud)
             push_chunk, flush_chunk = _make_text_buffer()
-            for chunk in ask_llm_stream(final_prompt, model_type=model_backend):
+            for chunk in ask_llm_stream(
+                final_prompt,
+                system_prompt=personalization_system_prompt,
+                model_type=model_backend,
+            ):
                 if chunk:
                     full_reply_display += chunk
                     full_reply_clean += chunk
@@ -1358,7 +1946,6 @@ Answer:
             yield json.dumps({"t": "c", "v": f"\n❌ 系统处理错误: {str(e)}"}, ensure_ascii=False) + "\n"
 
     # 分发：手动模式强制只走对应功能
-    model_id = (req.modelId or "").strip()
     is_report_write_mode = (model_id == "3") or _is_report_write_prompt(message)
     auto_routing_enabled = (mode == "general") and (not is_report_write_mode)
     is_doc_query = _is_doc_query(message) if auto_routing_enabled else False

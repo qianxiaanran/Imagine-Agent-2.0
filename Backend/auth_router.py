@@ -742,3 +742,19 @@ def update_password(
     except Exception as e:
         print(f"❌ 修改密码失败: {e}")
         raise HTTPException(status_code=500, detail=f"密码修改失败: {str(e)}")
+
+@router.post("/check_account")
+def api_check_account(req: SendCodeRequest):
+    """Check whether a phone/account is already registered."""
+    sb_admin = get_admin_supabase()
+    target_email = _get_email_from_phone(req.phone).lower().strip()
+    target_phone = req.phone.strip()
+
+    user = _find_user_by_loop(sb_admin, target_email, target_phone)
+    registered = user is not None
+
+    return {
+        "success": True,
+        "registered": registered,
+        "reason": "已注册" if registered else "该手机号未注册，请先注册后再登录"
+    }

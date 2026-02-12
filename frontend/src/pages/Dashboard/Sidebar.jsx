@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect, Suspense, useMemo } from "react";
 import { Plus, PanelLeftClose, Search, Database, MessageSquare, Sparkles, Settings, LogOut, ChevronDown, Server, BookOpen, Activity, X, MoreHorizontal, Pencil, Trash2, Lock, Share2, Pin, PinOff } from "lucide-react";
-import EditProfileModal from "./EditProfileModal";
 import ChangePasswordModal from "./ChangePasswordModal";
 import userApi from "../../api/user";
 import historyApi from "../../api/history";
 
 // 懒加载 ShareModal
+const EditProfileModal = React.lazy(() => import("./EditProfileModal"));
 const ShareModal = React.lazy(() => import('./ShareModal'));
 const INITIAL_SESSION_RENDER_COUNT = 40;
 const SESSION_RENDER_STEP = 40;
@@ -708,7 +708,7 @@ const Sidebar = ({
                     <button
                       className="w-full flex items-center gap-3 px-2 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors text-left"
                       onClick={() => {
-                        onShowAppearance();
+                        onShowAppearance("personalization");
                         setIsProfileMenuOpen(false);
                       }}
                     >
@@ -740,7 +740,10 @@ const Sidebar = ({
 
                     <button
                       className="w-full flex items-center gap-3 px-2 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors text-left"
-                      onClick={() => setIsProfileMenuOpen(false)}
+                      onClick={() => {
+                        onShowAppearance("general");
+                        setIsProfileMenuOpen(false);
+                      }}
                     >
                       <Settings size={18} strokeWidth={1.5} /> 设置
                     </button>
@@ -776,13 +779,6 @@ const Sidebar = ({
 
       </div>
 
-      <EditProfileModal
-        isOpen={isEditProfileOpen}
-        onClose={() => setIsEditProfileOpen(false)}
-        userProfile={localUserProfile || {}}
-        onSave={handleUpdateProfile}
-      />
-
       {/* ✨ [新增] 修改密码弹窗 */}
       <ChangePasswordModal
         isOpen={isChangePasswordOpen}
@@ -790,6 +786,12 @@ const Sidebar = ({
       />
 
       <Suspense fallback={null}>
+        <EditProfileModal
+          isOpen={isEditProfileOpen}
+          onClose={() => setIsEditProfileOpen(false)}
+          userProfile={localUserProfile || {}}
+          onSave={handleUpdateProfile}
+        />
         <ShareModal
           isOpen={shareModal.isOpen}
           onClose={() => setShareModal({ isOpen: false, sessionId: null, title: "" })}
@@ -802,4 +804,4 @@ const Sidebar = ({
   );
 };
 
-export default Sidebar;
+export default React.memo(Sidebar);

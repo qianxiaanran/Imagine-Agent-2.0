@@ -3,6 +3,7 @@ import os
 import time
 import threading
 import uuid
+import uuid
 from datetime import datetime
 from typing import List, Optional
 
@@ -32,11 +33,27 @@ save_context = None
 voice_ws_proxy = None
 generate_report_outline = None
 generate_email_draft = None
-# âœ?OCR æ™ºèƒ½å½•å…¥
 parse_ocr_content = None
 save_ocr_record = None
+warmup_embeddings = None
 # ✨ 新增
 baidu_asr_from_bytes = None
+
+
+def _save_ocr_upload(content: bytes, filename: str) -> str:
+    base_dir = os.path.dirname(__file__)
+    date_folder = datetime.utcnow().strftime("%Y%m%d")
+    ext = os.path.splitext(filename or "")[1]
+    if ext and len(ext) > 10:
+        ext = ""
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    rel_dir = os.path.join("static", "ocr", date_folder)
+    abs_dir = os.path.join(base_dir, rel_dir)
+    os.makedirs(abs_dir, exist_ok=True)
+    abs_path = os.path.join(abs_dir, safe_name)
+    with open(abs_path, "wb") as f:
+        f.write(content)
+    return f"/api/static/ocr/{date_folder}/{safe_name}"
 
 
 def _save_ocr_upload(content: bytes, filename: str) -> str:
@@ -59,7 +76,7 @@ try:
     from chat_router import router as chat_router
     from audit_router import router as audit_router
     from admin_router import router as admin_router
-    from documents_processing import upload_document_to_vector_store, delete_user_documents, store_text_to_vector_store
+    from documents_processing import upload_document_to_vector_store, delete_user_documents, store_text_to_vector_store, warmup_embeddings
     from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase
     from ocr_manager import OCRManager
     from history_manager import save_context
@@ -97,9 +114,16 @@ app = FastAPI(title="Enterprise AI API")
 def _warmup_models():
     if os.getenv("LLM_WARMUP", "true").lower() == "false":
         return
-    if not warmup_models:
+    if not warmup_models and not warmup_embeddings:
         return
-    threading.Thread(target=warmup_models, daemon=True).start()
+
+    def _run_warmups():
+        if warmup_models:
+            warmup_models()
+        if warmup_embeddings:
+            warmup_embeddings()
+
+    threading.Thread(target=_run_warmups, daemon=True).start()
 
 
 if OCRManager:

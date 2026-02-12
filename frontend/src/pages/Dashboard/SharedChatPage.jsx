@@ -4,10 +4,44 @@ import shareApi from '../../api/share';
 
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
 
+const CONTEXT_LABELS = {
+  voice_context: '会议纪要/转写',
+  ocr_context: '文档识别结果',
+  audit_context: '智能审单记录',
+  context_save: '内容记录'
+};
+
+const isLikelyJson = (value = '') => {
+  const text = String(value || '').trim();
+  return (text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'));
+};
+
+const normalizeContextContent = (raw) => {
+  if (raw === null || raw === undefined) return { text: '', isJson: false };
+  if (typeof raw !== 'string') return { text: String(raw), isJson: false };
+  const trimmed = raw.trim();
+  if (!trimmed) return { text: '', isJson: false };
+  if (!isLikelyJson(trimmed)) return { text: raw, isJson: false };
+  try {
+    const parsed = JSON.parse(trimmed);
+    const extracted =
+      (typeof parsed?.text === 'string' && parsed.text) ||
+      (typeof parsed?.data?.text === 'string' && parsed.data.text) ||
+      (typeof parsed?.result?.text === 'string' && parsed.result.text);
+    if (extracted && extracted.trim()) {
+      return { text: extracted, isJson: false };
+    }
+    return { text: JSON.stringify(parsed, null, 2), isJson: true };
+  } catch {
+    return { text: raw, isJson: false };
+  }
+};
+
 const SharedChatPage = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [data, setData] = useState(null);
+  const [expandedContexts, setExpandedContexts] = useState({});
 
   useEffect(() => {
     const pathParts = window.location.pathname.split('/');
@@ -107,13 +141,40 @@ const SharedChatPage = () => {
 
             // 上下文提示
             if (msg.role === 'context') {
+               const label = CONTEXT_LABELS[msg.func_type] || '上下文内容';
+               const { text, isJson } = normalizeContextContent(msg.content);
+               const isExpanded = expandedContexts[idx] !== undefined ? expandedContexts[idx] : true;
                return (
                    <div key={idx} className="flex justify-center">
-                       <div className="bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-lg p-3 w-full max-w-lg text-xs text-gray-500 dark:text-gray-400 flex items-center gap-2">
-                           <FileText size={14} className="flex-shrink-0" />
-                           <span className="truncate">该部分包含上下文或文件解析内容</span>
-                           <span className="opacity-50 ml-auto">(已折叠)</span>
+                     <div className="bg-gray-50 dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-3 w-full max-w-3xl text-xs text-gray-600 dark:text-gray-300">
+                       <div className="flex items-center gap-2">
+                         <FileText size={14} className="flex-shrink-0 text-gray-400" />
+                         <span className="font-medium text-gray-700 dark:text-gray-200">{label}</span>
+                         <button
+                           onClick={() => setExpandedContexts((prev) => ({ ...prev, [idx]: !isExpanded }))}
+                           className="ml-auto text-[11px] text-blue-600 dark:text-blue-300 hover:underline"
+                         >
+                           {isExpanded ? '收起' : '展开'}
+                         </button>
                        </div>
+                       {isExpanded && (
+                         <div className="mt-2 rounded-lg border border-gray-100 dark:border-gray-800 bg-white/60 dark:bg-gray-950/40 p-3">
+                           {text ? (
+                             isJson ? (
+                               <pre className="whitespace-pre-wrap text-[12px] leading-relaxed text-gray-600 dark:text-gray-300">
+                                 {text}
+                               </pre>
+                             ) : (
+                               <Suspense fallback={<div className="text-xs text-gray-400">Loading...</div>}>
+                                 <MarkdownRenderer content={text} />
+                               </Suspense>
+                             )
+                           ) : (
+                             <div className="text-[12px] text-gray-400">暂无内容</div>
+                           )}
+                         </div>
+                       )}
+                     </div>
                    </div>
                )
             }

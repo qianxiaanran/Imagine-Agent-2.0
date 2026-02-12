@@ -133,7 +133,7 @@ const MarkdownRenderer = ({ content, streaming = false }) => {
       return <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{children}</th>;
     },
     td({ children }) {
-      return <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300 border-t border-gray-100 dark:border-gray-800">{children}</td>;
+      return <td className="px-4 py-2 whitespace-nowrap text-[15px] text-gray-700 dark:text-gray-300 border-t border-gray-100 dark:border-gray-800">{children}</td>;
     },
     a({ node, ...props }) {
       return <a className="text-blue-600 dark:text-blue-400 hover:underline cursor-pointer" target="_blank" rel="noopener noreferrer" {...props} />;
@@ -157,7 +157,7 @@ const MarkdownRenderer = ({ content, streaming = false }) => {
   }), []);
 
   return (
-    <div className="markdown-body text-sm leading-relaxed">
+    <div className="markdown-body text-base leading-relaxed">
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}

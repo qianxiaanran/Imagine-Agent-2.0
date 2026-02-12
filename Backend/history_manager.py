@@ -65,7 +65,7 @@ def get_history_limited(user_id, session_id, limit=20):
     """
     try:
         res = supabase.table("history") \
-            .select("role, content, created_at") \
+            .select("role, content, created_at, func_type") \
             .eq("session_id", session_id) \
             .eq("user_id", str(user_id)) \
             .order("created_at", desc=True) \

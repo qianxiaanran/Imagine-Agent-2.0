@@ -12,11 +12,15 @@ import userApi from './api/user';
 
 // 预加载函数
 const loadLandingPage = () => import('./pages/LandingPage');
+const loadCapabilitiesPage = () => import('./pages/CapabilitiesPage');
+const loadQuickStartPage = () => import('./pages/QuickStartPage');
 const loadDashboardPage = () => import('./pages/Dashboard/DashboardPage');
 const loadSharedPage = () => import('./pages/Dashboard/SharedChatPage');
 const loadAdminPage = () => import('./pages/Admin/AdminPage');
 
 const LandingPage = React.lazy(loadLandingPage);
+const CapabilitiesPage = React.lazy(loadCapabilitiesPage);
+const QuickStartPage = React.lazy(loadQuickStartPage);
 const DashboardPage = React.lazy(loadDashboardPage);
 const SharedChatPage = React.lazy(loadSharedPage);
 const AdminPage = React.lazy(loadAdminPage);
@@ -31,8 +35,11 @@ export default function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   // ✨ 路由检测
-  const isShareRoute = window.location.pathname.startsWith('/share/');
-  const isAdminRoute = window.location.pathname.startsWith('/admin');
+  const normalizedPath = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
+  const isShareRoute = normalizedPath.startsWith('/share/');
+  const isAdminRoute = normalizedPath.startsWith('/admin');
+  const isCapabilitiesRoute = normalizedPath === '/capabilities';
+  const isQuickStartRoute = normalizedPath === '/quickstart';
 
   // 只有当所有锁都打开时，才移除 Loading 遮罩
   const shouldShowLoading = !isAuthReady;
@@ -70,6 +77,18 @@ export default function App() {
       return;
     }
 
+    const preloadPublicPage = () => {
+      if (isCapabilitiesRoute) {
+        loadCapabilitiesPage();
+        return;
+      }
+      if (isQuickStartRoute) {
+        loadQuickStartPage();
+        return;
+      }
+      loadLandingPage();
+    };
+
     const checkAuth = async () => {
       let isValidSession = false;
       const settleAuth = () => setIsAuthReady(true);
@@ -79,7 +98,7 @@ export default function App() {
         const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY);
         const hasAuthHint = rememberUntil > 0 || hasStoredToken;
         if (!hasAuthHint) {
-          loadLandingPage();
+          preloadPublicPage();
           settleAuth();
           return;
         }
@@ -121,12 +140,12 @@ export default function App() {
       } catch (e) {
         console.error("Auth check logic error", e);
       } finally {
-        if (!isValidSession) loadLandingPage();
+        if (!isValidSession) preloadPublicPage();
         settleAuth();
       }
     };
     checkAuth();
-  }, [isShareRoute, isAdminRoute]);
+  }, [isShareRoute, isAdminRoute, isCapabilitiesRoute, isQuickStartRoute]);
 
   // 4. 修复滚动锁定：确保 loading 结束后 body 可以滚动
   useEffect(() => {
@@ -196,7 +215,15 @@ export default function App() {
                      />
                    )
                  ) : (
-                   <LandingPage onOpenLogin={() => setAuthModalView('login')} />
+                   isCapabilitiesRoute ? (
+                     <CapabilitiesPage onOpenLogin={() => setAuthModalView('login')} />
+                   ) : (
+                     isQuickStartRoute ? (
+                       <QuickStartPage onOpenLogin={() => setAuthModalView('login')} />
+                     ) : (
+                       <LandingPage onOpenLogin={() => setAuthModalView('login')} />
+                     )
+                   )
                  )
              )}
            </Suspense>

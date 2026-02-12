@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Bot, Menu, X, Sun, Moon, ChevronRight, ArrowRight,
-  Database, FileText, LayoutTemplate, Search, Cpu, Globe, Lock, ShieldCheck, Mic, Sparkles
+  Database, FileText, LayoutTemplate, Search, Cpu, Globe, Lock, ShieldCheck, Mic, Sparkles, ClipboardCheck, Share2, Rocket
 } from 'lucide-react';
 import Button from '../components/Button';
 import { useTheme } from '../context/ThemeContext';
@@ -28,6 +28,9 @@ const Reveal = ({ children, className = "", delay = 0 }) => {
 const LandingPage = ({ onOpenLogin }) => {
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isAboutModalOpen, setIsAboutModalOpen] = useState(false);
+  const [isContactModalOpen, setIsContactModalOpen] = useState(false);
+  const [activeLegalModal, setActiveLegalModal] = useState('');
 
   // 使用 context 中的 theme
   const { toggleTheme, currentTheme } = useTheme();
@@ -38,11 +41,32 @@ const LandingPage = ({ onOpenLogin }) => {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
+  useEffect(() => {
+    if (!isAboutModalOpen && !isContactModalOpen && !activeLegalModal) return;
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setIsAboutModalOpen(false);
+        setIsContactModalOpen(false);
+        setActiveLegalModal('');
+      }
+    };
+
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isAboutModalOpen, isContactModalOpen, activeLegalModal]);
+
   const navLinks = [
     { name: '功能特性', href: '#features' },
-    { name: '技术架构', href: '#tech' },
     { name: '解决方案', href: '#solutions' },
-    { name: '文档', href: '#' },
+    { name: '能力详情', href: '/capabilities' },
+    { name: '快速上手', href: '/quickstart' },
   ];
 
   return (
@@ -114,7 +138,7 @@ const LandingPage = ({ onOpenLogin }) => {
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
               </span>
-              v2.0 现已发布：集成 Paddle OCR 与 Qwen2.5-coder 本地引擎 <ChevronRight size={14} className="text-gray-400" />
+              v2.0 已上线：支持语音、OCR、审单、知识库与数据库协同 <ChevronRight size={14} className="text-gray-400" />
             </div>
           </Reveal>
           <Reveal delay={100}>
@@ -127,12 +151,12 @@ const LandingPage = ({ onOpenLogin }) => {
             </h1>
           </Reveal>
           <Reveal delay={200}>
-            <p className="text-lg md:text-xl text-gray-500 dark:text-gray-400 mb-10 max-w-2xl mx-auto leading-relaxed">不仅仅是存储，更是理解。结合大语言模型、向量检索与语音识别，<br className="hidden md:block" />为您打造无需代码、即问即答的私有化智能办公中台。</p>
+            <p className="text-lg md:text-xl text-gray-500 dark:text-gray-400 mb-10 max-w-2xl mx-auto leading-relaxed">不只做问答，还把文档、数据库、语音、OCR、审单、写作串成一条业务链。<br className="hidden md:block" />一个入口就能覆盖多数企业日常协作场景。</p>
           </Reveal>
           <Reveal delay={300}>
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-20">
-              <Button variant="primary" className="w-full sm:w-auto text-lg px-8 py-4 shadow-xl shadow-gray-900/10 dark:shadow-white/5" icon={ArrowRight} onClick={onOpenLogin}>开始构建智能体</Button>
-              <Button variant="outline" className="w-full sm:w-auto text-lg px-8 py-4 backdrop-blur-sm">观看 2 分钟演示</Button>
+              <Button variant="primary" className="w-full sm:w-auto text-lg px-8 py-4 shadow-xl shadow-gray-900/10 dark:shadow-white/5" icon={ArrowRight} onClick={onOpenLogin}>登录并开始使用</Button>
+              <Button variant="outline" className="w-full sm:w-auto text-lg px-8 py-4 backdrop-blur-sm" onClick={() => { window.location.href = '/quickstart'; }}>查看快速上手</Button>
             </div>
           </Reveal>
 
@@ -236,7 +260,7 @@ const LandingPage = ({ onOpenLogin }) => {
             <Reveal className="md:col-span-2 bg-white dark:bg-gray-800 rounded-[2rem] p-10 border border-gray-100 dark:border-gray-700 shadow-sm hover:shadow-2xl hover:border-red-100 dark:hover:border-red-900 hover:-translate-y-1 transition-all duration-300 group" delay={200}>
               <div className="w-12 h-12 bg-red-50 dark:bg-red-900/20 rounded-2xl flex items-center justify-center mb-6 text-red-500 group-hover:rotate-12 transition-transform"><Mic size={24} /></div>
               <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">会议语音转写</h3>
-              <p className="text-gray-500 dark:text-gray-400 text-sm leading-relaxed">支持 WAV 音频上传。自动区分发言人，提取 Action Item，一键生成结构化纪要。</p>
+              <p className="text-gray-500 dark:text-gray-400 text-sm leading-relaxed">支持录音上传与即时语音输入，自动转写并生成会议纪要，结果可继续追问和编辑。</p>
             </Reveal>
 
             {/* Card 4: Privacy */}
@@ -291,13 +315,55 @@ const LandingPage = ({ onOpenLogin }) => {
                             <div className="bg-gray-800 dark:bg-gray-900 p-3 rounded-lg border border-gray-700 flex items-center gap-2"><div className="w-1.5 h-1.5 bg-blue-400 rounded-full"></div> Chroma 向量库</div>
                             <div className="bg-gray-800 dark:bg-gray-900 p-3 rounded-lg border border-gray-700 flex items-center gap-2"><div className="w-1.5 h-1.5 bg-purple-400 rounded-full"></div> Qwen2.5-coder LLM</div>
                             <div className="bg-gray-800 dark:bg-gray-900 p-3 rounded-lg border border-gray-700 flex items-center gap-2"><div className="w-1.5 h-1.5 bg-green-400 rounded-full"></div> BGE Embedding</div>
-                            <div className="bg-gray-800 dark:bg-gray-900 p-3 rounded-lg border border-gray-700 flex items-center gap-2"><div className="w-1.5 h-1.5 bg-yellow-400 rounded-full"></div> Whisper STT</div>
+                            <div className="bg-gray-800 dark:bg-gray-900 p-3 rounded-lg border border-gray-700 flex items-center gap-2"><div className="w-1.5 h-1.5 bg-yellow-400 rounded-full"></div> Baidu ASR + Queue</div>
                           </div>
                         </div>
                       </div>
                    </div>
                 </div>
               </div>
+            </Reveal>
+          </div>
+        </div>
+      </section>
+
+      {/* Solutions Section */}
+      <section id="solutions" className="py-32 bg-gray-50/50 dark:bg-gray-900/40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <Reveal>
+            <div className="text-center mb-16">
+              <SectionBadge>解决方案</SectionBadge>
+              <h2 className="text-4xl md:text-5xl font-bold text-gray-900 dark:text-white mb-5 tracking-tight">按业务场景直接落地</h2>
+              <p className="text-gray-500 dark:text-gray-400 text-lg max-w-2xl mx-auto">从“提问”到“交付”是一条完整链路，你可以按场景逐步启用，不需要一次性重构流程。</p>
+            </div>
+          </Reveal>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <Reveal className="bg-white dark:bg-gray-800 rounded-[2rem] p-8 border border-gray-100 dark:border-gray-700 shadow-sm hover:shadow-xl transition-all duration-300">
+              <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-900/25 text-blue-600 dark:text-blue-300 flex items-center justify-center mb-5">
+                <Rocket size={22} />
+              </div>
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">运营分析提效</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed mb-4">把数据库问答、联网搜索和报告写作串起来，快速完成“数据查询-结论归纳-输出汇报”。</p>
+              <div className="text-xs text-gray-600 dark:text-gray-300">典型入口：数据库模式 + 报告/PPT 写作</div>
+            </Reveal>
+
+            <Reveal className="bg-white dark:bg-gray-800 rounded-[2rem] p-8 border border-gray-100 dark:border-gray-700 shadow-sm hover:shadow-xl transition-all duration-300" delay={120}>
+              <div className="w-12 h-12 rounded-2xl bg-amber-50 dark:bg-amber-900/25 text-amber-600 dark:text-amber-300 flex items-center justify-center mb-5">
+                <ClipboardCheck size={22} />
+              </div>
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">单据风险把控</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed mb-4">上传单据后触发审单任务，跟踪进度与风险分级，关键异常可同步到复核动作。</p>
+              <div className="text-xs text-gray-600 dark:text-gray-300">典型入口：审单 Agent + OCR 识别</div>
+            </Reveal>
+
+            <Reveal className="bg-white dark:bg-gray-800 rounded-[2rem] p-8 border border-gray-100 dark:border-gray-700 shadow-sm hover:shadow-xl transition-all duration-300" delay={240}>
+              <div className="w-12 h-12 rounded-2xl bg-emerald-50 dark:bg-emerald-900/25 text-emerald-600 dark:text-emerald-300 flex items-center justify-center mb-5">
+                <Share2 size={22} />
+              </div>
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">协作与知识沉淀</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed mb-4">会话可保存上下文并生成分享链接，让纪要、文档解读和流程结论更容易流转给团队。</p>
+              <div className="text-xs text-gray-600 dark:text-gray-300">典型入口：历史会话 + 分享链接</div>
             </Reveal>
           </div>
         </div>
@@ -321,37 +387,162 @@ const LandingPage = ({ onOpenLogin }) => {
             <div>
               <h4 className="font-bold text-gray-900 dark:text-white mb-6">产品</h4>
               <ul className="space-y-4 text-sm text-gray-500 dark:text-gray-400">
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">功能特性</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">解决方案</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">更新日志</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">价格方案</a></li>
+                <li><a href="#features" className="hover:text-black dark:hover:text-white transition-colors">功能特性</a></li>
+                <li><a href="#solutions" className="hover:text-black dark:hover:text-white transition-colors">解决方案</a></li>
+                <li><a href="/capabilities" className="hover:text-black dark:hover:text-white transition-colors">能力详情</a></li>
+                <li><a href="/quickstart" className="hover:text-black dark:hover:text-white transition-colors">快速上手</a></li>
               </ul>
             </div>
             <div>
               <h4 className="font-bold text-gray-900 dark:text-white mb-6">资源</h4>
               <ul className="space-y-4 text-sm text-gray-500 dark:text-gray-400">
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">帮助文档</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">API 文档</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">社区支持</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">开发者博客</a></li>
+                <li><a href="/quickstart" className="hover:text-black dark:hover:text-white transition-colors">使用手册</a></li>
+                <li><a href="/capabilities" className="hover:text-black dark:hover:text-white transition-colors">集成清单</a></li>
+                <li><button type="button" onClick={onOpenLogin} className="hover:text-black dark:hover:text-white transition-colors">登录体验</button></li>
+                <li><a href="#tech" className="hover:text-black dark:hover:text-white transition-colors">架构概览</a></li>
               </ul>
             </div>
             <div>
               <h4 className="font-bold text-gray-900 dark:text-white mb-6">关于</h4>
               <ul className="space-y-4 text-sm text-gray-500 dark:text-gray-400">
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">关于我们</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">联系方式</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">隐私政策</a></li>
-                <li><a href="#" className="hover:text-black dark:hover:text-white transition-colors">服务条款</a></li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => setIsAboutModalOpen(true)}
+                    className="hover:text-black dark:hover:text-white transition-colors text-left"
+                  >
+                    关于我
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => setIsContactModalOpen(true)}
+                    className="hover:text-black dark:hover:text-white transition-colors text-left"
+                  >
+                    联系方式
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => setActiveLegalModal('隐私政策')}
+                    className="hover:text-black dark:hover:text-white transition-colors text-left"
+                  >
+                    隐私政策
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => setActiveLegalModal('服务条款')}
+                    className="hover:text-black dark:hover:text-white transition-colors text-left"
+                  >
+                    服务条款
+                  </button>
+                </li>
               </ul>
             </div>
           </div>
           <div className="pt-8 border-t border-gray-100 dark:border-gray-800 flex flex-col md:flex-row justify-between items-center gap-4">
-            <p className="text-xs text-gray-400 dark:text-gray-500">© 2025 Enterprise Intelligent Office Agent. All rights reserved.</p>
+            <p className="text-xs text-gray-400 dark:text-gray-500">© 2026 Enterprise Intelligent Office Agent. All rights reserved.</p>
             <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500"><div className="w-2 h-2 rounded-full bg-green-500"></div> 系统运行正常</div>
           </div>
         </div>
       </footer>
+
+      {isAboutModalOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" onClick={() => setIsAboutModalOpen(false)}></div>
+          <div className="relative w-full max-w-2xl rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-2xl p-6 md:p-7 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <h3 className="text-xl md:text-2xl font-bold text-gray-900 dark:text-white">关于我</h3>
+              <button
+                type="button"
+                onClick={() => setIsAboutModalOpen(false)}
+                className="p-2 rounded-lg text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                aria-label="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-sm md:text-base leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+              这个小项目我的毕业小设计，肯定存在许多逻辑设计问题或bug，有的功能设计思路甚至都是我凭空想象出来的，如有建议请务必联系我，我会尽力吸纳改正的，等毕业答辩结束后我会将完整源码在github上公开，感谢使用！
+            </p>
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsAboutModalOpen(false)}
+                className="px-4 py-2 rounded-full bg-gray-900 text-white dark:bg-white dark:text-black text-sm font-medium hover:bg-black dark:hover:bg-gray-200 transition-colors"
+              >
+                我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isContactModalOpen && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" onClick={() => setIsContactModalOpen(false)}></div>
+          <div className="relative w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-2xl p-6 md:p-7 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <h3 className="text-xl md:text-2xl font-bold text-gray-900 dark:text-white">联系方式</h3>
+              <button
+                type="button"
+                onClick={() => setIsContactModalOpen(false)}
+                className="p-2 rounded-lg text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                aria-label="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-sm md:text-base leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+              微信号：gjl031023{"\n"}邮箱：gjl15502246686@163.com{"\n"}instagram：joker_20031023{"\n"}X：imagine47852854
+            </p>
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setIsContactModalOpen(false)}
+                className="px-4 py-2 rounded-full bg-gray-900 text-white dark:bg-white dark:text-black text-sm font-medium hover:bg-black dark:hover:bg-gray-200 transition-colors"
+              >
+                我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeLegalModal && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/45 backdrop-blur-[2px]" onClick={() => setActiveLegalModal('')}></div>
+          <div className="relative w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-2xl p-6 md:p-7 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <h3 className="text-xl md:text-2xl font-bold text-gray-900 dark:text-white">{activeLegalModal}</h3>
+              <button
+                type="button"
+                onClick={() => setActiveLegalModal('')}
+                className="p-2 rounded-lg text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                aria-label="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-sm md:text-base leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+              暂时还没想好，只是占个位嘿嘿
+            </p>
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setActiveLegalModal('')}
+                className="px-4 py-2 rounded-full bg-gray-900 text-white dark:bg-white dark:text-black text-sm font-medium hover:bg-black dark:hover:bg-gray-200 transition-colors"
+              >
+                我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

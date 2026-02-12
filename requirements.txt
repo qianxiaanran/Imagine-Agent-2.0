@@ -86,6 +86,7 @@ kiwisolver==1.4.9
 langchain==0.2.16
 langchain-community==0.2.16
 langchain-core==0.2.38
+langchain-huggingface==0.0.3
 langchain-text-splitters==0.2.4
 langdetect==1.0.9
 langgraph==0.1.14
@@ -176,11 +177,13 @@ RapidFuzz==3.14.3
 rarfile==4.2
 realtime==2.24.0
 referencing==0.36.2
+redis==5.3.1
 regex==2025.11.3
 requests==2.32.5
 requests-toolbelt==1.0.0
 rfc3339-validator==0.1.4
 rpds-py==0.30.0
+rq==1.16.2
 ruamel.yaml==0.19.1
 safetensors==0.7.0
 scikit-image==0.25.2
