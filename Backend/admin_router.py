@@ -164,7 +164,8 @@ def update_user_role(
     ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN])),
 ):
     role = _normalize_role(payload.role)
-    sb_admin = get_admin_supabase()
+    # Use a fresh admin client to avoid stale auth session state.
+    sb_admin = get_admin_supabase(fresh=True)
     email = None
     try:
         user_res = sb_admin.auth.admin.get_user_by_id(user_id)
@@ -254,7 +255,8 @@ def delete_user(
         raise HTTPException(status_code=400, detail="Cannot delete current user")
 
     sb = require_supabase()
-    sb_admin = get_admin_supabase()
+    # Use a fresh admin client to avoid stale auth session state.
+    sb_admin = get_admin_supabase(fresh=True)
     delete_ok = False
 
     try:

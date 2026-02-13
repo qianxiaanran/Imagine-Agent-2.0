@@ -1,8 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
 
   // 优化依赖预构建，防止部分依赖在网络慢时加载失败
   optimizeDeps: {
@@ -38,7 +39,7 @@ export default defineConfig({
     // 4. API 反向代理 (保持你原有的)
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:18001",
+        target: "http://127.0.0.1:18000",
         changeOrigin: true,
         secure: false,
       }

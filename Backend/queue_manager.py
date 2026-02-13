@@ -73,14 +73,18 @@ def enqueue_job(
     _ensure_queue_libs()
     queue = get_queue(queue_name, default_timeout=timeout)
     retry = Retry(max=retry_max) if retry_max and retry_max > 0 else None
-    return queue.enqueue(
-        func=func,
-        kwargs=kwargs or {},
-        job_id=job_id,
-        retry=retry,
-        result_ttl=result_ttl,
-        failure_ttl=failure_ttl,
-    )
+    enqueue_kwargs: Dict[str, Any] = {
+        "kwargs": kwargs or {},
+        "job_id": job_id,
+        "retry": retry,
+        "result_ttl": result_ttl,
+        "failure_ttl": failure_ttl,
+    }
+    if timeout is not None:
+        # RQ 1.x accepts `job_timeout`; older wrappers may rely on queue default_timeout.
+        enqueue_kwargs["job_timeout"] = int(timeout)
+    # NOTE: RQ 1.16 Queue.enqueue requires the function as the first positional arg (`f`).
+    return queue.enqueue(func, **enqueue_kwargs)
 
 
 def fetch_job(job_id: str) -> Optional[Any]:

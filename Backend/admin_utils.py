@@ -122,7 +122,11 @@ def _ensure_profile(user: Any, role: Optional[str] = None) -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     app_meta = getattr(user, "app_metadata", {}) or {}
     user_meta = getattr(user, "user_metadata", {}) or {}
-    role_value = _normalize_role(role or app_meta.get("role"))
+    existing = _fetch_profile(user.id)
+    app_role_raw = role if role is not None else app_meta.get("role")
+    has_explicit_role = role is not None or app_meta.get("role") not in (None, "")
+    existing_role = _normalize_role((existing or {}).get("role"))
+    role_value = _normalize_role(app_role_raw) if has_explicit_role else (existing_role or ROLE_USER)
     payload = {
         "id": user.id,
         "email": user.email,
@@ -132,7 +136,6 @@ def _ensure_profile(user: Any, role: Optional[str] = None) -> Dict[str, Any]:
         "job_title": user_meta.get("job_title"),
         "updated_at": now,
     }
-    existing = _fetch_profile(user.id)
     if not existing:
         payload["created_at"] = now
         saved = safe_insert_profile(payload)
@@ -169,7 +172,11 @@ def require_active_user(authorization: Optional[str] = Header(default=None)) -> 
                 raise
             except Exception:
                 pass
-    role = _normalize_role((getattr(user, "app_metadata", {}) or {}).get("role"))
+    app_meta = getattr(user, "app_metadata", {}) or {}
+    raw_role = app_meta.get("role")
+    role = _normalize_role(raw_role)
+    if raw_role in (None, "") and profile.get("role"):
+        role = _normalize_role(profile.get("role"))
     return {"user_id": user.id, "role": role, "profile": profile}
 
 

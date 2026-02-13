@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy, useMemo } from 'react';
 import {
   Bot, Zap, FileText, Layout, PanelLeftOpen, ChevronDown, Check, User,
   BookOpen, X, Mic, StopCircle, ArrowRight, Plus,
@@ -108,7 +108,7 @@ const EMAIL_ELEMENT_OPTIONS = [
 const ONBOARDING_STORAGE_PREFIX = "onboarding_seen_v1_";
 const ONBOARDING_MESSAGES = [
   "顶部左侧的模式下拉可切换到报告/PPT/邮件写作、会议纪要、OCR、审单等场景。",
-  "左侧栏（手机点左上角菜单）有新建/搜索聊天和历史会话，知识库入口也在这里；输入框左侧“＋”用于上传文件并启用引用文档/数据库/联网。"
+  "左侧栏（手机点左上角菜单）有新建/搜索聊天和历史会话，知识库入口也在这里；输入框左侧“＋”用于上传文件并启用引用文档/数据库/联网。这是我首次完成这种类型的项目，目前可能还有诸多bug，如有建议请联系我，我会尽可能改正，感谢使用！"
 ];
 const MODEL_OPTIONS = [
   { id: 0, name: "通用助手", icon: Bot },
@@ -347,6 +347,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   // 通用内容面板状态
   const [panelContent, setPanelContent] = useState('');
   const [auditDocType, setAuditDocType] = useState('');
+  const [auditModelBackend, setAuditModelBackend] = useState('local');
   const [auditFile, setAuditFile] = useState(null);
   const [auditNotice, setAuditNotice] = useState('');
   const [auditState, setAuditState] = useState({
@@ -1534,8 +1535,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               body: formData
           });
           const result = await res.json();
-          if (result.text) {
-              return { text: result.text, filePath: result.file_path || null };
+          const text = typeof result?.text === 'string' ? result.text.trim() : '';
+          if (text.startsWith('❌')) {
+              console.warn('Instant transcribe returned legacy failure text:', text);
+              return null;
+          }
+          if (result?.success === false) {
+              console.warn('Instant transcribe failed, fallback to async:', result?.error || result);
+              return null;
+          }
+          if (text) {
+              return { text, filePath: result.file_path || null };
           }
       } catch (e) {
           console.warn('Instant transcribe failed', e);
@@ -1602,6 +1612,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           const formData = new FormData();
           formData.append('file', file);
           if (auditDocType) formData.append('doc_type', auditDocType);
+          const effectiveAuditBackend = auditModelBackend === 'cloud' ? 'cloud' : 'local';
+          formData.append('model_type', effectiveAuditBackend);
           formData.append('user_id', userProfile.id || 'anonymous');
 
           const token = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -2872,6 +2884,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           body: formData
       });
       const result = await res.json();
+      const recognizedText = typeof result?.text === 'string' ? result.text.trim() : '';
+      const isLegacyFailText = recognizedText.startsWith('❌');
+
+      if (!res.ok || result?.success === false || isLegacyFailText) {
+          const msg = result?.error || (isLegacyFailText ? recognizedText : `语音识别失败（${result?.error_code ?? 'unknown'}）`);
+          alert(msg);
+          return;
+      }
 
       if (result.file_path && isMeetingMode) {
           setCurrentAudioPath(result.file_path);
@@ -2880,16 +2900,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           }
       }
 
-      if (result.text) {
+      if (recognizedText) {
           let newText = "";
           if (isMeetingMode || isAuditMode) {
               const prevContent = panelContent;
-              newText = prevContent + (prevContent ? '\n' : '') + result.text;
+              newText = prevContent + (prevContent ? '\n' : '') + recognizedText;
               setPanelContent(newText);
               const type = isAuditMode ? 'audit_context' : 'voice_context';
               if (currentSessionId) savePanelContext(currentSessionId, newText, type);
           } else {
-              setInputValue(prev => prev + (prev ? '\n' : '') + result.text);
+              setInputValue(prev => prev + (prev ? '\n' : '') + recognizedText);
           }
       } else {
           alert(result.error || '未能识别出语音内容');
@@ -4575,9 +4595,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           auditState={auditState}
                           auditDocType={auditDocType}
                           auditDocTypes={AUDIT_DOC_TYPES}
+                          auditModelBackend={auditModelBackend}
                           auditFile={auditFile}
                           auditNotice={auditNotice}
                           onAuditDocTypeChange={setAuditDocType}
+                          onAuditModelBackendChange={setAuditModelBackend}
                           onAuditFileSelect={handleAuditFileSelect}
                           onAuditReset={resetAuditState}
                           onAuditErpAction={handleAuditErpAction}

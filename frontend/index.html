@@ -13,38 +13,13 @@
 
     <title>imagine Agent</title>
 
-    <!-- 在 HTML 中直接加载 Tailwind -->
-    <script id="tailwind-script" src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        darkMode: 'class',
-        theme: {
-          extend: {
-            colors: {
-              gray: { 900: '#111827', 950: '#030712' },
-            },
-            animation: {
-              'pulse-soft': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
-              'float': 'float 6s ease-in-out infinite',
-            },
-            keyframes: {
-              float: {
-                '0%, 100%': { transform: 'translateY(0)' },
-                '50%': { transform: 'translateY(-10px)' },
-              }
-            }
-          },
-        },
-      };
-    </script>
-
     <style>
       /* 基础重置样式 */
       body {
         margin: 0;
         padding: 0;
         background-color: #ffffff;
-        -webkit-tap-highlight-color: transparent; /* 优化移动端点击体验 */
+        -webkit-tap-highlight-color: transparent; /* Improve mobile tap experience */
       }
 
       /* ✅ 修复：移除 overflow: hidden 和固定 height，允许页面自然滚动 */

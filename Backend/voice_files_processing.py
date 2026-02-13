@@ -1,5 +1,6 @@
 ﻿import json
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -14,6 +15,12 @@ VOICE_TASK_PREFIX = "voice:task:"
 VOICE_TASK_TTL_SECONDS = int(os.getenv("VOICE_TASK_TTL_SECONDS", str(7 * 24 * 3600)))
 VOICE_JOB_TIMEOUT_SECONDS = int(os.getenv("VOICE_JOB_TIMEOUT_SECONDS", "3600"))
 VOICE_JOB_RETRY_MAX = int(os.getenv("VOICE_JOB_RETRY_MAX", "2"))
+VOICE_INLINE_FALLBACK = os.getenv("VOICE_INLINE_FALLBACK", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 # Fallback cache when Redis is temporarily unavailable.
 TRANSCRIPTION_TASKS: Dict[str, Dict[str, Any]] = {}
@@ -93,6 +100,23 @@ def process_transcription_task(task_id: str, remote_file_path: str, original_fil
         raise
 
 
+def _run_voice_task_inline_async(task_id: str, remote_file_path: str, original_filename: str) -> None:
+    """Fallback path when Redis/RQ is unavailable."""
+
+    def _target() -> None:
+        try:
+            process_transcription_task(task_id, remote_file_path, original_filename)
+        except Exception as e:
+            print(f"[Voice Queue Fallback] task {task_id} failed: {e}")
+
+    thread = threading.Thread(
+        target=_target,
+        name=f"voice-inline-{task_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+
+
 async def submit_supabase_task(file_path: str, original_name: str) -> str:
     task_id = str(uuid.uuid4())
     queue_job_id = f"voice:{task_id}"
@@ -125,6 +149,11 @@ async def submit_supabase_task(file_path: str, original_name: str) -> str:
             timeout=VOICE_JOB_TIMEOUT_SECONDS,
         )
     except Exception as e:
+        if VOICE_INLINE_FALLBACK:
+            print(f"[Voice Queue] enqueue failed ({e}), fallback to inline worker thread")
+            _patch_task(task_id, dispatch_mode="inline")
+            _run_voice_task_inline_async(task_id, file_path, original_name)
+            return task_id
         err = f"Queue enqueue failed: {e}"
         _patch_task(task_id, status="failed", error_message=err, result=err, completed_at=_now_iso())
         raise RuntimeError(err) from e

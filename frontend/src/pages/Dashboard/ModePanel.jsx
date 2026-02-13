@@ -143,7 +143,7 @@ const AudioPlayer = ({ src }) => {
           <button
             onClick={() => { if (audioRef.current) { audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 10); } }}
             className="text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 transition-colors p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full"
-            title="后退 10秒"
+            title="后退 10 秒"
           >
             <RotateCcw size={18} />
           </button>
@@ -196,6 +196,8 @@ const AuditPanel = ({
   docTypes,
   docType,
   onDocTypeChange,
+  auditModelBackend = "local",
+  onAuditModelBackendChange,
   onFileSelect,
   auditState,
   auditFile,
@@ -223,7 +225,7 @@ const AuditPanel = ({
 
   const steps = [
     { key: "ocr", label: "OCR 识别" },
-    { key: "extract", label: "字段抽取" },
+    { key: "extract", label: "字段提取" },
     { key: "rules", label: "规则校验" },
     { key: "ai", label: "AI 风险审单" },
     { key: "report", label: "报告生成" },
@@ -248,7 +250,7 @@ const AuditPanel = ({
     : (riskLevel === "medium" ? "bg-amber-50 text-amber-600 border-amber-100" : "bg-emerald-50 text-emerald-600 border-emerald-100");
   const actionAdvice = riskLevel === "high"
     ? "建议驳回或人工复核"
-    : (riskLevel === "medium" ? "建议人工复核/补材料" : "建议通过");
+    : (riskLevel === "medium" ? "建议人工复核/补充材料" : "建议通过");
   const isPass = typeof result.pass === "boolean" ? result.pass : riskLevel === "low";
 
   const extracted = result.extracted_fields || {};
@@ -284,6 +286,10 @@ const AuditPanel = ({
   const statusLabel = status === "uploading" ? "文件上传中" : (status === "pending" ? "排队中" : "审单进行中");
 
   const widthClass = fullWidth ? "md:w-full md:border-r-0" : "md:w-1/2 md:border-r";
+  const auditModelOptions = [
+    { value: "local", label: "本地" },
+    { value: "cloud", label: "云端" },
+  ];
 
   return (
     <div className={`w-full ${widthClass} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
@@ -330,6 +336,30 @@ const AuditPanel = ({
                     active
                       ? "bg-teal-600 text-white border-teal-600"
                       : "bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-teal-400"
+                  } ${isBusy ? "opacity-50 cursor-not-allowed" : ""}`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 dark:border-gray-800 p-4 bg-white dark:bg-gray-900">
+          <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">审单模型</div>
+          <div className="flex flex-wrap gap-2">
+            {auditModelOptions.map((item) => {
+              const active = item.value === auditModelBackend;
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => !isBusy && onAuditModelBackendChange && onAuditModelBackendChange(item.value)}
+                  disabled={isBusy}
+                  className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                    active
+                      ? "bg-gray-900 text-white border-gray-900"
+                      : "bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-gray-400"
                   } ${isBusy ? "opacity-50 cursor-not-allowed" : ""}`}
                 >
                   {item.label}
@@ -555,7 +585,7 @@ const AuditPanel = ({
                               {severity === "high" ? "高风险" : (severity === "medium" ? "中风险" : "低风险")}
                             </span>
                             <span className={`px-2 py-0.5 rounded-full text-[10px] border ${sourceStyle}`}>{sourceLabel}</span>
-                            {confidenceText && <span className="text-[10px] text-gray-400">置信度 {confidenceText}</span>}
+                            {confidenceText && <span className="text-[10px] text-gray-400">置信度: {confidenceText}</span>}
                             <span className="text-sm font-medium text-gray-800 dark:text-gray-100">
                               {finding.message || "规则命中"}
                             </span>
@@ -634,9 +664,11 @@ const ModePanel = ({
   auditState,
   auditDocType,
   auditDocTypes,
+  auditModelBackend,
   auditFile,
   auditNotice,
   onAuditDocTypeChange,
+  onAuditModelBackendChange,
   onAuditFileSelect,
   onAuditReset,
   onAuditErpAction,
@@ -654,6 +686,8 @@ const ModePanel = ({
         docTypes={auditDocTypes}
         docType={auditDocType}
         onDocTypeChange={onAuditDocTypeChange}
+        auditModelBackend={auditModelBackend}
+        onAuditModelBackendChange={onAuditModelBackendChange}
         onFileSelect={onAuditFileSelect}
         auditState={auditState}
         auditFile={auditFile}

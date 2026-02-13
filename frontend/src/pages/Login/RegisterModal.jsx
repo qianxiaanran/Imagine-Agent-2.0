@@ -76,7 +76,6 @@ const RegisterModal = ({ isOpen, onClose, onSwitchToLogin, onRegisterSuccess }) 
         if (result.token) {
           localStorage.setItem(AUTH_TOKEN_KEY, result.token);
         }
-        alert(`注册成功：${result.reason || '手机号验证通过，账号创建成功并已自动登录'}`);
         onRegisterSuccess();
       } else {
         setError('注册失败：请检查输入信息后重试');

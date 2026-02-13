@@ -66,18 +66,24 @@ ERP_ACTIONS = {"approved", "rejected", "need_more"}
 RISK_WEIGHT = {"high": 25, "medium": 12, "low": 5}
 AUDIT_JOB_TIMEOUT_SECONDS = int(os.getenv("AUDIT_JOB_TIMEOUT_SECONDS", "5400"))
 AUDIT_JOB_RETRY_MAX = int(os.getenv("AUDIT_JOB_RETRY_MAX", "2"))
+AUDIT_INLINE_FALLBACK = os.getenv("AUDIT_INLINE_FALLBACK", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 DOC_TYPE_ALIASES = {
     "auto": "auto",
-    "自动识别": "auto",
     "invoice": "invoice",
-    "发票": "invoice",
     "contract": "contract",
-    "合同": "contract",
     "payment": "payment",
-    "付款单": "payment",
     "expense": "expense",
-    "报销单": "expense",
+    "\u81ea\u52a8\u8bc6\u522b": "auto",
+    "\u53d1\u7968": "invoice",
+    "\u5408\u540c": "contract",
+    "\u4ed8\u6b3e\u5355": "payment",
+    "\u62a5\u9500\u5355": "expense",
 }
 
 STAGE_PROGRESS = {
@@ -90,6 +96,20 @@ STAGE_PROGRESS = {
     "done": 100,
     "failed": 100,
 }
+
+AUDIT_MODEL_ALIASES = {
+    "local": "local",
+    "cloud": "cloud",
+    "deepseek": "cloud",
+    "auto": "local",
+}
+
+OCR_REQUIRED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".pdf"}
+DIRECT_PARSE_EXTENSIONS = {".doc", ".docx", ".txt"}
+
+DATE_COMPACT_PATTERN = r"\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\b"
+AMOUNT_CAPTURE_PATTERN = r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[+-]?\d+(?:\.\d+)?"
+AMOUNT_TOKEN_PATTERN = rf"(?<![\dA-Za-z])({AMOUNT_CAPTURE_PATTERN})(?![\dA-Za-z])"
 
 AUDIT_JOBS: Dict[str, Dict[str, Any]] = {}
 AUDIT_LOCK = threading.Lock()
@@ -142,6 +162,13 @@ def normalize_doc_type(doc_type: Optional[str]) -> str:
     return DOC_TYPE_ALIASES.get(key, DOC_TYPE_ALIASES.get(key.lower(), "auto"))
 
 
+def normalize_model_type(model_type: Optional[str]) -> str:
+    key = (model_type or "").strip().lower()
+    if not key:
+        return AUDIT_AI_BACKEND
+    return AUDIT_MODEL_ALIASES.get(key, AUDIT_AI_BACKEND)
+
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat()
 
@@ -168,6 +195,16 @@ def _safe_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _normalize_text(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if not text:
+        return ""
+    text = re.sub(r"[\s\u3000]+", "", text)
+    # Keep letters/digits/Chinese only; strip punctuation for stable ID/vendor matching.
+    text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+    return text
+
+
 def _safe_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -185,7 +222,7 @@ def _parse_date(value: Any) -> Optional[datetime]:
     m = re.search(r"(20\d{2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})", text)
     if m:
         candidates.append(f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}")
-    m = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})", text)
+    m = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?", text)
     if m:
         candidates.append(f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}")
     candidates.append(text.replace("/", "-"))
@@ -258,6 +295,7 @@ def _load_job_from_db(job_id: str) -> Optional[Dict[str, Any]]:
             "job_id": job.get("job_id"),
             "user_id": job.get("user_id"),
             "doc_type": job.get("doc_type"),
+            "model_type": normalize_model_type(job.get("model_type")),
             "status": job.get("status"),
             "progress": job.get("progress", 0),
             "stage": job.get("stage"),
@@ -278,10 +316,12 @@ def create_job(
     filename: str,
     user_id: str,
     doc_type: Optional[str],
+    model_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     job_id = str(uuid.uuid4())
     doc_id = str(uuid.uuid4())
     normalized_doc_type = normalize_doc_type(doc_type)
+    normalized_model_type = normalize_model_type(model_type)
     safe_user_id = user_id or "anonymous"
 
     _, file_url = _save_local_file(file_bytes, safe_user_id, job_id, filename)
@@ -292,6 +332,7 @@ def create_job(
         "doc_id": doc_id,
         "user_id": safe_user_id,
         "doc_type": normalized_doc_type,
+        "model_type": normalized_model_type,
         "status": "pending",
         "progress": 0,
         "stage": "pending",
@@ -310,6 +351,7 @@ def create_job(
         "job_id": job_id,
         "user_id": safe_user_id,
         "doc_type": normalized_doc_type,
+        "model_type": normalized_model_type,
         "status": "pending",
         "progress": 0,
         "stage": "pending",
@@ -337,7 +379,7 @@ def update_job(job_id: str, **updates: Any) -> None:
             job.update(updates)
             job["updated_at"] = now_iso
 
-    payload = {k: v for k, v in updates.items() if k != "result"}
+    payload = {k: v for k, v in updates.items() if k not in {"result"}}
     if payload:
         payload["updated_at"] = now_iso
         _update_db("audit_jobs", payload, job_id)
@@ -402,7 +444,13 @@ def retry_audit_job(job_id: str) -> Tuple[bool, Optional[str]]:
     try:
         with open(local_path, "rb") as f:
             file_bytes = f.read()
-        enqueue_audit_job(file_bytes, file_name, user_id, job.get("doc_type", "auto"))
+        enqueue_audit_job(
+            file_bytes,
+            file_name,
+            user_id,
+            job.get("doc_type", "auto"),
+            model_type=job.get("model_type"),
+        )
         return True, None
     except Exception as e:
         return False, str(e)
@@ -425,19 +473,56 @@ def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
                 "error_message": job.get("error_message"),
                 "result": job.get("result"),
                 "doc_type": job.get("doc_type"),
+                "model_type": job.get("model_type"),
                 "file_url": job.get("file_url"),
                 "file_name": job.get("file_name"),
             }
     return None
 
 
-DATE_PATTERN = r"20\d{2}\s*(?:[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\u5e74\s*\d{1,2}\s*\u6708\s*\d{1,2}\s*\u65e5?)"
+DATE_PATTERN = r"(?:19|20)\d{2}\s*(?:[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\u5e74\s*\d{1,2}\s*\u6708\s*\d{1,2}\s*\u65e5?)"
+
+
+def _is_compact_date_digits(value: str) -> bool:
+    digits = re.sub(r"\D", "", value or "")
+    if not re.fullmatch(r"(?:19|20)\d{6}", digits):
+        return False
+    year = int(digits[:4])
+    month = int(digits[4:6])
+    day = int(digits[6:8])
+    if month < 1 or month > 12:
+        return False
+    if day < 1 or day > 31:
+        return False
+    return 1900 <= year <= 2099
+
+
+def _normalize_date_token(value: Any) -> Optional[str]:
+    text = _safe_text(value)
+    if not text:
+        return None
+    m = re.search(r"((?:19|20)\d{2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})", text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"((?:19|20)\d{2})\s*\u5e74\s*(\d{1,2})\s*\u6708\s*(\d{1,2})\s*\u65e5?", text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    if _is_compact_date_digits(text):
+        digits = re.sub(r"\D", "", text)
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    return None
+
+
+def _looks_like_date_token(value: Any) -> bool:
+    return _normalize_date_token(value) is not None
 
 
 def _extract_dates(text: str) -> List[str]:
-    dates = []
+    dates: List[str] = []
     for m in re.findall(DATE_PATTERN, text or ""):
-        dates.append(m.strip())
+        normalized = _normalize_date_token(m)
+        if normalized:
+            dates.append(normalized)
     return dates
 
 
@@ -448,26 +533,133 @@ def _find_date_by_keywords(text: str, keywords: List[str]) -> Optional[str]:
         pattern = rf"{kw}\s*[:\uFF1A]?\s*({DATE_PATTERN})"
         m = re.search(pattern, text)
         if m:
-            return m.group(1).strip()
+            normalized = _normalize_date_token(m.group(1))
+            if normalized:
+                return normalized
     return None
+
+
+def _normalize_amount_value(value: Any) -> Optional[float]:
+    text = _safe_text(value)
+    if not text or _looks_like_date_token(text):
+        return None
+
+    alpha_tokens = re.findall(r"[A-Za-z]+", text)
+    if alpha_tokens:
+        allowed_currency_tokens = {"rmb", "cny", "usd", "eur", "hkd", "jpy"}
+        if any(token.lower() not in allowed_currency_tokens for token in alpha_tokens):
+            return None
+
+    cleaned = text.replace(",", "").strip()
+    cleaned = re.sub(r"^[^0-9+\-]+", "", cleaned)
+    cleaned = re.sub(r"[^0-9.]+$", "", cleaned)
+    if not cleaned or cleaned in {"+", "-"}:
+        return None
+    if cleaned.count(".") > 1:
+        return None
+
+    val = _safe_float(cleaned)
+    if val is None:
+        return None
+    abs_val = abs(val)
+    if abs_val > 1e9:
+        return None
+
+    digit_count = len(re.sub(r"\D", "", cleaned))
+    if "." not in cleaned and digit_count >= 10:
+        return None
+    if "." not in cleaned and 1900 <= abs_val <= 2100 and digit_count <= 4:
+        return None
+    return round(val, 2)
+
+
+def _is_amount_date_context(text: str, start: int, end: int, raw: str) -> bool:
+    window = text[max(0, start - 18): min(len(text), end + 18)]
+    if re.search(r"(?:19|20)\d{2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}", window):
+        return True
+    if re.search(r"(?:19|20)\d{2}\s*\u5e74\s*\d{1,2}\s*\u6708\s*\d{1,2}\s*\u65e5?", window):
+        return True
+    return _is_compact_date_digits(raw)
+
+
+def _is_identifier_context(text: str, start: int, end: int) -> bool:
+    context = text[max(0, start - 10): min(len(text), end + 10)].lower()
+    return bool(
+        re.search(
+            r"(?:"
+            r"\u8d26\u53f7|\u8d26\u6237|\u5f00\u6237|\u7a0e\u53f7|\u7f16\u53f7|\u5355\u53f7|"
+            r"\u53d1\u7968\u53f7|\u5408\u540c\u53f7|account|invoice|contract|tax|serial|no\."
+            r")",
+            context,
+        )
+    )
+
+
+def _amount_signal_score(text: str, start: int, end: int, raw: str, amount: float) -> int:
+    score = 0
+    context = text[max(0, start - 16): min(len(text), end + 16)]
+    if re.search(r"(?:\u00a5|\uffe5|\$|USD|CNY|RMB)", context, flags=re.IGNORECASE):
+        score += 2
+    if re.search(r"(?:\u91d1\u989d|\u5408\u8ba1|\u603b\u8ba1|\u4ef7\u7a0e|\u5e94\u4ed8|\u4ed8\u6b3e|\u62a5\u9500)", context):
+        score += 2
+    if "." in raw or "," in raw:
+        score += 1
+    if abs(amount) >= 1000:
+        score += 1
+    return score
+
+
+def _extract_amount_candidates(text: str) -> List[Tuple[float, int, int]]:
+    candidates: List[Tuple[float, int, int]] = []
+    for match in re.finditer(AMOUNT_TOKEN_PATTERN, text or ""):
+        raw = match.group(1)
+        start, end = match.span(1)
+        amount = _normalize_amount_value(raw)
+        if amount is None:
+            continue
+        if _is_amount_date_context(text or "", start, end, raw):
+            continue
+        if _is_identifier_context(text or "", start, end):
+            continue
+        score = _amount_signal_score(text or "", start, end, raw, amount)
+        candidates.append((amount, score, start))
+    return candidates
 
 
 def _extract_amounts(text: str) -> List[float]:
-    amounts = []
-    for m in re.findall(r"([0-9]+(?:,[0-9]{3})*(?:\.\d+)?)", text):
-        val = _safe_float(m)
-        if val is not None:
-            amounts.append(val)
-    return amounts
+    return [item[0] for item in _extract_amount_candidates(text)]
 
 
 def _find_amount_by_keywords(text: str, keywords: List[str]) -> Optional[float]:
+    candidates: List[Tuple[float, int, int]] = []
+    source = text or ""
     for kw in keywords:
-        pattern = rf"{kw}\s*[:：]?\s*([0-9]+(?:,[0-9]{{3}})*(?:\.\d+)?)"
-        m = re.search(pattern, text)
-        if m:
-            return _safe_float(m.group(1))
-    return None
+        kw_escaped = re.escape(str(kw))
+        pattern = rf"{kw_escaped}\s*[:\uFF1A]?\s*(?:\u4eba\u6c11\u5e01|RMB|CNY|USD|\$|\u00a5|\uffe5)?\s*({AMOUNT_CAPTURE_PATTERN})"
+        for match in re.finditer(pattern, source, flags=re.IGNORECASE):
+            raw = match.group(1)
+            start, end = match.span(1)
+            amount = _normalize_amount_value(raw)
+            if amount is None:
+                continue
+            if _is_amount_date_context(source, start, end, raw):
+                continue
+            score = _amount_signal_score(source, start, end, raw, amount) + 3
+            candidates.append((amount, score, start))
+
+    if not candidates:
+        for line in source.splitlines():
+            if not line.strip():
+                continue
+            if any(kw in line for kw in keywords):
+                line_candidates = _extract_amount_candidates(line)
+                if line_candidates:
+                    line_candidates.sort(key=lambda item: (item[1], item[0], -item[2]), reverse=True)
+                    return line_candidates[0][0]
+        return None
+
+    candidates.sort(key=lambda item: (item[1], item[0], -item[2]), reverse=True)
+    return candidates[0][0]
 
 
 AUDIT_DOC_TYPES = ["invoice", "contract", "payment", "expense"]
@@ -485,35 +677,56 @@ AUDIT_FIELD_KEYS = [
     "bank_account",
     "reimburser",
 ]
+AUDIT_AMOUNT_KEYWORDS = [
+    "\u4ef7\u7a0e\u5408\u8ba1",
+    "\u5408\u8ba1",
+    "\u603b\u8ba1",
+    "\u91d1\u989d",
+    "\u5e94\u4ed8",
+    "\u4ed8\u6b3e\u91d1\u989d",
+    "\u62a5\u9500\u91d1\u989d",
+]
 
 
-def _truncate_text(text: str, max_chars: int) -> str:
-    if not text:
-        return ""
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars]
+def _has_amount_keyword(text: str) -> bool:
+    source = text or ""
+    if not source:
+        return False
+    extra_keywords = [
+        "\u5408\u540c\u91d1\u989d",
+        "\u542b\u7a0e\u91d1\u989d",
+        "\u672a\u7a0e\u91d1\u989d",
+        "\u603b\u989d",
+        "\u603b\u4ef7",
+        "\u5b9e\u4ed8",
+        "\u91d1\u989d\uff08\u5927\u5199\uff09",
+        "\u91d1\u989d(\u5927\u5199)",
+    ]
+    for kw in [*AUDIT_AMOUNT_KEYWORDS, *extra_keywords]:
+        if kw and kw in source:
+            return True
+    return False
 
 
-def _extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
-    if not text:
-        return None
-    cleaned = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    candidate = cleaned[start:end + 1].strip()
-    candidate = re.sub(r",\s*}", "}", candidate)
-    candidate = re.sub(r",\s*]", "]", candidate)
-    try:
-        return json.loads(candidate)
-    except Exception:
-        repaired = re.sub(r"(?<!\\)'", '"', candidate)
-        try:
-            return json.loads(repaired)
-        except Exception:
-            return None
+def _is_identifier_amount_collision(amount: Optional[float], fields: Dict[str, Any]) -> bool:
+    if amount is None:
+        return False
+    if abs(amount - round(amount)) > 1e-6:
+        return False
+
+    amount_digits = str(int(abs(round(amount))))
+    if not amount_digits:
+        return False
+
+    identifier_keys = ("contract_no", "invoice_no", "tax_no", "bank_account")
+    for key in identifier_keys:
+        raw = _safe_text((fields or {}).get(key))
+        if not raw:
+            continue
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) >= 6 and digits == amount_digits:
+            return True
+    return False
 
 
 def _clean_value(value: Any) -> Optional[str]:
@@ -522,10 +735,15 @@ def _clean_value(value: Any) -> Optional[str]:
     text = str(value).strip()
     if not text:
         return None
-    if text in ("null", "None", "N/A", "NA", "n/a", "无", "未知", "未填写"):
+
+    lowered = text.lower()
+    if lowered in {"null", "none", "n/a", "na", "unknown"}:
         return None
-    text = re.sub(r"^[\s:：\-\(\)\[\]（）【】]+", "", text)
-    text = re.sub(r"[\s:：\-\(\)\[\]（）【】]+$", "", text)
+    if text in {"\u672a\u77e5", "\u672a\u586b\u5199", "\u65e0", "-", "--"}:
+        return None
+
+    text = re.sub(r"^[\s:\uFF1A\-()\[\]\u3010\u3011]+", "", text)
+    text = re.sub(r"[\s:\uFF1A\-()\[\]\u3010\u3011]+$", "", text)
     return text or None
 
 
@@ -533,14 +751,13 @@ def _normalize_date_value(value: Any) -> Optional[str]:
     text = _clean_value(value)
     if not text:
         return None
-    m = re.search(r"(20\d{2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})", text)
-    if m:
-        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-    m = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})", text)
-    if m:
-        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    normalized = _normalize_date_token(text)
+    if normalized:
+        return normalized
     date_match = re.search(DATE_PATTERN, text)
-    return date_match.group(0).strip() if date_match else text
+    if not date_match:
+        return None
+    return _normalize_date_token(date_match.group(0))
 
 
 def _extract_with_llm(raw_text: str, hint_type: Optional[str] = None, llm_backend: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -548,30 +765,36 @@ def _extract_with_llm(raw_text: str, hint_type: Optional[str] = None, llm_backen
         return None
     if not ask_llm and not get_llm_instance:
         return None
+
     trimmed = _truncate_text(raw_text or "", AUDIT_LLM_MAX_CHARS)
     if not trimmed:
         return None
-    backend = llm_backend or AUDIT_LLM_BACKEND
+
+    backend = normalize_model_type(llm_backend or AUDIT_LLM_BACKEND)
     doc_types_desc = "\n".join([f"- {key}" for key in AUDIT_DOC_TYPES])
     fields_desc = "\n".join([f"- {key}" for key in AUDIT_FIELD_KEYS])
-    hint_note = f"提示：如果给定类型，请优先使用 {hint_type}。" if hint_type else ""
-    system_prompt = "你是结构化抽取引擎，只输出严格 JSON。不要输出解释或 Markdown。"
+    hint_note = f"Hint doc_type: {hint_type}" if hint_type else "Hint doc_type: auto"
+
+    system_prompt = (
+        "You extract structured audit fields from document text. "
+        "Return strict JSON only; no markdown and no explanation."
+    )
     prompt = (
-        "请从 OCR 文本中抽取智能审单字段。\n"
-        "文档类型候选列表:\n"
-        f"{doc_types_desc}\n\n"
-        "字段 key 列表:\n"
-        f"{fields_desc}\n\n"
-        "输出要求:\n"
-        "1) 只输出 JSON。\n"
-        "2) JSON 结构为 {\"doc_type\":\"<type>\",\"fields\":{...}}。\n"
-        "3) fields 仅包含上述字段 key，无法确定用空字符串。\n"
-        "4) 日期格式为 YYYY-MM-DD，金额仅保留数字和小数点。\n"
-        "5) 不要把冒号、括号等符号带入值。\n"
+        "Extract fields for smart audit from the document text.\n"
+        f"Allowed doc_type values:\n{doc_types_desc}\n\n"
+        f"Allowed field keys:\n{fields_desc}\n\n"
+        "Output requirements:\n"
+        "1) Return strict JSON only.\n"
+        "2) JSON shape must be {\"doc_type\":\"<type>\",\"fields\":{...}}.\n"
+        "3) fields can only contain allowed keys.\n"
+        "4) Date fields must be YYYY-MM-DD.\n"
+        "5) total_amount must be numeric only and must not be a date/year value.\n"
+        "6) If uncertain, return empty string for that field.\n"
         f"{hint_note}\n\n"
-        "OCR 文本:\n"
+        "Document text:\n"
         f"{trimmed}\n"
     )
+
     try:
         response = None
         if get_llm_instance and SystemMessage and HumanMessage:
@@ -585,6 +808,7 @@ def _extract_with_llm(raw_text: str, hint_type: Optional[str] = None, llm_backen
             return None
     except Exception:
         return None
+
     payload = _extract_json_payload(response)
     if not payload:
         return None
@@ -606,7 +830,7 @@ def _merge_llm_fields(base_fields: Dict[str, Any], llm_result: Optional[Dict[str
             continue
         value = llm_fields.get(key)
         if key == "total_amount":
-            amount = _safe_float(value)
+            amount = _normalize_amount_value(value)
             if amount is not None:
                 merged[key] = amount
             continue
@@ -628,25 +852,62 @@ def _merge_llm_fields(base_fields: Dict[str, Any], llm_result: Optional[Dict[str
     return merged
 
 
-def _extract_fields(raw_text: str, doc_type: str) -> Dict[str, Any]:
+def _post_process_fields(fields: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
+    normalized = dict(fields or {})
+    text = raw_text or ""
+
+    for date_key in ("contract_date", "invoice_date", "payment_date"):
+        date_val = _normalize_date_value(normalized.get(date_key))
+        if date_val:
+            normalized[date_key] = date_val
+        else:
+            normalized.pop(date_key, None)
+
+    amount = _normalize_amount_value(normalized.get("total_amount"))
+    keyword_amount = _find_amount_by_keywords(text, AUDIT_AMOUNT_KEYWORDS)
+    amount_candidates = _extract_amount_candidates(text)
+    if keyword_amount is not None:
+        amount = keyword_amount
+    elif amount_candidates:
+        amount_candidates.sort(key=lambda item: (item[1], item[0], -item[2]), reverse=True)
+        amount = amount_candidates[0][0]
+    elif amount is not None and not _has_amount_keyword(text):
+        # LLM 兜底金额必须有文本语义信号，否则易把合同号/编号误判成金额。
+        amount = None
+
+    if _is_identifier_amount_collision(amount, normalized):
+        amount = None
+
+    if amount is None:
+        normalized.pop("total_amount", None)
+    else:
+        normalized["total_amount"] = amount
+    return normalized
+
+
+def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = None) -> Dict[str, Any]:
     text = raw_text or ""
     fields: Dict[str, Any] = {"doc_type": doc_type}
 
     currency = "CNY"
     if "USD" in text or "$" in text:
         currency = "USD"
-    elif "EUR" in text or "€" in text:
+    elif "EUR" in text or "\u20ac" in text:
         currency = "EUR"
     fields["currency"] = currency
 
     fields["invoice_no"] = None
-    m = re.search(r"发票(号码|号)\s*[:：]?\s*([A-Za-z0-9\-]+)", text)
+    m = re.search(
+        r"(?:\u53d1\u7968(?:\u53f7\u7801|\u53f7)?|invoice\s*no\.?)\s*[:\uFF1A]?\s*([A-Za-z0-9\-]{6,30})",
+        text,
+        flags=re.IGNORECASE,
+    )
     if m:
-        fields["invoice_no"] = m.group(2)
+        fields["invoice_no"] = m.group(1)
 
-    m = re.search(r"(税号|纳税人识别号)\s*[:：]?\s*([0-9A-Za-z]{15,20})", text)
+    m = re.search(r"(?:\u7a0e\u53f7|\u7eb3\u7a0e\u4eba\u8bc6\u522b\u53f7)\s*[:\uFF1A]?\s*([0-9A-Za-z]{12,24})", text)
     if m:
-        fields["tax_no"] = m.group(2)
+        fields["tax_no"] = m.group(1)
 
     dates = _extract_dates(text)
     if dates:
@@ -654,32 +915,45 @@ def _extract_fields(raw_text: str, doc_type: str) -> Dict[str, Any]:
         fields["payment_date"] = dates[-1]
 
     fields["contract_no"] = None
-    m = re.search(r"合同(编号|号)\s*[:：]?\s*([A-Za-z0-9\-]+)", text)
+    m = re.search(
+        r"(?:\u5408\u540c(?:\u7f16\u53f7|\u53f7)?|\u534f\u8bae(?:\u7f16\u53f7|\u53f7)?)\s*[:\uFF1A]?\s*([A-Za-z0-9\-]{4,40})",
+        text,
+    )
     if m:
-        fields["contract_no"] = m.group(2)
+        fields["contract_no"] = m.group(1)
 
     fields["vendor"] = None
-    m = re.search(r"(供应商|甲方|乙方|收款方)\s*[:：]?\s*([^\n\r]{2,40})", text)
+    m = re.search(
+        r"(?:\u4f9b\u5e94\u5546|\u9500\u552e\u65b9|\u5356\u65b9|\u4e59\u65b9|\u6536\u6b3e\u65b9)\s*[:\uFF1A]?\s*([^\n\r:]{2,40})",
+        text,
+    )
     if m:
-        fields["vendor"] = m.group(2).strip()
+        fields["vendor"] = m.group(1).strip()
 
-    total_amount = _find_amount_by_keywords(text, ["价税合计", "合计", "总计", "金额", "应付", "付款金额", "报销金额"])
+    total_amount = _find_amount_by_keywords(text, AUDIT_AMOUNT_KEYWORDS)
     if total_amount is None:
-        amounts = _extract_amounts(text)
-        total_amount = max(amounts) if amounts else None
+        amount_candidates = _extract_amount_candidates(text)
+        if amount_candidates:
+            amount_candidates.sort(key=lambda item: (item[1], item[0], -item[2]), reverse=True)
+            total_amount = amount_candidates[0][0]
+        else:
+            total_amount = None
     fields["total_amount"] = total_amount
 
-    m = re.search(r"(收款方|收款户名|收款单位)\s*[:：]?\s*([^\n\r]{2,40})", text)
+    m = re.search(
+        r"(?:\u6536\u6b3e\u65b9|\u6536\u6b3e\u5355\u4f4d|\u6536\u6b3e\u8d26\u6237\u540d|\u6536\u6b3e\u4eba)\s*[:\uFF1A]?\s*([^\n\r:]{2,40})",
+        text,
+    )
     if m:
-        fields["payee"] = m.group(2).strip()
+        fields["payee"] = m.group(1).strip()
 
-    m = re.search(r"(银行账号|账号|开户账号)\s*[:：]?\s*([0-9]{8,30})", text)
+    m = re.search(r"(?:\u94f6\u884c\u8d26\u53f7|\u8d26\u53f7|\u5f00\u6237\u8d26\u53f7)\s*[:\uFF1A]?\s*([0-9\s]{8,30})", text)
     if m:
-        fields["bank_account"] = m.group(2)
+        fields["bank_account"] = re.sub(r"\s+", "", m.group(1))
 
-    m = re.search(r"(报销人|申请人)\s*[:：]?\s*([^\n\r]{2,20})", text)
+    m = re.search(r"(?:\u62a5\u9500\u4eba|\u7533\u8bf7\u4eba|\u62a5\u9500\u7533\u8bf7\u4eba)\s*[:\uFF1A]?\s*([^\n\r:]{2,20})", text)
     if m:
-        fields["reimburser"] = m.group(2).strip()
+        fields["reimburser"] = m.group(1).strip()
 
     if doc_type == "contract":
         contract_date = _find_date_by_keywords(
@@ -697,14 +971,15 @@ def _extract_fields(raw_text: str, doc_type: str) -> Dict[str, Any]:
         if contract_date:
             fields["contract_date"] = contract_date
 
-    llm_result = _extract_with_llm(text, doc_type, AUDIT_LLM_BACKEND)
+    llm_result = _extract_with_llm(text, doc_type, llm_backend or AUDIT_LLM_BACKEND)
     fields = _merge_llm_fields(fields, llm_result, allow_doc_type_override=False)
+    fields = _post_process_fields(fields, text)
 
     return fields
 
 
-def _infer_doc_type_llm(raw_text: str) -> Optional[str]:
-    llm_result = _extract_with_llm(raw_text or "", None, AUDIT_LLM_BACKEND)
+def _infer_doc_type_llm(raw_text: str, llm_backend: Optional[str] = None) -> Optional[str]:
+    llm_result = _extract_with_llm(raw_text or "", None, llm_backend or AUDIT_LLM_BACKEND)
     if not llm_result:
         return None
     doc_type = llm_result.get("doc_type")
@@ -712,14 +987,14 @@ def _infer_doc_type_llm(raw_text: str) -> Optional[str]:
 
 
 def _infer_doc_type(raw_text: str) -> str:
-    text = raw_text or ""
-    if "发票" in text or "税号" in text or "开票" in text:
+    text = (raw_text or "").lower()
+    if any(k in text for k in ["\u53d1\u7968", "\u7a0e\u53f7", "\u5f00\u7968", "invoice"]):
         return "invoice"
-    if "合同" in text or "协议" in text or "签署" in text:
+    if any(k in text for k in ["\u5408\u540c", "\u534f\u8bae", "\u7b7e\u7f72", "\u7b7e\u8ba2", "contract"]):
         return "contract"
-    if "付款" in text or "收款" in text or "银行账号" in text:
+    if any(k in text for k in ["\u4ed8\u6b3e", "\u6536\u6b3e", "\u94f6\u884c\u8d26\u53f7", "payment"]):
         return "payment"
-    if "报销" in text or "费用" in text or "差旅" in text:
+    if any(k in text for k in ["\u62a5\u9500", "\u8d39\u7528", "\u5dee\u65c5", "expense"]):
         return "expense"
     return "invoice"
 
@@ -871,7 +1146,7 @@ def _build_finding(
         "type": finding_type,
         "severity": _normalize_severity(severity),
         "message": _safe_text(message) or "风险提示",
-        "reason": _safe_text(reason) or _safe_text(message) or "命中风险条件",
+        "reason": _safe_text(reason) or _safe_text(message) or "命中风险规则",
         "suggestion": _safe_text(suggestion) or "建议人工复核",
         "action": _safe_text(action) or _safe_text(suggestion) or "建议人工复核",
         "evidence": evidence or None,
@@ -880,42 +1155,40 @@ def _build_finding(
 
 
 def _condition_to_text(cond: Dict[str, Any]) -> str:
-    field = _safe_text(cond.get("field") or "字段")
+    field = _safe_text(cond.get("field") or "field")
     op = _safe_text(cond.get("op") or "exists")
     value = cond.get("value_field") if cond.get("value_field") is not None else cond.get("value")
     op_map = {
-        "exists": "存在",
-        "missing": "缺失",
-        "missing_or_zero": "缺失或为0",
-        "eq": "等于",
-        "neq": "不等于",
-        "contains": "包含",
-        "not_contains": "不包含",
-        "regex": "匹配",
-        "in": "属于",
-        "not_in": "不属于",
-        "gt": "大于",
-        "gte": "大于等于",
-        "lt": "小于",
-        "lte": "小于等于",
-        "gt_field": "大于字段",
-        "lt_field": "小于字段",
-        "truthy": "为真",
-        "falsy": "为假",
+        "exists": "exists",
+        "missing": "missing",
+        "missing_or_zero": "missing_or_zero",
+        "eq": "==",
+        "neq": "!=",
+        "contains": "contains",
+        "not_contains": "not_contains",
+        "regex": "regex",
+        "in": "in",
+        "not_in": "not_in",
+        "gt": ">",
+        "gte": ">=",
+        "lt": "<",
+        "lte": "<=",
+        "gt_field": "> field",
+        "lt_field": "< field",
+        "truthy": "truthy",
+        "falsy": "falsy",
     }
     desc = op_map.get(op, op)
     if value is None or value == "":
-        return f"{field}{desc}"
-    return f"{field}{desc}{value}"
+        return f"{field} {desc}"
+    return f"{field} {desc} {value}"
 
 
 def _build_rule_reason(rule: Dict[str, Any], checks: List[Dict[str, Any]]) -> str:
     rule_id = _safe_text(rule.get("id") or "RULE")
     if checks:
-        return f"规则 {rule_id} 命中：{'；'.join(_condition_to_text(c) for c in checks[:3])}"
+        return f"规则 {rule_id} 命中：{'; '.join(_condition_to_text(c) for c in checks[:3])}"
     return f"规则 {rule_id} 命中"
-
-
 def _run_rules(doc_type: str, fields: Dict[str, Any], raw_text: str, erp: Dict[str, Any]) -> List[Dict[str, Any]]:
     rules = _load_rules(doc_type)
     ctx = {"fields": fields, "raw_text": raw_text, "erp": erp}
@@ -929,9 +1202,8 @@ def _run_rules(doc_type: str, fields: Dict[str, Any], raw_text: str, erp: Dict[s
         if isinstance(checks, dict):
             checks = [checks]
 
-        if when:
-            if not all(_check_condition(cond, ctx) for cond in when):
-                continue
+        if when and not all(_check_condition(cond, ctx) for cond in when):
+            continue
 
         failed = False
         if checks:
@@ -942,24 +1214,26 @@ def _run_rules(doc_type: str, fields: Dict[str, Any], raw_text: str, erp: Dict[s
         else:
             failed = True
 
-        if failed:
-            reason = _safe_text(rule.get("reason")) or _build_rule_reason(rule, checks)
-            suggestion = _safe_text(rule.get("suggestion")) or "建议人工复核"
-            findings.append(
-                _build_finding(
-                    source="rule",
-                    decision_mode="rule_hit",
-                    finding_type="policy",
-                    severity=rule.get("severity", "medium"),
-                    message=_safe_text(rule.get("message") or "规则触发"),
-                    reason=reason,
-                    suggestion=suggestion,
-                    action=suggestion,
-                    evidence=_build_evidence(rule, ctx),
-                    confidence=0.99,
-                    rule_id=rule.get("id"),
-                )
+        if not failed:
+            continue
+
+        reason = _safe_text(rule.get("reason")) or _build_rule_reason(rule, checks)
+        suggestion = _safe_text(rule.get("suggestion")) or "建议人工复核"
+        findings.append(
+            _build_finding(
+                source="rule",
+                decision_mode="rule_hit",
+                finding_type="policy",
+                severity=rule.get("severity", "medium"),
+                message=_safe_text(rule.get("message") or "命中规则"),
+                reason=reason,
+                suggestion=suggestion,
+                action=suggestion,
+                evidence=_build_evidence(rule, ctx),
+                confidence=0.99,
+                rule_id=rule.get("id"),
             )
+        )
     return findings
 
 
@@ -1087,7 +1361,7 @@ def _collect_review_feedback(
                 result = {}
             risk = _safe_text(result.get("risk_level")).lower()
             findings = result.get("findings") if isinstance(result.get("findings"), list) else []
-            top_msg = _safe_text(findings[0].get("message")) if findings else "风险判断"
+            top_msg = _safe_text(findings[0].get("message")) if findings else "无风险提示信息"
 
             if status == "approved" and risk in {"high", "medium"}:
                 fp_counter[top_msg] += 1
@@ -1106,17 +1380,25 @@ def _collect_review_feedback(
 def _feedback_prompt(feedback_ctx: Dict[str, Any]) -> str:
     reviewed = int(feedback_ctx.get("reviewed_count") or 0)
     if reviewed <= 0:
-        return "暂无人工复核反馈数据。"
+        return "No historical review feedback yet."
+
     lines = [
-        f"最近人工复核样本: {reviewed}",
-        f"通过: {feedback_ctx.get('approved_count', 0)}，驳回: {feedback_ctx.get('rejected_count', 0)}，补件: {feedback_ctx.get('need_more_count', 0)}",
+        f"Historical reviews: {reviewed}",
+        f"Approved: {int(feedback_ctx.get('approved_count') or 0)}",
+        f"Rejected: {int(feedback_ctx.get('rejected_count') or 0)}",
+        f"Need more info: {int(feedback_ctx.get('need_more_count') or 0)}",
     ]
-    if feedback_ctx.get("false_positive_hints"):
-        lines.append(f"高频疑似误报点: {feedback_ctx['false_positive_hints']}")
-    if feedback_ctx.get("false_negative_hints"):
-        lines.append(f"高频疑似漏报点: {feedback_ctx['false_negative_hints']}")
-    if feedback_ctx.get("review_notes"):
-        lines.append(f"复核备注样例: {feedback_ctx['review_notes']}")
+    fp_hints = feedback_ctx.get("false_positive_hints") or []
+    fn_hints = feedback_ctx.get("false_negative_hints") or []
+    notes = feedback_ctx.get("review_notes") or []
+
+    if fp_hints:
+        lines.append(f"Possible false-positive patterns: {fp_hints}")
+    if fn_hints:
+        lines.append(f"Possible false-negative patterns: {fn_hints}")
+    if notes:
+        lines.append(f"Recent reviewer notes: {notes}")
+
     return "\n".join(lines)
 
 
@@ -1163,6 +1445,7 @@ def _coerce_ai_assessment(payload: Dict[str, Any]) -> Dict[str, Any]:
         parsed = AuditAIAssessment.model_validate(payload)
     except ValidationError:
         return {}
+
     data = parsed.model_dump(by_alias=True, exclude_none=True)
     data["risk_level"] = _normalize_risk_level(data.get("risk_level"))
     if "pass" not in data:
@@ -1174,17 +1457,21 @@ def _coerce_ai_assessment(payload: Dict[str, Any]) -> Dict[str, Any]:
             item = item.model_dump(exclude_none=True)
         if not isinstance(item, dict):
             continue
+
         message = item.get("message") or item.get("issue") or item.get("problem")
         if not message:
             continue
+
         reason = _safe_text(item.get("reason") or message)
-        suggestion = _safe_text(item.get("suggestion") or "建议人工复核")
+        suggestion = _safe_text(item.get("suggestion") or "Need manual review")
         confidence = item.get("confidence")
         if confidence is None:
             confidence = data.get("confidence")
+
         evidence = item.get("evidence")
         if evidence and not isinstance(evidence, dict):
             evidence = {"text": _safe_text(evidence), "highlight": _safe_text(evidence)}
+
         findings.append(
             _build_finding(
                 source="ai",
@@ -1244,41 +1531,54 @@ def _run_ai_review(
     }
 
     prompt = f"""
-你是一名资深的智能审单/风控审计专家。规则结果仅供参考，AI 判断为主。
-文档类型: {doc_type}
-是否触发高风险规则: {high_risk_rule}
+你是企业智能审单助手。请基于提取字段与风险信号输出严格 JSON，不要输出 markdown 或额外说明。
 
-抽取字段 (json):
+硬约束：
+1) 不要把日期当成金额。
+2) total_amount 必须是纯数字（不能带年份/日期片段，不能带货币符号）。
+3) 日期字段必须是 YYYY-MM-DD。
+4) findings 要简洁、可核验、有证据。
+5) 如果 high_risk_rule 为 true，除非证据充分，否则 pass 必须为 false。
+6) summary、message、reason、suggestion、action 必须使用简体中文（保留编号/金额等原始值）。
+
+单据类型：{doc_type}
+是否命中高风险规则：{high_risk_rule}
+
+提取字段：
 {json.dumps(fields, ensure_ascii=False)}
 
-规则信号 (json):
+确定性规则结果：
 {json.dumps(rule_signals, ensure_ascii=False)}
 
-ERP上下文 (json):
+ERP 上下文：
 {json.dumps(erp_digest, ensure_ascii=False)}
 
-异常统计 (json):
+异常统计：
 {json.dumps(anomaly_stats or {}, ensure_ascii=False)}
 
-人工复核反馈:
+历史复核摘要：
 {_feedback_prompt(feedback_ctx)}
 
-OCR 原文节选:
+原文（截断）：
 {_truncate_text(raw_text)}
 
-如果触发高风险规则为 true，则必须保持 risk_level="high" 且 pass=false，并在 summary 中说明原因。
-否则请综合语义和跨字段一致性等风险进行判断。
-
-请只返回严格 JSON，不要输出 Markdown 或额外文本。
-注意：summary、findings.message、findings.suggestion、evidence.text、evidence.highlight 等所有自然语言内容必须用中文（简洁、专业）。
-
-返回 JSON 结构:
+输出 JSON 结构：
 {{
   "risk_level": "low|medium|high",
   "pass": true/false,
-  "summary": "简短说明",
+  "summary": "...",
   "findings": [
-    {{"type": "semantic|cross_doc|policy|anomaly", "severity": "low|medium|high", "message": "...", "reason": "...", "suggestion": "...", "action":"...", "confidence": 0.0, "decision_mode":"ai_semantic", "evidence": {{"text": "...", "highlight": "..."}}}}
+    {{
+      "type": "semantic|cross_doc|policy|anomaly",
+      "severity": "low|medium|high",
+      "message": "...",
+      "reason": "...",
+      "suggestion": "...",
+      "action": "...",
+      "confidence": 0.0,
+      "decision_mode": "ai_semantic",
+      "evidence": {{"text": "...", "highlight": "..."}}
+    }}
   ],
   "confidence": 0.0
 }}
@@ -1295,6 +1595,153 @@ OCR 原文节选:
         assessment["risk_level"] = "high"
         assessment["pass"] = False
     return assessment
+
+
+def _run_anomaly_detection(
+    doc_type: str,
+    fields: Dict[str, Any],
+    history_records: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+    stats: Dict[str, Any] = {}
+
+    amount = _safe_float(fields.get("total_amount"))
+    if amount is None:
+        return findings, stats
+
+    vendor = _safe_text(fields.get("vendor") or fields.get("payee"))
+    reimburser = _safe_text(fields.get("reimburser"))
+    invoice_no = _safe_text(fields.get("invoice_no"))
+    current_date = _parse_date(
+        fields.get("payment_date") or fields.get("invoice_date") or fields.get("contract_date")
+    ) or datetime.utcnow()
+
+    def _amounts(filter_fn) -> List[float]:
+        values: List[float] = []
+        for rec in history_records or []:
+            if not filter_fn(rec):
+                continue
+            rec_amount = _safe_float((rec.get("fields") or {}).get("total_amount"))
+            if rec_amount is not None:
+                values.append(rec_amount)
+        return values
+
+    def _detect_zscore(
+        group_key: str,
+        group_name: str,
+        values: List[float],
+        severity_base: str = "medium",
+    ) -> None:
+        if len(values) < ANOMALY_MIN_SAMPLES:
+            return
+        mean = sum(values) / len(values)
+        variance = sum((v - mean) ** 2 for v in values) / max(1, len(values) - 1)
+        std = variance ** 0.5
+        if std <= 1e-6:
+            return
+
+        zscore = (amount - mean) / std
+        stats[f"{group_key}_samples"] = len(values)
+        stats[f"{group_key}_mean"] = round(mean, 4)
+        stats[f"{group_key}_std"] = round(std, 4)
+        stats[f"{group_key}_zscore"] = round(zscore, 4)
+
+        if abs(zscore) < 2.5:
+            return
+
+        severity = "high" if abs(zscore) >= 3.5 else severity_base
+        confidence = _clamp(0.70 + min(abs(zscore), 6.0) / 10.0, 0.70, 0.99)
+        findings.append(
+            _build_finding(
+                source="anomaly",
+                decision_mode="anomaly_detection",
+                finding_type=f"{group_key}_amount_anomaly",
+                severity=severity,
+                message=f"{group_name}金额异常",
+                reason=f"当前金额 {amount:.2f} 与历史均值 {mean:.2f} 偏差较大（z={zscore:.2f}）。",
+                suggestion="建议人工复核业务合理性与原始凭证。",
+                action="建议人工复核",
+                evidence={
+                    "text": f"amount={amount:.2f}, mean={mean:.2f}, std={std:.2f}",
+                    "highlight": f"z={zscore:.2f}",
+                },
+                confidence=confidence,
+            )
+        )
+
+    same_vendor_amounts = _amounts(
+        lambda rec: _normalize_text((rec.get("fields") or {}).get("vendor") or (rec.get("fields") or {}).get("payee"))
+        == _normalize_text(vendor) if vendor else False
+    )
+    same_reimburser_amounts = _amounts(
+        lambda rec: _normalize_text((rec.get("fields") or {}).get("reimburser")) == _normalize_text(reimburser)
+        if reimburser else False
+    )
+    same_doc_type_amounts = _amounts(lambda rec: _safe_text(rec.get("doc_type")).lower() == _safe_text(doc_type).lower())
+
+    _detect_zscore("same_vendor", "同供应商", same_vendor_amounts, severity_base="medium")
+    _detect_zscore("same_reimburser", "同报销人", same_reimburser_amounts, severity_base="medium")
+    _detect_zscore("same_doc_type", "同类型单据", same_doc_type_amounts, severity_base="low")
+
+    duplicate_invoice_count = 0
+    if invoice_no:
+        duplicate_invoice = [
+            rec for rec in (history_records or [])
+            if _normalize_text((rec.get("fields") or {}).get("invoice_no")) == _normalize_text(invoice_no)
+        ]
+        duplicate_invoice_count = len(duplicate_invoice)
+        if duplicate_invoice_count > 0:
+            findings.append(
+                _build_finding(
+                    source="anomaly",
+                    decision_mode="anomaly_detection",
+                    finding_type="duplicate_invoice",
+                    severity="high",
+                    message="疑似重复发票",
+                    reason=f"发票号 {invoice_no} 在历史记录中出现 {duplicate_invoice_count} 次。",
+                    suggestion="建议中止处理并核验是否重复报销。",
+                    action="建议驳回并核查",
+                    evidence={"text": invoice_no, "highlight": invoice_no},
+                    confidence=0.99,
+                )
+            )
+    stats["duplicate_invoice_count"] = duplicate_invoice_count
+
+    duplicate_reimbursement_count = 0
+    for rec in history_records or []:
+        rec_fields = rec.get("fields") or {}
+        rec_reimburser = _safe_text(rec_fields.get("reimburser"))
+        rec_amount = _safe_float(rec_fields.get("total_amount"))
+        if not reimburser or _normalize_text(rec_reimburser) != _normalize_text(reimburser) or rec_amount is None:
+            continue
+        if abs(rec_amount - amount) > 0.01:
+            continue
+        rec_date = _parse_date(rec_fields.get("payment_date") or rec_fields.get("invoice_date") or rec.get("created_at"))
+        if not rec_date:
+            continue
+        if abs((current_date - rec_date).days) <= 45:
+            duplicate_reimbursement_count += 1
+
+    stats["duplicate_reimbursement_count"] = duplicate_reimbursement_count
+    if duplicate_reimbursement_count > 0:
+        findings.append(
+            _build_finding(
+                source="anomaly",
+                decision_mode="anomaly_detection",
+                finding_type="duplicate_reimbursement_window",
+                severity="high",
+                message="短周期重复报销风险",
+                reason=(
+                    f"报销人 {reimburser or '未知'} 在 45 天内出现 {duplicate_reimbursement_count} 次同金额记录。"
+                ),
+                suggestion="建议核验是否重复提交，并转人工审批。",
+                action="建议驳回并核查",
+                evidence={"text": f"{reimburser or '未知'} / {amount:.2f}", "highlight": f"{amount:.2f}"},
+                confidence=0.98,
+            )
+        )
+
+    return findings[:AI_MAX_FINDINGS], stats
 
 
 def _run_cross_document_checks(
@@ -1322,32 +1769,13 @@ def _run_cross_document_checks(
     vendor_status = _safe_text(erp_ctx.get("vendor_status")).lower()
     blacklist_hit = _safe_bool(erp_ctx.get("blacklist_hit"))
 
-    same_contract_records = []
-    if contract_no:
-        same_contract_records = [
-            rec for rec in history_records
-            if _safe_text((rec.get("fields") or {}).get("contract_no")) == contract_no
-        ]
-    history_paid_amount = 0.0
-    for rec in same_contract_records:
-        rec_doc_type = _safe_text(rec.get("doc_type")).lower()
-        if rec_doc_type not in {"payment", "expense"}:
-            continue
-        rec_amount = _safe_float((rec.get("fields") or {}).get("total_amount"))
-        if rec_amount is not None:
-            history_paid_amount += rec_amount
-    if _safe_float(erp_ctx.get("history_paid_amount")) is None:
-        erp_ctx["history_paid_amount"] = history_paid_amount
-    if paid_amount <= 0 and history_paid_amount > 0:
-        paid_amount = history_paid_amount
-
     def _add_check(
         check_id: str,
         name: str,
         passed: bool,
         reason: str,
         severity: str = "medium",
-        suggestion: str = "建议人工复核",
+        suggestion: str = "请复核并核验原始单据",
         confidence: float = 0.95,
         actual: Any = None,
         expected: Any = None,
@@ -1385,279 +1813,204 @@ def _run_cross_document_checks(
         "vendor_blacklist",
         "供应商黑名单校验",
         not blacklist_hit,
-        "供应商命中ERP黑名单" if blacklist_hit else "供应商未命中黑名单",
+        "供应商命中黑名单" if blacklist_hit else "供应商未命中黑名单",
         severity="high",
-        suggestion="建议驳回并触发人工复核",
+        suggestion="建议拦截付款并升级至合规复核",
         confidence=0.99,
-        actual=vendor or None,
-        expected="不在黑名单",
-        evidence={"text": vendor, "highlight": vendor} if vendor else None,
+        actual=blacklist_hit,
+        expected=False,
+        evidence={"text": expected_vendor or vendor, "highlight": expected_vendor or vendor},
     )
 
-    blocked_status = {"blacklisted", "blocked", "high_risk", "freeze"}
     if vendor_status:
+        blocked_status = {"blacklist", "suspended", "inactive", "blocked"}
+        is_valid_status = vendor_status not in blocked_status
+        vendor_status_map = {
+            "unknown": "未知",
+            "active": "正常",
+            "blacklist": "黑名单",
+            "suspended": "停用",
+            "inactive": "未激活",
+            "blocked": "冻结",
+        }
+        vendor_status_text = vendor_status_map.get(vendor_status, vendor_status)
         _add_check(
             "vendor_status",
             "供应商状态校验",
-            vendor_status not in blocked_status,
-            f"供应商状态为 {vendor_status}",
-            severity="high" if vendor_status in blocked_status else "low",
-            suggestion="建议人工复核供应商资质",
-            confidence=0.97,
-            actual=vendor_status,
-            expected="normal/active",
+            is_valid_status,
+            f"供应商状态为：{vendor_status_text}",
+            severity="high" if not is_valid_status else "low",
+            suggestion="建议核验供应商主数据与审批流程",
+            confidence=0.95,
+            actual=vendor_status_text,
+            expected="正常",
+            evidence={"text": vendor_status_text, "highlight": vendor_status_text},
         )
 
-    if amount is not None and contract_amount is not None:
+    if expected_vendor and vendor:
+        matched = _normalize_text(expected_vendor) == _normalize_text(vendor)
         _add_check(
-            "contract_amount_limit",
-            "金额不超过合同额度",
-            amount <= contract_amount,
-            f"单据金额 {amount:.2f}，合同额度 {contract_amount:.2f}",
+            "vendor_match",
+            "供应商一致性校验",
+            matched,
+            "供应商与ERP主数据一致" if matched else "供应商与ERP主数据不一致",
             severity="high",
-            suggestion="建议核对合同金额或补充审批",
+            suggestion="建议付款前核对合同与供应商映射关系",
+            confidence=0.96,
+            actual=vendor,
+            expected=expected_vendor,
+            evidence={"text": vendor, "highlight": vendor},
+        )
+
+    if amount is not None and contract_amount is not None and contract_amount > 0:
+        limit = contract_amount * 1.05
+        within_contract = amount <= limit
+        _add_check(
+            "amount_vs_contract",
+            "金额-合同上限校验",
+            within_contract,
+            f"金额 {amount:.2f} 超过合同上限 {limit:.2f}" if not within_contract else "金额在合同上限内",
+            severity="high",
+            suggestion="建议核验变更单或调整金额后再提交",
+            confidence=0.95,
             actual=amount,
-            expected=contract_amount,
+            expected=limit,
             evidence={"text": str(amount), "highlight": str(amount)},
         )
 
-    if amount is not None and po_amount is not None:
+    if amount is not None and po_amount is not None and po_amount > 0:
+        po_limit = po_amount * 1.05
+        within_po = amount <= po_limit
         _add_check(
-            "po_amount_limit",
-            "金额不超过PO额度",
-            amount <= po_amount,
-            f"单据金额 {amount:.2f}，PO额度 {po_amount:.2f}",
+            "amount_vs_po",
+            "金额-采购单上限校验",
+            within_po,
+            f"金额 {amount:.2f} 超过采购单上限 {po_limit:.2f}" if not within_po else "金额在采购单上限内",
             severity="medium",
-            suggestion="建议核对采购订单额度",
+            suggestion="建议核对采购单变更后再处理",
+            confidence=0.93,
             actual=amount,
-            expected=po_amount,
-        )
-
-    if amount is not None and contract_amount is not None:
-        projected = paid_amount + amount if doc_type in {"payment", "expense"} else paid_amount
-        _add_check(
-            "paid_projection_limit",
-            "累计支付不超过合同额度",
-            projected <= contract_amount,
-            f"已付 {paid_amount:.2f}，本次 {amount:.2f}，预计累计 {projected:.2f}，合同额度 {contract_amount:.2f}",
-            severity="high",
-            suggestion="建议驳回或拆分付款，避免超付",
-            actual=projected,
-            expected=contract_amount,
+            expected=po_limit,
+            evidence={"text": str(amount), "highlight": str(amount)},
         )
 
     if amount is not None and budget_remaining is not None:
+        within_budget = amount <= budget_remaining
         _add_check(
             "budget_remaining",
             "预算余额校验",
-            amount <= budget_remaining,
-            f"本次金额 {amount:.2f}，预算剩余 {budget_remaining:.2f}",
+            within_budget,
+            f"金额 {amount:.2f} 超过预算余额 {budget_remaining:.2f}" if not within_budget else "金额在预算余额内",
             severity="high",
-            suggestion="建议补充预算审批或驳回",
+            suggestion="建议先申请预算审批再付款",
+            confidence=0.94,
             actual=amount,
             expected=budget_remaining,
-        )
-
-    if vendor and expected_vendor:
-        _add_check(
-            "vendor_consistency",
-            "主体一致性校验",
-            vendor == expected_vendor,
-            f"单据主体 {vendor}，ERP主体 {expected_vendor}",
-            severity="medium",
-            suggestion="建议核对合同主体与收款方一致性",
-            actual=vendor,
-            expected=expected_vendor,
+            evidence={"text": str(amount), "highlight": str(amount)},
         )
 
     if invoice_no:
-        history_dup = [
-            rec for rec in history_records
-            if _safe_text((rec.get("fields") or {}).get("invoice_no")) == invoice_no
-        ]
-        has_dup = _safe_bool(erp_ctx.get("invoice_exists")) or len(history_dup) > 0
+        duplicate_hits = []
+        for rec in history_records or []:
+            rec_fields = rec.get("fields") or {}
+            rec_invoice = _safe_text(rec_fields.get("invoice_no"))
+            rec_amount = _safe_float(rec_fields.get("total_amount"))
+            if rec_invoice and _normalize_text(rec_invoice) == _normalize_text(invoice_no):
+                duplicate_hits.append({
+                    "job_id": rec.get("job_id"),
+                    "amount": rec_amount,
+                    "doc_type": rec.get("doc_type"),
+                })
         _add_check(
-            "invoice_duplicate",
+            "duplicate_invoice_no",
             "发票号重复校验",
-            not has_dup,
-            f"发票号 {invoice_no} 在ERP/历史记录中已存在" if has_dup else f"发票号 {invoice_no} 未发现重复",
+            len(duplicate_hits) == 0,
+            "发现重复发票号" if duplicate_hits else "历史中未发现重复发票号",
             severity="high",
-            suggestion="建议驳回并核查是否重复报销",
-            confidence=0.99 if has_dup else 0.92,
+            suggestion="建议中止处理并核验是否重复报销",
+            confidence=0.98,
             actual=invoice_no,
             expected="唯一",
-            evidence={"text": invoice_no, "highlight": invoice_no},
+            evidence={"text": invoice_no, "highlight": invoice_no, "matches": duplicate_hits[:5]},
         )
 
-    if doc_type in {"payment", "expense"}:
-        has_ref = bool(contract_no or invoice_no)
+    if payment_date and invoice_date:
+        paid_after_invoice = payment_date >= invoice_date
         _add_check(
-            "reference_required",
-            "单据关联编号校验",
-            has_ref,
-            "付款/报销缺少合同号或发票号" if not has_ref else "存在合同号或发票号",
+            "payment_after_invoice",
+            "付款日期顺序校验",
+            paid_after_invoice,
+            "付款日期早于发票日期" if not paid_after_invoice else "付款日期顺序正常",
             severity="medium",
-            suggestion="建议补充合同号或发票号",
-            actual={"contract_no": contract_no or None, "invoice_no": invoice_no or None},
-            expected="至少一个关联编号",
+            suggestion="建议复核发票开具日期与付款申请日期",
+            confidence=0.9,
+            actual=payment_date.isoformat(),
+            expected=invoice_date.isoformat(),
+            evidence={"text": f"{payment_date} / {invoice_date}", "highlight": str(payment_date)},
         )
 
-    if contract_date and invoice_date:
+    if invoice_date and contract_date:
+        invoice_after_contract = invoice_date >= contract_date
         _add_check(
-            "contract_invoice_date",
-            "合同与发票日期顺序",
-            invoice_date >= contract_date,
-            f"合同日期 {contract_date.date()}，发票日期 {invoice_date.date()}",
+            "invoice_after_contract",
+            "发票-合同日期顺序校验",
+            invoice_after_contract,
+            "发票日期早于合同日期" if not invoice_after_contract else "发票日期与合同日期顺序正常",
             severity="medium",
-            suggestion="建议核对合同签署与开票时间",
-            actual=invoice_date.date().isoformat(),
-            expected=f">={contract_date.date().isoformat()}",
+            suggestion="建议核验合同元数据与发票有效性",
+            confidence=0.9,
+            actual=invoice_date.isoformat(),
+            expected=contract_date.isoformat(),
+            evidence={"text": f"{invoice_date} / {contract_date}", "highlight": str(invoice_date)},
         )
 
-    if invoice_date and payment_date:
+    if doc_type in {"payment", "expense"} and amount is not None and contract_amount is not None and contract_amount > 0:
+        projected_paid = paid_amount + amount
+        over_paid = projected_paid > contract_amount * 1.05
         _add_check(
-            "invoice_payment_date",
-            "发票与付款日期顺序",
-            payment_date >= invoice_date,
-            f"发票日期 {invoice_date.date()}，付款日期 {payment_date.date()}",
-            severity="medium",
-            suggestion="建议核对付款时间与票据时间",
-            actual=payment_date.date().isoformat(),
-            expected=f">={invoice_date.date().isoformat()}",
+            "cumulative_paid_over_contract",
+            "累计付款金额校验",
+            not over_paid,
+            f"预计累计付款 {projected_paid:.2f} 超过合同金额 {contract_amount:.2f}" if over_paid else "预计累计付款未超过合同金额",
+            severity="high",
+            suggestion="建议冻结付款并核查超付风险",
+            confidence=0.97,
+            actual=projected_paid,
+            expected=contract_amount,
+            evidence={"text": str(projected_paid), "highlight": str(projected_paid)},
         )
 
-    return findings, checks
-
-
-def _run_anomaly_detection(
-    doc_type: str,
-    fields: Dict[str, Any],
-    history_records: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    findings: List[Dict[str, Any]] = []
-    stats: Dict[str, Any] = {}
-
-    amount = _safe_float(fields.get("total_amount"))
-    if amount is None:
-        return findings, stats
-
-    vendor = _safe_text(fields.get("vendor") or fields.get("payee"))
-    reimburser = _safe_text(fields.get("reimburser"))
-    invoice_no = _safe_text(fields.get("invoice_no"))
-    current_date = _parse_date(fields.get("payment_date") or fields.get("invoice_date") or fields.get("contract_date")) or datetime.utcnow()
-
-    def _amounts(filter_fn) -> List[float]:
-        vals = []
-        for rec in history_records:
-            if not filter_fn(rec):
-                continue
-            rec_amount = _safe_float((rec.get("fields") or {}).get("total_amount"))
-            if rec_amount is not None:
-                vals.append(rec_amount)
-        return vals
-
-    def _detect_zscore(group_name: str, values: List[float], severity_base: str = "medium") -> None:
-        if len(values) < ANOMALY_MIN_SAMPLES:
-            return
-        mean = sum(values) / len(values)
-        variance = sum((v - mean) ** 2 for v in values) / max(1, len(values) - 1)
-        std = variance ** 0.5
-        if std <= 0.001:
-            return
-        zscore = (amount - mean) / std
-        stats[f"{group_name}_zscore"] = round(zscore, 4)
-        stats[f"{group_name}_mean"] = round(mean, 4)
-        stats[f"{group_name}_std"] = round(std, 4)
-        stats[f"{group_name}_samples"] = len(values)
-        if abs(zscore) < 2.5:
-            return
-        severity = "high" if abs(zscore) >= 3.5 else severity_base
-        confidence = _clamp(0.7 + min(abs(zscore), 6.0) / 10.0, 0.7, 0.99)
-        findings.append(
-            _build_finding(
-                source="anomaly",
-                decision_mode="anomaly_detection",
-                finding_type=f"{group_name}_amount_anomaly",
-                severity=severity,
-                message=f"{group_name}金额异常",
-                reason=f"当前金额 {amount:.2f} 与历史均值 {mean:.2f} 偏差显著（z={zscore:.2f}）",
-                suggestion="建议人工复核交易合理性与业务背景",
-                action="建议人工复核",
-                evidence={"text": f"金额 {amount:.2f}，均值 {mean:.2f}，标准差 {std:.2f}", "highlight": f"z={zscore:.2f}"},
-                confidence=confidence,
-            )
-        )
-
-    same_vendor_amounts = _amounts(
-        lambda rec: _safe_text((rec.get("fields") or {}).get("vendor") or (rec.get("fields") or {}).get("payee")) == vendor if vendor else False
-    )
-    same_reimburser_amounts = _amounts(
-        lambda rec: _safe_text((rec.get("fields") or {}).get("reimburser")) == reimburser if reimburser else False
-    )
-    same_category_amounts = _amounts(lambda rec: _safe_text(rec.get("doc_type")).lower() == doc_type)
-
-    _detect_zscore("同供应商", same_vendor_amounts, severity_base="medium")
-    _detect_zscore("同报销人", same_reimburser_amounts, severity_base="medium")
-    _detect_zscore("同品类", same_category_amounts, severity_base="low")
-
-    if invoice_no:
-        duplicate_invoice = [
-            rec for rec in history_records
-            if _safe_text((rec.get("fields") or {}).get("invoice_no")) == invoice_no
-        ]
-        if duplicate_invoice:
-            findings.append(
-                _build_finding(
-                    source="anomaly",
-                    decision_mode="anomaly_detection",
-                    finding_type="duplicate_invoice",
-                    severity="high",
-                    message="疑似重复报销",
-                    reason=f"发票号 {invoice_no} 在历史审单中已出现 {len(duplicate_invoice)} 次",
-                    suggestion="建议驳回并核查原始报销记录",
-                    action="建议驳回",
-                    evidence={"text": invoice_no, "highlight": invoice_no},
-                    confidence=0.99,
-                )
-            )
-
-    duplicate_reimbursement_count = 0
-    for rec in history_records:
-        rec_fields = rec.get("fields") or {}
-        rec_reimburser = _safe_text(rec_fields.get("reimburser"))
-        rec_amount = _safe_float(rec_fields.get("total_amount"))
-        if not reimburser or rec_reimburser != reimburser or rec_amount is None:
-            continue
-        if abs(rec_amount - amount) > 0.01:
-            continue
-        rec_date = _parse_date(rec_fields.get("payment_date") or rec_fields.get("invoice_date") or rec.get("created_at"))
-        if not rec_date:
-            continue
-        if abs((current_date - rec_date).days) <= 45:
-            duplicate_reimbursement_count += 1
-
-    if duplicate_reimbursement_count > 0:
-        findings.append(
-            _build_finding(
-                source="anomaly",
-                decision_mode="anomaly_detection",
-                finding_type="duplicate_reimbursement_window",
+    if contract_no and amount is not None:
+        same_contract_paid = 0.0
+        for rec in history_records or []:
+            rec_fields = rec.get("fields") or {}
+            rec_contract = _safe_text(rec_fields.get("contract_no"))
+            rec_amount = _safe_float(rec_fields.get("total_amount"))
+            rec_doc_type = _safe_text(rec.get("doc_type")).lower()
+            if rec_contract and _normalize_text(rec_contract) == _normalize_text(contract_no):
+                if rec_doc_type in {"payment", "expense"} and rec_amount is not None:
+                    same_contract_paid += rec_amount
+        if same_contract_paid > 0 and contract_amount is not None and contract_amount > 0:
+            projected = same_contract_paid + amount
+            over_contract = projected > contract_amount * 1.05
+            _add_check(
+                "same_contract_cumulative",
+                "同合同累计金额校验",
+                not over_contract,
+                f"历史+当前金额 {projected:.2f} 超过合同金额 {contract_amount:.2f}" if over_contract else "历史+当前金额未超过合同金额",
                 severity="high",
-                message="短周期重复报销风险",
-                reason=f"报销人 {reimburser or '未知'} 在45天内出现相同金额报销 {duplicate_reimbursement_count} 次",
-                suggestion="建议核查是否重复提交并走人工复核",
-                action="建议驳回",
-                evidence={"text": f"{reimburser} / {amount:.2f}", "highlight": f"{amount:.2f}"},
-                confidence=0.98,
+                suggestion="建议复核同合同结算计划",
+                confidence=0.95,
+                actual=projected,
+                expected=contract_amount,
+                evidence={"text": contract_no, "highlight": contract_no},
             )
-        )
 
-    stats["duplicate_reimbursement_count"] = duplicate_reimbursement_count
-    return findings, stats
+    return findings[:AI_MAX_FINDINGS], checks
 
 
 def _has_high_risk(findings: List[Dict[str, Any]]) -> bool:
-    return any(_normalize_severity(f.get("severity"), default="low") == "high" for f in findings)
+    return any(_normalize_severity(item.get("severity"), default="low") == "high" for item in (findings or []))
 
 
 def _risk_level(findings: List[Dict[str, Any]]) -> str:
@@ -1671,11 +2024,26 @@ def _risk_level(findings: List[Dict[str, Any]]) -> str:
 
 def _build_summary(findings: List[Dict[str, Any]]) -> str:
     if not findings:
-        return "未发现明显问题，建议通过。"
-    high = sum(1 for f in findings if str(f.get("severity", "")).lower() == "high")
-    medium = sum(1 for f in findings if str(f.get("severity", "")).lower() == "medium")
-    low = sum(1 for f in findings if str(f.get("severity", "")).lower() == "low")
-    return f"共发现 {len(findings)} 项问题，高风险 {high} 项，中风险 {medium} 项，低风险 {low} 项。"
+        return "未发现显著风险。"
+
+    counts = Counter(_normalize_severity(f.get("severity"), default="low") for f in findings)
+    top_messages: List[str] = []
+    for item in findings[:3]:
+        msg = _safe_text(item.get("message"))
+        if msg:
+            top_messages.append(msg)
+
+    severity_part = (
+        f"高风险: {counts.get('high', 0)}，"
+        f"中风险: {counts.get('medium', 0)}，"
+        f"低风险: {counts.get('low', 0)}"
+    )
+    message_part = "；".join(top_messages) if top_messages else "关键问题建议人工复核。"
+    return f"共识别 {len(findings)} 项风险（{severity_part}）。重点问题：{message_part}"
+
+
+def _has_chinese_text(text: Any) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", _safe_text(text)))
 
 
 def _build_finding_breakdown(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1733,45 +2101,47 @@ def _build_decision_trace(
     risk_level: str,
     is_pass: bool,
 ) -> List[Dict[str, Any]]:
+    ai_assessment = ai_assessment or {}
+    feedback_ctx = feedback_ctx or {}
     return [
         {
             "step": "extract_fields",
-            "detail": "完成OCR与字段抽取",
+            "detail": "已完成字段抽取与规范化。",
             "doc_type": doc_type,
             "fields_count": len(fields.keys()),
             "at": _now_iso(),
         },
         {
             "step": "rule_engine",
-            "detail": "规则引擎检测完成",
+            "detail": f"规则引擎识别 {len(rule_findings)} 项风险。",
             "hits": len(rule_findings),
             "high_risk_hits": sum(1 for f in rule_findings if _normalize_severity(f.get("severity")) == "high"),
             "at": _now_iso(),
         },
         {
             "step": "cross_doc_reconciliation",
-            "detail": "跨单据与ERP对账完成",
+            "detail": f"跨单据核对识别 {len(cross_findings)} 项风险。",
             "hits": len(cross_findings),
             "erp_provider": erp_ctx.get("provider"),
             "at": _now_iso(),
         },
         {
             "step": "anomaly_detection",
-            "detail": "历史异常检测完成",
+            "detail": f"异常检测识别 {len(anomaly_findings)} 项风险。",
             "hits": len(anomaly_findings),
             "at": _now_iso(),
         },
         {
             "step": "ai_semantic_review",
-            "detail": "AI语义审单完成",
-            "risk_level": (ai_assessment or {}).get("risk_level"),
-            "confidence": (ai_assessment or {}).get("confidence"),
+            "detail": "AI 语义审查已完成。",
+            "risk_level": ai_assessment.get("risk_level"),
+            "confidence": ai_assessment.get("confidence"),
             "feedback_reviewed": feedback_ctx.get("reviewed_count", 0),
             "at": _now_iso(),
         },
         {
             "step": "final_decision",
-            "detail": "生成最终结论",
+            "detail": "已汇总全部检查并生成最终结论。",
             "risk_level": risk_level,
             "pass": is_pass,
             "at": _now_iso(),
@@ -1950,7 +2320,7 @@ def push_audit_action_to_erp(
     decision_trace.append(
         {
             "step": "erp_writeback",
-            "detail": "审单结论已回写ERP",
+            "detail": "审单动作已同步至 ERP 适配层。",
             "action": action_norm,
             "trace_id": sync_payload.get("trace_id"),
             "provider": sync_payload.get("provider"),
@@ -2001,30 +2371,50 @@ def _parse_with_ocr(file_bytes: bytes, filename: str) -> Tuple[str, List[str], O
     return raw_text, [], confidence
 
 
-def _extract_text(file_bytes: bytes, filename: str) -> Tuple[str, List[str], Optional[float]]:
+def _extract_text(file_bytes: bytes, filename: str) -> Tuple[str, List[str], Optional[float], str]:
     ext = os.path.splitext(filename)[1].lower()
-    if ext in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}:
-        return _parse_with_ocr(file_bytes, filename)
 
-    if ext == ".pdf":
-        raw_text, page_texts = _parse_with_loader(file_bytes, filename)
-        if len(raw_text) < 40:
-            return _parse_with_ocr(file_bytes, filename)
-        return raw_text, page_texts, None
+    if ext in OCR_REQUIRED_EXTENSIONS:
+        try:
+            raw_text, page_texts, confidence = _parse_with_ocr(file_bytes, filename)
+            return raw_text, page_texts, confidence, "ocr"
+        except Exception:
+            # OCR is preferred for image/PDF. Fallback keeps the pipeline usable.
+            if ext == ".pdf":
+                raw_text, page_texts = _parse_with_loader(file_bytes, filename)
+                return raw_text, page_texts, None, "loader_fallback"
+            raise
 
-    if ext in {".doc", ".docx", ".txt"}:
+    if ext in DIRECT_PARSE_EXTENSIONS:
         raw_text, page_texts = _parse_with_loader(file_bytes, filename)
-        return raw_text, page_texts, None
+        if raw_text:
+            return raw_text, page_texts, None, "loader"
+        if ext == ".txt":
+            try:
+                raw_text = file_bytes.decode("utf-8", errors="ignore").strip()
+                return raw_text, [], None, "text_decode_fallback"
+            except Exception:
+                return "", [], None, "empty"
+        return "", page_texts, None, "loader_empty"
 
     try:
         raw_text = file_bytes.decode("utf-8", errors="ignore").strip()
-        return raw_text, [], None
+        return raw_text, [], None, "text_decode"
     except Exception:
-        return "", [], None
+        return "", [], None, "empty"
 
 
-def run_audit_job_from_job_id(job_id: str) -> None:
+def run_audit_job_from_job_id(job_id: str, model_type: Optional[str] = None) -> None:
+    local_job: Dict[str, Any] = {}
+    with AUDIT_LOCK:
+        if AUDIT_JOBS.get(job_id):
+            local_job = dict(AUDIT_JOBS[job_id])
+
     job = _load_job_from_db(job_id)
+    if job and local_job.get("model_type"):
+        job["model_type"] = local_job.get("model_type")
+    if not job:
+        job = local_job
     if not job:
         raise RuntimeError(f"Audit job not found: {job_id}")
 
@@ -2042,26 +2432,58 @@ def run_audit_job_from_job_id(job_id: str) -> None:
     filename = job.get("file_name") or os.path.basename(local_path) or "document"
     user_id = job.get("user_id") or "anonymous"
     doc_type = job.get("doc_type") or "auto"
-    run_audit_job(job_id, file_bytes, filename, user_id, doc_type)
+    selected_model = normalize_model_type(model_type or job.get("model_type"))
+    run_audit_job(job_id, file_bytes, filename, user_id, doc_type, model_type=selected_model)
 
 
-def enqueue_audit_job(file_bytes: bytes, filename: str, user_id: str, doc_type: Optional[str]) -> Dict[str, Any]:
-    if enqueue_job is None:
-        raise RuntimeError("Audit queue is unavailable, check Redis/RQ dependencies")
+def _run_audit_job_inline_async(job_id: str, model_type: Optional[str] = None) -> None:
+    """Fallback path when Redis/RQ is unavailable."""
+    def _target() -> None:
+        try:
+            run_audit_job_from_job_id(job_id, model_type=model_type)
+        except Exception as e:
+            print(f"[Audit Queue Fallback] job {job_id} failed: {e}")
 
-    job = create_job(file_bytes, filename, user_id, doc_type)
+    thread = threading.Thread(
+        target=_target,
+        name=f"audit-inline-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def enqueue_audit_job(
+    file_bytes: bytes,
+    filename: str,
+    user_id: str,
+    doc_type: Optional[str],
+    model_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    selected_model = normalize_model_type(model_type)
+    job = create_job(file_bytes, filename, user_id, doc_type, model_type=selected_model)
     queue_job_id = f"audit:{job['job_id']}"
+
+    if enqueue_job is None:
+        if not AUDIT_INLINE_FALLBACK:
+            raise RuntimeError("Audit queue is unavailable, check Redis/RQ dependencies")
+        print("[Audit Queue] RQ unavailable, fallback to inline worker thread")
+        _run_audit_job_inline_async(job["job_id"], model_type=selected_model)
+        return job
 
     try:
         enqueue_job(
             queue_name=AUDIT_QUEUE_NAME,
             func=run_audit_job_from_job_id,
-            kwargs={"job_id": job["job_id"]},
+            kwargs={"job_id": job["job_id"], "model_type": selected_model},
             job_id=queue_job_id,
             retry_max=AUDIT_JOB_RETRY_MAX,
             timeout=AUDIT_JOB_TIMEOUT_SECONDS,
         )
     except Exception as e:
+        if AUDIT_INLINE_FALLBACK:
+            print(f"[Audit Queue] enqueue failed ({e}), fallback to inline worker thread")
+            _run_audit_job_inline_async(job["job_id"], model_type=selected_model)
+            return job
         update_job(
             job["job_id"],
             status="failed",
@@ -2074,14 +2496,22 @@ def enqueue_audit_job(file_bytes: bytes, filename: str, user_id: str, doc_type: 
     return job
 
 
-def run_audit_job(job_id: str, file_bytes: bytes, filename: str, user_id: str, doc_type: str) -> None:
+def run_audit_job(
+    job_id: str,
+    file_bytes: bytes,
+    filename: str,
+    user_id: str,
+    doc_type: str,
+    model_type: Optional[str] = None,
+) -> None:
     try:
+        selected_model = normalize_model_type(model_type)
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
             return
-        update_job(job_id, status="running", progress=10, stage="ocr")
+        update_job(job_id, status="running", progress=10, stage="ocr", model_type=selected_model)
 
-        raw_text, page_texts, ocr_confidence = _extract_text(file_bytes, filename)
+        raw_text, page_texts, ocr_confidence, extract_mode = _extract_text(file_bytes, filename)
         _update_db("audit_docs", {
             "raw_text": raw_text,
             "page_texts": page_texts,
@@ -2094,14 +2524,14 @@ def run_audit_job(job_id: str, file_bytes: bytes, filename: str, user_id: str, d
 
         effective_doc_type = doc_type
         if doc_type == "auto":
-            llm_doc_type = _infer_doc_type_llm(raw_text) if AUDIT_LLM_ENABLED else None
+            llm_doc_type = _infer_doc_type_llm(raw_text, selected_model) if AUDIT_LLM_ENABLED else None
             effective_doc_type = llm_doc_type or _infer_doc_type(raw_text)
             update_job(job_id, doc_type=effective_doc_type)
             _update_db("audit_docs", {"doc_type": effective_doc_type}, job_id, key="job_id")
 
         update_job(job_id, progress=STAGE_PROGRESS["ocr"], stage="extract")
 
-        fields = _extract_fields(raw_text, effective_doc_type)
+        fields = _extract_fields(raw_text, effective_doc_type, llm_backend=selected_model)
         fields = _validate_fields(fields)
 
         if _is_cancelled(job_id):
@@ -2142,7 +2572,7 @@ def run_audit_job(job_id: str, file_bytes: bytes, filename: str, user_id: str, d
             raw_text,
             deterministic_findings,
             high_risk_gate,
-            AUDIT_AI_BACKEND,
+            selected_model,
             erp_ctx,
             feedback_ctx,
             anomaly_stats,
@@ -2166,6 +2596,8 @@ def run_audit_job(job_id: str, file_bytes: bytes, filename: str, user_id: str, d
             risk_level = ai_assessment.get("risk_level") or _risk_level(deterministic_findings)
             is_pass = ai_assessment.get("pass") if "pass" in ai_assessment else risk_level == "low"
             summary = ai_assessment.get("summary") or _build_summary(combined_findings)
+            if not _has_chinese_text(summary):
+                summary = _build_summary(combined_findings)
         else:
             risk_level = _risk_level(deterministic_findings)
             is_pass = risk_level == "low"
@@ -2213,6 +2645,8 @@ def run_audit_job(job_id: str, file_bytes: bytes, filename: str, user_id: str, d
             "finding_breakdown": finding_breakdown,
             "decision_trace": decision_trace,
             "audit_score": audit_score,
+            "model_type": selected_model,
+            "text_extract_mode": extract_mode,
             "erp_action": None,
             "erp_trace_id": None,
         }
@@ -2224,3 +2658,6 @@ def run_audit_job(job_id: str, file_bytes: bytes, filename: str, user_id: str, d
     except Exception as e:
         update_job(job_id, status="failed", progress=STAGE_PROGRESS["failed"], stage="failed", error_message=str(e))
         raise
+
+
+

@@ -877,7 +877,7 @@ def tool_get_stock(query: str) -> List[dict]:
         stock_code = ""
         market = ""
 
-        # ?????? (? sh600519 / sz000001 / 600519 / AAPL)
+        # Match stock code (e.g. sh600519 / sz000001 / 600519 / AAPL)
         code_match = re.search(r"\b(?:sh|sz|hk|us)?\d{5,6}\b", query.lower())
         ticker_match = re.search(r"\b[A-Z]{2,6}\b", query)
         if code_match:
@@ -1298,7 +1298,7 @@ async def chat(
 
     def _is_doc_query(text: str) -> bool:
         t = (text or "").lower()
-        keywords = ["doc", "document", "pdf", "ppt", "excel", "word", "attachment", "upload", "file", "??", "??", "??", "??"]
+        keywords = ["doc", "document", "pdf", "ppt", "excel", "word", "attachment", "upload", "file", "wendang", "wenjian", "fujian", "shangchuan"]
         return any(k in t for k in keywords)
 
     def _is_weather_query(text: str) -> bool:
@@ -1366,7 +1366,7 @@ async def chat(
             raw_queries = ""
             alt_query = None
             if not is_weather_intent and not is_stock_intent:
-                # ??????????? fast model????????????? backend
+                # Keep current backend while generating query with fast model fallback.
                 for chunk in ask_llm_stream(query_gen_prompt, model_type=model_backend):
                     if chunk:
                         raw_queries += chunk

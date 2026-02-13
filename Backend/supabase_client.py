@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # =========================
-# 1. Supabase API 配置 (保持不变，用于 Auth/Storage)
+# 1. Supabase API config (for Auth/Storage)
 # =========================
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://gjbmkzduwtcfhmivvklj.supabase.co")
 
@@ -23,7 +23,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv(
 )
 
 # =========================
-# 2. SQLAlchemy + Pooler 数据库配置 (新增)
+# 2. SQLAlchemy + Pooler database config
 # =========================
 
 
@@ -31,12 +31,12 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv(
 # 请在此处填入你的 Supabase 数据库密码 (Database Password)
 SUPABASE_DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "在此处填入你的真实数据库密码")
 
-# 从 URL 中提取 Project ID (gjbmkzduwtcfhmivvklj)
+# Extract Project ID from URL (gjbmkzduwtcfhmivvklj)
 PROJECT_ID = SUPABASE_URL.split("//")[1].split(".")[0]
 
-# Supabase Pooler 连接字符串
+# Supabase Pooler connection string
 DB_USER = f"postgres.{PROJECT_ID}"
-DB_HOST = "aws-0-us-east-1.pooler.supabase.com" # ⚠️ 请根据你的实际区域修改
+DB_HOST = "aws-0-us-east-1.pooler.supabase.com" # Update by your actual region
 DB_PORT = "6543"
 DB_NAME = "postgres"
 
@@ -70,16 +70,20 @@ def get_db():
 _anon_client: Client | None = None
 _admin_client: Client | None = None
 
-def get_anon_supabase() -> Client:
-    """用于登录、JWT 校验 (Auth) - 权限受限于 RLS"""
+def get_anon_supabase(fresh: bool = False) -> Client:
+    """Return anon client; use fresh=True to avoid shared auth session state."""
     global _anon_client
+    if fresh:
+        return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     if _anon_client is None:
         _anon_client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     return _anon_client
 
-def get_admin_supabase() -> Client:
-    """⚠️ 仅后端使用：绕过 RLS 权限 (Service Role) - 拥有所有读写权限"""
+def get_admin_supabase(fresh: bool = False) -> Client:
+    """Return admin client; use fresh=True to avoid shared auth session state."""
     global _admin_client
+    if fresh:
+        return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     if _admin_client is None:
         _admin_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     return _admin_client
@@ -90,3 +94,5 @@ supabase: Client = get_admin_supabase()
 
 def require_supabase() -> Client:
     return supabase
+
+

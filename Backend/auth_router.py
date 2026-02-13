@@ -18,10 +18,10 @@ router = APIRouter(prefix="/api/auth", tags=["Auth"])
 user_router = APIRouter(prefix="/api/user", tags=["User"])
 
 # =========================
-# Storage 配置
+# Storage 閰嶇疆
 # =========================
 AVATAR_BUCKET = "avatars"
-MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 调整为 5MB 稍微宽容一点
+MAX_AVATAR_BYTES = 5 * 1024 * 1024  # Raise avatar limit to 5MB for better tolerance.
 
 # -----------------------------------------------------------------------------
 # 内存缓存层
@@ -37,7 +37,7 @@ def _get_sb_url_and_key(sb) -> tuple[str, str]:
     if not url:
         url = os.getenv("SUPABASE_URL", "") or os.getenv("SUPABASE_PROJECT_URL", "")
     if not key:
-        # 这里必须是 anon key（不是 service role 也行）
+        # Must use anon key here (not service role).
         key = os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_KEY", "")
     if not url or not key:
         raise HTTPException(status_code=500, detail="后端缺少 SUPABASE_URL / SUPABASE_ANON_KEY 配置")
@@ -46,8 +46,8 @@ def _get_sb_url_and_key(sb) -> tuple[str, str]:
 
 def _update_user_metadata_via_gotrue(sb, jwt_token: str, data: dict) -> None:
     """
-    调 Supabase GoTrue 更新 user_metadata：PUT /auth/v1/user
-    需要：Authorization Bearer <jwt> + apikey(anon)
+    Call Supabase GoTrue to update user_metadata: PUT /auth/v1/user
+    Requires: Authorization Bearer <jwt> + apikey(anon)
     """
     supabase_url, anon_key = _get_sb_url_and_key(sb)
     endpoint = f"{supabase_url}/auth/v1/user"
@@ -58,28 +58,28 @@ def _update_user_metadata_via_gotrue(sb, jwt_token: str, data: dict) -> None:
         "Content-Type": "application/json",
     }
 
-    # 只更新 user_metadata：payload 使用 {"data": {...}}
+    # Only update user_metadata: payload format is {"data": {...}}
     payload = {"data": data}
 
     try:
         r = httpx.put(endpoint, headers=headers, json=payload, timeout=10)
         if r.status_code >= 400:
-            # 常见：401 = token 不是 Supabase JWT（比如你的 sms-token）
+            # Common case: 401 means token is not a Supabase JWT (e.g. sms-token).
             detail = ""
             try:
                 detail = r.json()
             except Exception:
                 detail = r.text
             raise HTTPException(status_code=401 if r.status_code == 401 else 500,
-                                detail=f"Supabase 更新失败({r.status_code}): {detail}")
+                                detail=f"Supabase update failed ({r.status_code}): {detail}")
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Supabase 更新失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Supabase update failed: {str(e)}")
 
 
 def _cache_token(token: str, user_id: str, phone: str, email: str):
-    """缓存 Token 与 真实 UserID 的映射关系"""
+    """Cache mapping between temporary token and real user identity."""
     _TOKEN_CACHE[token] = {
         "user_id": user_id,
         "phone": phone,
@@ -89,7 +89,7 @@ def _cache_token(token: str, user_id: str, phone: str, email: str):
 
 
 def _get_session_from_token(token: str) -> Optional[Dict]:
-    """??????????????"""
+    """Return cached session mapping by token."""
     if token in _TOKEN_CACHE:
         session = _TOKEN_CACHE[token]
         if session["expires_at"] > time.time():
@@ -216,9 +216,9 @@ def _find_or_create_user_by_phone(sb, phone: str):
 
 
 def _resolve_user_id(sb, token: Optional[str]) -> str:
-    """统一解析 user_id：JWT token 或自定义 sms-token"""
+    """Resolve user_id from JWT token or custom sms-token."""
     if not token:
-        raise HTTPException(status_code=401, detail="未登录")
+        raise HTTPException(status_code=401, detail="Not logged in")
 
     # JWT Token（密码登录）
     if len(token) > 100:
@@ -234,7 +234,7 @@ def _resolve_user_id(sb, token: Optional[str]) -> str:
     if session:
         return session["user_id"]
 
-    raise HTTPException(status_code=401, detail="无效的会话")
+    raise HTTPException(status_code=401, detail="Invalid session")
 
 
 def _guess_ext(filename: str, content_type: str) -> str:
@@ -299,21 +299,21 @@ class UpdateProfileRequest(BaseModel):
     # username 前端会传，但系统不允许改：后端会忽略它（不写入）
     name: Optional[str] = None
     username: Optional[str] = None
-    # avatar 只允许存 URL（来自 Storage）
+    # avatar only stores URL (from Storage)
     avatar: Optional[str] = None
 
 
 class UpdatePasswordRequest(BaseModel):
-    old_password: str = Field(..., description="原密码")
-    password: str = Field(..., min_length=6, description="新密码")
+    old_password: str = Field(..., description="Old password")
+    password: str = Field(..., min_length=6, description="New password")
 
 
 # ✨ [新增] 忘记密码/重置密码请求模型
 class ResetPasswordRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     phone: str = Field(validation_alias=AliasChoices("phone", "account"))
-    code: str = Field(..., description="验证码")
-    password: str = Field(..., min_length=6, description="新密码")
+    code: str = Field(..., description="Verification code")
+    password: str = Field(..., min_length=6, description="New password")
 
 
 # -----------------------------------------------------------------------------
@@ -323,49 +323,64 @@ class ResetPasswordRequest(BaseModel):
 def api_send_code(req: SendCodeRequest):
     ok = send_login_code(req.phone)
     if not ok:
-        raise HTTPException(status_code=500, detail="短信发送失败")
+        raise HTTPException(status_code=500, detail="Failed to send SMS code")
     return {"success": True, "status": "success"}
 
 
 @router.post("/register")
 def api_register(req: RegisterRequest):
-    # 1️⃣ 校验验证码
-    if not req.code:
-        raise HTTPException(status_code=400, detail="缺少验证码 code")
+    phone = str(req.phone or "").strip()
+    code = str(req.code or "").strip()
+    password = str(req.password or "")
 
-    if not verify_login_code(req.phone, req.code):
-        raise HTTPException(status_code=401, detail="验证码错误")
+    if not phone:
+        raise HTTPException(status_code=400, detail="Phone is required")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing verification code")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
-    email = _get_email_from_phone(req.phone)
+    if not verify_login_code(phone, code):
+        raise HTTPException(status_code=401, detail="Invalid verification code")
 
+    email = _get_email_from_phone(phone)
     sb_admin = get_admin_supabase()
     sb_anon = get_anon_supabase()
+    create_error = None
 
     try:
-        # 2️⃣ 创建用户（Admin API）
         sb_admin.auth.admin.create_user({
             "email": email,
-            "password": req.password,
+            "password": password,
             "email_confirm": True,
             "user_metadata": {
-                "phone": req.phone,
-                "name": f"User_{req.phone[-4:]}",
-                "username": f"User_{req.phone[-4:]}",  # 只初始化一次
+                "phone": phone,
+                "name": f"User_{phone[-4:]}",
+                "username": f"User_{phone[-4:]}",
                 "register_method": "sms"
             }
         })
-
     except Exception as e:
         err = str(e)
-        # 用户已存在 → 继续走登录
-        if "already" not in err.lower() and "exist" not in err.lower():
-            raise HTTPException(status_code=400, detail=f"注册失败: {err}")
+        err_lower = err.lower()
+        duplicate_markers = [
+            "already",
+            "exist",
+            "already registered",
+            "duplicate",
+            "users_email_key",
+            "email_exists",
+        ]
+        is_duplicate = any(marker in err_lower for marker in duplicate_markers)
+        if not is_duplicate:
+            print(f"[Auth][register] create_user failed | phone={phone} | email={email} | err={err}")
+            raise HTTPException(status_code=400, detail=f"Register failed: {err}")
+        create_error = err
 
-    # 3️⃣ 登录（Anon API）
     try:
         login_res = sb_anon.auth.sign_in_with_password({
             "email": email,
-            "password": req.password
+            "password": password
         })
 
         return {
@@ -375,7 +390,7 @@ def api_register(req: RegisterRequest):
             "expires_at": _session_value(login_res.session, "expires_at"),
             "user": {
                 "id": login_res.user.id,
-                "phone": req.phone,
+                "phone": phone,
                 "email": email,
                 "name": login_res.user.user_metadata.get("name"),
                 "username": login_res.user.user_metadata.get("username"),
@@ -383,27 +398,33 @@ def api_register(req: RegisterRequest):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=401, detail=f"登录失败: {str(e)}")
+        err = str(e)
+        print(f"[Auth][register] sign_in failed | phone={phone} | email={email} | err={err}")
+        if create_error:
+            raise HTTPException(status_code=409, detail="This phone is already registered. Please login or reset password.")
+        raise HTTPException(status_code=401, detail=f"Login failed: {err}")
 
 
 @router.post("/login")
 def api_login(req: LoginRequest):
-    sb = require_supabase()
+    # Avoid mutating shared admin client auth state during sign-in.
+    sb_anon = get_anon_supabase(fresh=True)
+    sb_admin = get_admin_supabase(fresh=True)
     email = _get_email_from_phone(req.phone)
 
     # A. 密码登录
     if req.password:
         try:
-            auth_res = sb.auth.sign_in_with_password({
+            auth_res = sb_anon.auth.sign_in_with_password({
                 "email": email,
                 "password": req.password
             })
             meta = auth_res.user.user_metadata or {}
-            # 确保 username 不为空
+            # Ensure username is not empty
             if not meta.get("username"):
                 meta["username"] = meta.get("name") or f"User_{req.phone[-4:]}"
                 try:
-                    sb.auth.admin.update_user_by_id(auth_res.user.id, {"user_metadata": meta})
+                    sb_admin.auth.admin.update_user_by_id(auth_res.user.id, {"user_metadata": meta})
                 except Exception:
                     pass
 
@@ -424,16 +445,16 @@ def api_login(req: LoginRequest):
             }
         except Exception as e:
             if "Email not confirmed" in str(e):
-                raise HTTPException(status_code=403, detail="账号未验证")
-            raise HTTPException(status_code=401, detail="账号或密码错误")
+                raise HTTPException(status_code=403, detail="Email not confirmed")
+            raise HTTPException(status_code=401, detail="Invalid account or password")
 
     # B. 验证码登录
     if req.code:
         if not verify_login_code(req.phone, req.code):
-            raise HTTPException(status_code=401, detail="验证码错误")
+            raise HTTPException(status_code=401, detail="Invalid verification code")
 
         token = f"sms-token-{uuid4()}"
-        real_user = _find_or_create_user_by_phone(sb, req.phone)
+        real_user = _find_or_create_user_by_phone(sb_admin, req.phone)
 
         if real_user:
             user_id = real_user.id
@@ -441,11 +462,11 @@ def api_login(req: LoginRequest):
             user_name = u_meta.get("name", f"User_{req.phone[-4:]}")
             user_email = real_user.email or email
 
-            # 确保 username 初始化
+            # Ensure username is initialized
             if not u_meta.get("username"):
                 u_meta["username"] = user_name
                 try:
-                    sb.auth.admin.update_user_by_id(user_id, {"user_metadata": u_meta})
+                    sb_admin.auth.admin.update_user_by_id(user_id, {"user_metadata": u_meta})
                 except Exception:
                     pass
         else:
@@ -479,7 +500,7 @@ def api_reset_password(req: ResetPasswordRequest):
     """
     # 1. 验证验证码
     if not verify_login_code(req.phone, req.code):
-        raise HTTPException(status_code=401, detail="验证码错误或已过期")
+        raise HTTPException(status_code=401, detail="Invalid or expired verification code")
 
     sb_admin = get_admin_supabase()
 
@@ -496,7 +517,7 @@ def api_reset_password(req: ResetPasswordRequest):
         user_id = user.id
 
     if not user_id:
-        raise HTTPException(status_code=404, detail="该手机号尚未注册")
+        raise HTTPException(status_code=404, detail="This phone number is not registered")
 
     # 3. 强制更新密码
     try:
@@ -505,7 +526,7 @@ def api_reset_password(req: ResetPasswordRequest):
         })
         return {"success": True, "message": "密码重置成功，请重新登录"}
     except Exception as e:
-        print(f"❌ Reset password failed: {e}")
+        print(f"[ResetPassword] failed: {e}")
         raise HTTPException(status_code=500, detail="重置密码失败，请稍后重试")
 
 
@@ -547,7 +568,7 @@ def get_profile(
             except Exception:
                 pass
 
-        # B. 自定义 Token
+        # B. Custom token
         session = _get_session_from_token(token)
         if session:
             try:
@@ -583,7 +604,7 @@ def get_profile(
                     "avatar": "S"
                 }
 
-    return {"phone": None, "nickname": "???", "avatar": None}
+    return {"phone": None, "nickname": "Guest", "avatar": None}
 
 
 @user_router.post("/avatar")
@@ -593,7 +614,7 @@ async def upload_avatar(
 ):
     """
     🔥 最终正确版：
-    - 使用 service_role client 写 Storage（绕过 RLS）
+    - Write Storage via service_role client (bypass RLS)
     - 仍然用 token 解析真实 user_id
     """
     # ✅ 关键修改：这里必须是 admin client
@@ -605,13 +626,13 @@ async def upload_avatar(
 
     ct = (file.content_type or "").lower()
     if not ct.startswith("image/"):
-        raise HTTPException(status_code=415, detail="只允许上传图片文件")
+        raise HTTPException(status_code=415, detail="Only image files are allowed")
 
     data = await file.read()
     if not data:
-        raise HTTPException(status_code=400, detail="空文件")
+        raise HTTPException(status_code=400, detail="Empty file")
     if len(data) > MAX_AVATAR_BYTES:
-        raise HTTPException(status_code=413, detail="头像过大（最大 5MB）")
+        raise HTTPException(status_code=413, detail="Avatar too large (max 5MB)")
 
     # 1️⃣ 文件后缀
     ext = _guess_ext(file.filename or "", ct)
@@ -655,7 +676,7 @@ async def upload_avatar(
 
     except Exception as e:
         print(f"Upload avatar error: {e}")
-        raise HTTPException(status_code=500, detail=f"头像上传失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Avatar upload failed: {str(e)}")
 
 
 @user_router.put("/profile")
@@ -669,7 +690,7 @@ def update_profile(
     sb = require_supabase()
     token = _bearer_token(authorization)
     if not token:
-        raise HTTPException(status_code=401, detail="未登录")
+        raise HTTPException(status_code=401, detail="Not logged in")
 
     # 只允许更新的字段
     updates = {}
@@ -681,12 +702,12 @@ def update_profile(
     if not updates:
         return {"success": True, "message": "Nothing to update"}
 
-    # 重要：只有 Supabase JWT 才能调用 /auth/v1/user
+    # Important: only Supabase JWT can call /auth/v1/user
     if len(token) <= 100:
         raise HTTPException(status_code=401,
-                            detail="当前 token 不是 Supabase JWT（疑似短信自定义 token），无法更新资料。请使用密码登录或让短信登录返回 JWT。")
+                            detail="Current token is not a Supabase JWT; cannot update profile")
 
-    # 直接走 GoTrue REST，更新 user_metadata
+    # Call GoTrue REST directly to update user_metadata
     _update_user_metadata_via_gotrue(sb, token, updates)
     return {"success": True}
 
@@ -703,7 +724,7 @@ def update_password(
     sb_admin = get_admin_supabase()  # 使用 admin client 确保权限
     token = _bearer_token(authorization)
 
-    # 1. 鉴权：获取 user_id
+    # 1. Authenticate: resolve user_id
     user_id = _resolve_user_id(sb_admin, token)
 
     # 2. 获取用户邮箱以便验证旧密码
@@ -713,7 +734,7 @@ def update_password(
             raise Exception("User not found")
         email = user_res.user.email
     except Exception:
-        raise HTTPException(status_code=404, detail="无法获取用户信息")
+        raise HTTPException(status_code=404, detail="Unable to fetch user info")
 
     # 3. 验证旧密码
     # 注意：使用 Anon Client 来模拟用户登录，以验证密码正确性
@@ -729,7 +750,7 @@ def update_password(
         if not login_res.user:
             raise Exception("Login failed")
     except Exception as e:
-        print(f"❌ 验证旧密码失败: {e}")
+        print(f"[Password] old password verification failed: {e}")
         raise HTTPException(status_code=400, detail="原密码错误，请检查后重试")
 
     # 4. 修改新密码
@@ -740,7 +761,7 @@ def update_password(
         })
         return {"success": True, "message": "密码修改成功"}
     except Exception as e:
-        print(f"❌ 修改密码失败: {e}")
+        print(f"[Password] update failed: {e}")
         raise HTTPException(status_code=500, detail=f"密码修改失败: {str(e)}")
 
 @router.post("/check_account")
@@ -756,5 +777,6 @@ def api_check_account(req: SendCodeRequest):
     return {
         "success": True,
         "registered": registered,
-        "reason": "已注册" if registered else "该手机号未注册，请先注册后再登录"
+        "reason": "Already registered" if registered else "This phone number is not registered"
     }
+

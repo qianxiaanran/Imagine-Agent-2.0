@@ -1,6 +1,12 @@
 import os
+import sys
 from datetime import datetime
 from typing import Generator, Optional, Any
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(errors="replace")
 
 # ✅ [修复] 优先尝试使用 langchain_ollama (LangChain 0.3+ 标准)，否则回退
 try:

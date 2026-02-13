@@ -221,7 +221,7 @@ class SummaryMemory:
             session_id: str,
             current_summary: str,
             messages: List[BaseMessage],
-            model_type: str = "local"  # ????????? model_type ??????
+            model_type: str = "local"  # allow caller to choose the summarization backend
     ) -> str:
         if not messages:
             return current_summary
@@ -498,33 +498,33 @@ def router_node(state: AgentState):
         return "chat"
 
     router_prompt = f"""
-??????? Agent ?????? ReAct ???????
-????????
+你是企业 Agent 路由器，请按 ReAct 风格判断最终路由意图。
+输出格式：
 Thought: ...
 Action: <database|rag|planner|chat>
 Observation: ...
 Reflexion: ...
 Final: <database|rag|planner|chat>
 
-?Few-shot ???
-Task: ????????????
-Thought: ???????
+Few-shot 示例
+Task: 用户问“本月销售额同比增长多少”
+Thought: 需要查询结构化业务数据
 Action: database
-Observation: ??SQL
-Reflexion: ???????
+Observation: 这是 SQL / 指标统计问题
+Reflexion: 应该走数据库查询链路
 Final: database
 
-Task: ?????????????
-Thought: ??????
+Task: 用户问“这份制度文档第3章的审批条件是什么”
+Thought: 需要从已上传文档中检索
 Action: rag
-Observation: ?????
-Reflexion: ??????RAG
+Observation: 问题依赖文档内容
+Reflexion: 应优先走 RAG
 Final: rag
 
-????????{hub.query}
-????????{recent_history}
-??????{summary}
-???????{context_preview}
+当前任务：{hub.query}
+最近对话：{recent_history}
+会话摘要：{summary}
+检索上下文：{context_preview}
 """
 
     try:

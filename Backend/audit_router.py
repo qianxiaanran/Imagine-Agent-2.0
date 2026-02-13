@@ -17,6 +17,7 @@ async def audit_start(
     file: UploadFile = File(...),
     doc_type: str = Form(None),
     user_id: str = Form(None),
+    model_type: str = Form(None),
 ):
     if not file:
         raise HTTPException(status_code=400, detail="Missing file")
@@ -26,7 +27,13 @@ async def audit_start(
         raise HTTPException(status_code=400, detail="Empty file")
 
     try:
-        job = enqueue_audit_job(file_bytes, file.filename, user_id or "anonymous", doc_type)
+        job = enqueue_audit_job(
+            file_bytes,
+            file.filename,
+            user_id or "anonymous",
+            doc_type,
+            model_type=model_type,
+        )
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Audit queue unavailable: {e}")
     return {"job_id": job["job_id"], "status": job["status"]}

@@ -1,0 +1,65 @@
+[33mConnectivity check to the model hoster has been skipped because `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK` is enabled.[0m
+F:\Enterprise-Intelligent-Office-Agent-2.0\Backend\main.py:113: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+[32mCreating model: ('PP-LCNet_x1_0_doc_ori', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\LEGION\.paddlex\official_models\PP-LCNet_x1_0_doc_ori`.[0m
+WARNING: Logging before InitGoogleLogging() is written to STDERR
+W0212 10:30:49.431826 49772 gpu_resources.cc:116] Please NOTE: device: 0, GPU Compute Capability: 8.6, Driver API Version: 13.1, Runtime API Version: 12.6
+[32mCreating model: ('UVDoc', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\LEGION\.paddlex\official_models\UVDoc`.[0m
+[32mCreating model: ('PP-DocLayoutV3', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\LEGION\.paddlex\official_models\PP-DocLayoutV3`.[0m
+[32mCreating model: ('PaddleOCR-VL-1.5-0.9B', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\LEGION\.paddlex\official_models\PaddleOCR-VL-1.5`.[0m
+W0212 10:30:56.830158 49772 gpu_resources.cc:245] WARNING: device: 0. The installed Paddle is compiled with CUDNN 9.9, but CUDNN version in your machine is 9.5, which may cause serious incompatible bug. Please recompile or reinstall Paddle with compatible CUDNN version.
+[32mLoading configuration file C:\Users\LEGION\.paddlex\official_models\PaddleOCR-VL-1.5\config.json[0m
+[32mLoading weights file C:\Users\LEGION\.paddlex\official_models\PaddleOCR-VL-1.5\model.safetensors[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32muse GQA - num_heads: 16- num_key_value_heads: 2[0m
+[32mLoaded weights file from disk, setting weights to model.[0m
+[32mAll model checkpoint weights were used when initializing PaddleOCRVLForConditionalGeneration.
+[0m
+[32mAll the weights of PaddleOCRVLForConditionalGeneration were initialized from the model checkpoint at C:\Users\LEGION\.paddlex\official_models\PaddleOCR-VL-1.5.
+If your task is similar to the task the model of the checkpoint was trained on, you can already use PaddleOCRVLForConditionalGeneration for predictions without further training.[0m
+[32mLoading configuration file C:\Users\LEGION\.paddlex\official_models\PaddleOCR-VL-1.5\generation_config.json[0m
+[33mCurrently, the 'PaddleOCR-VL-1.5-0.9B' local model only supports batch size of 1. The batch size will be updated to 1.[0m
+[32mCreating model: ('PP-OCRv5_server_det', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\LEGION\.paddlex\official_models\PP-OCRv5_server_det`.[0m
+[32mCreating model: ('PP-OCRv5_server_rec', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\LEGION\.paddlex\official_models\PP-OCRv5_server_rec`.[0m
+INFO:     Started server process [44620]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:18001 (Press CTRL+C to quit)
+[2026-02-12 10:31:37,619] [    INFO] _client.py:1025 - HTTP Request: GET https://gjbmkzduwtcfhmivvklj.supabase.co/rest/v1/session_titles?select=session_id%2Ctitle&user_id=eq.anonymous "HTTP/2 200 OK"
+[2026-02-12 10:31:38,222] [    INFO] _client.py:1025 - HTTP Request: GET https://gjbmkzduwtcfhmivvklj.supabase.co/rest/v1/history?select=session_id%2Ccontent%2Ccreated_at%2Crole&user_id=eq.anonymous&order=created_at.desc&limit=4000 "HTTP/2 200 OK"
+F:\Enterprise-Intelligent-Office-Agent-2.0\Backend\documents_processing.py:236: LangChainDeprecationWarning: The class `HuggingFaceEmbeddings` was deprecated in LangChain 0.2.2 and will be removed in 1.0. An updated version of the class exists in the langchain-huggingface package and should be used instead. To use it run `pip install -U langchain-huggingface` and import as `from langchain_huggingface import HuggingFaceEmbeddings`.
+  _embeddings = HuggingFaceEmbeddings(
+F:\Enterprise-Intelligent-Office-Agent-2.0\Backend\documents_processing.py:204: FutureWarning: `torch.utils._pytree._register_pytree_node` is deprecated. Please use `torch.utils._pytree.register_pytree_node` instead.
+  return base_fn(*args, **kwargs)
+F:\Enterprise-Intelligent-Office-Agent-2.0\Backend\documents_processing.py:204: FutureWarning: `torch.utils._pytree._register_pytree_node` is deprecated. Please use `torch.utils._pytree.register_pytree_node` instead.
+  return base_fn(*args, **kwargs)
+[2026-02-12 10:31:49,594] [    INFO] SentenceTransformer.py:227 - Load pretrained SentenceTransformer: F:\Enterprise-Intelligent-Office-Agent-2.0\bge-small-zh-v1.5
+F:\Enterprise-Intelligent-Office-Agent-2.0\Backend\documents_processing.py:204: FutureWarning: `torch.utils._pytree._register_pytree_node` is deprecated. Please use `torch.utils._pytree.register_pytree_node` instead.
+  return base_fn(*args, **kwargs)
