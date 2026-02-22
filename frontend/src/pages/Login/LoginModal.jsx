@@ -430,7 +430,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
                 </button>
               </div>
               <p className="text-sm leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
-                当前版本暂未接入微信登录，请使用手机号+验证码或账号密码登录。
+                本来想做微信登录的，后期发现开发者认证太麻烦就没做嘿嘿，请使用手机号+验证码或账号密码登录。
               </p>
               <div className="mt-4 flex justify-end">
                 <Button variant="loginBlack" className="!py-2 !px-4 !text-sm" onClick={() => setIsWeChatTipOpen(false)}>

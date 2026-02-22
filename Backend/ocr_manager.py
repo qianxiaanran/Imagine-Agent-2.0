@@ -1,10 +1,10 @@
 ﻿import os
 import sys
-import sys
 import datetime
 import io
 import pathlib
 import tempfile
+import threading
 from typing import List, Optional
 
 from database_manager import DatabaseManager
@@ -38,25 +38,6 @@ def _add_torch_dll_paths():
         if os.path.isdir(py_lib_bin):
             os.add_dll_directory(py_lib_bin)
             _prepend_path(py_lib_bin)
-    except Exception:
-        pass
-
-
-def _add_torch_dll_paths():
-    """
-    Windows: 确保 torch 的 DLL 目录在搜索路径中
-    """
-    try:
-        import site
-        if not hasattr(os, "add_dll_directory"):
-            return
-        for sp in site.getsitepackages():
-            torch_lib = os.path.join(sp, "torch", "lib")
-            if os.path.isdir(torch_lib):
-                os.add_dll_directory(torch_lib)
-        py_lib_bin = os.path.join(sys.exec_prefix, "Library", "bin")
-        if os.path.isdir(py_lib_bin):
-            os.add_dll_directory(py_lib_bin)
     except Exception:
         pass
 
@@ -99,13 +80,10 @@ def _add_cuda_dll_paths():
 
 
 _add_torch_dll_paths()
-_add_torch_dll_paths()
 _add_cuda_dll_paths()
 
 # 🔧 [Windows 修复] 解决 PaddleOCR 可能出现的 OMP 库冲突错误
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-# 关闭 PaddleX 模型源检查，避免联网超时
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 # 关闭 PaddleX 模型源检查，避免联网超时
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
@@ -156,6 +134,9 @@ except Exception as e:
 
 # 设置日志级别
 logging.getLogger("ppocr").setLevel(logging.WARNING)
+
+_OCR_MANAGER_SINGLETON: Optional["OCRManager"] = None
+_OCR_MANAGER_LOCK = threading.Lock()
 
 
 class OCRManager:
@@ -598,3 +579,15 @@ class OCRManager:
             return "✅ 已保存到数据库"
         except Exception as e:
             return f"❌ 入库失败: {str(e)}"
+
+
+def get_shared_ocr_manager() -> Optional[OCRManager]:
+    global _OCR_MANAGER_SINGLETON
+    if _OCR_MANAGER_SINGLETON is not None:
+        print("[OCR Manager] Reusing shared OCR instance")
+        return _OCR_MANAGER_SINGLETON
+    with _OCR_MANAGER_LOCK:
+        if _OCR_MANAGER_SINGLETON is None:
+            print("[OCR Manager] Creating shared OCR instance")
+            _OCR_MANAGER_SINGLETON = OCRManager()
+    return _OCR_MANAGER_SINGLETON

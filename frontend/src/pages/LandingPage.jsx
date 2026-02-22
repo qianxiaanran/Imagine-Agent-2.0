@@ -281,7 +281,7 @@ const LandingPage = ({ onOpenLogin }) => {
             <Reveal className="order-2 md:order-1">
               <SectionBadge>技术架构</SectionBadge>
               <h2 className="text-4xl font-bold text-gray-900 dark:text-white mb-6 leading-tight">模块化设计，<br />为企业级性能而生</h2>
-              <p className="text-gray-500 dark:text-gray-400 text-lg mb-10 leading-relaxed">我们摒弃了黑盒交付。系统采用清晰的分层架构，业务逻辑与 AI 服务解耦，既保证了系统的稳定性，也为未来的模型升级预留了无限可能。</p>
+              <p className="text-gray-500 dark:text-gray-400 text-lg mb-10 leading-relaxed">摒弃了黑盒交付。系统采用清晰的分层架构，业务逻辑与 AI 服务解耦，既保证了系统的稳定性，也为未来的模型升级预留了无限可能。</p>
               <div className="space-y-8">
                 {[{ title: '多模态智能输入', desc: '统一处理 PDF/Word 文档、数据库表结构与语音流，消除数据孤岛。', icon: LayoutTemplate, color: 'text-blue-600 dark:text-blue-400', bg: 'bg-blue-50 dark:bg-blue-900/20' }, { title: '混合检索引擎', desc: '结合 BGE 中文嵌入模型与关键词搜索，在召回率与准确率之间找到完美平衡。', icon: Search, color: 'text-purple-600 dark:text-purple-400', bg: 'bg-purple-50 dark:bg-purple-900/20' }, { title: '本地模型生态', desc: '深度适配 Qwen2.5-coder、DeepSeek 等开源大模型，低成本实现高性能推理。', icon: Cpu, color: 'text-gray-900 dark:text-white', bg: 'bg-gray-100 dark:bg-gray-800' }].map((item, idx) => (
                   <div key={idx} className="flex gap-5 group">

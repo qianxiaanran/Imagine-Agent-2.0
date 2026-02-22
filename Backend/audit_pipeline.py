@@ -2,6 +2,7 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta
@@ -10,9 +11,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, ValidationError, Field
 
 try:
-    from ocr_manager import OCRManager
+    from ocr_manager import OCRManager, get_shared_ocr_manager
 except Exception:
     OCRManager = None
+    get_shared_ocr_manager = None
 
 try:
     from documents_processing import load_documents
@@ -106,6 +108,13 @@ AUDIT_MODEL_ALIASES = {
 
 OCR_REQUIRED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".pdf"}
 DIRECT_PARSE_EXTENSIONS = {".doc", ".docx", ".txt"}
+AUDIT_PDF_FAST_PARSE_ENABLED = os.getenv("AUDIT_PDF_FAST_PARSE_ENABLED", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+AUDIT_PDF_FAST_PARSE_MIN_CHARS = int(os.getenv("AUDIT_PDF_FAST_PARSE_MIN_CHARS", "180"))
 
 DATE_COMPACT_PATTERN = r"\b(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\b"
 AMOUNT_CAPTURE_PATTERN = r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[+-]?\d+(?:\.\d+)?"
@@ -114,6 +123,7 @@ AMOUNT_TOKEN_PATTERN = rf"(?<![\dA-Za-z])({AMOUNT_CAPTURE_PATTERN})(?![\dA-Za-z]
 AUDIT_JOBS: Dict[str, Dict[str, Any]] = {}
 AUDIT_LOCK = threading.Lock()
 _OCR_ENGINE: Optional[OCRManager] = None
+_OCR_ENGINE_LOCK = threading.Lock()
 
 
 class AuditFields(BaseModel):
@@ -236,8 +246,16 @@ def _parse_date(value: Any) -> Optional[datetime]:
 
 def _get_ocr_engine() -> Optional[OCRManager]:
     global _OCR_ENGINE
-    if _OCR_ENGINE is None and OCRManager:
-        _OCR_ENGINE = OCRManager()
+    if _OCR_ENGINE is not None:
+        return _OCR_ENGINE
+    if not OCRManager:
+        return None
+    with _OCR_ENGINE_LOCK:
+        if _OCR_ENGINE is None:
+            if get_shared_ocr_manager:
+                _OCR_ENGINE = get_shared_ocr_manager()
+            else:
+                _OCR_ENGINE = OCRManager()
     return _OCR_ENGINE
 
 
@@ -2374,6 +2392,11 @@ def _parse_with_ocr(file_bytes: bytes, filename: str) -> Tuple[str, List[str], O
 def _extract_text(file_bytes: bytes, filename: str) -> Tuple[str, List[str], Optional[float], str]:
     ext = os.path.splitext(filename)[1].lower()
 
+    if ext == ".pdf" and AUDIT_PDF_FAST_PARSE_ENABLED:
+        raw_text, page_texts = _parse_with_loader(file_bytes, filename)
+        if len((raw_text or "").strip()) >= AUDIT_PDF_FAST_PARSE_MIN_CHARS:
+            return raw_text, page_texts, None, "loader_pdf_fast"
+
     if ext in OCR_REQUIRED_EXTENSIONS:
         try:
             raw_text, page_texts, confidence = _parse_with_ocr(file_bytes, filename)
@@ -2505,6 +2528,7 @@ def run_audit_job(
     model_type: Optional[str] = None,
 ) -> None:
     try:
+        t_start = time.perf_counter()
         selected_model = normalize_model_type(model_type)
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
@@ -2512,6 +2536,7 @@ def run_audit_job(
         update_job(job_id, status="running", progress=10, stage="ocr", model_type=selected_model)
 
         raw_text, page_texts, ocr_confidence, extract_mode = _extract_text(file_bytes, filename)
+        t_after_ocr = time.perf_counter()
         _update_db("audit_docs", {
             "raw_text": raw_text,
             "page_texts": page_texts,
@@ -2533,6 +2558,7 @@ def run_audit_job(
 
         fields = _extract_fields(raw_text, effective_doc_type, llm_backend=selected_model)
         fields = _validate_fields(fields)
+        t_after_extract = time.perf_counter()
 
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
@@ -2548,6 +2574,7 @@ def run_audit_job(
         cross_findings, erp_checks = _run_cross_document_checks(effective_doc_type, fields, erp_ctx, history_records)
         anomaly_findings, anomaly_stats = _run_anomaly_detection(effective_doc_type, fields, history_records)
         deterministic_findings = list(rule_findings) + list(cross_findings) + list(anomaly_findings)
+        t_after_rules = time.perf_counter()
 
         if deterministic_findings:
             rows = []
@@ -2577,6 +2604,7 @@ def run_audit_job(
             feedback_ctx,
             anomaly_stats,
         )
+        t_after_ai = time.perf_counter()
 
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
@@ -2654,6 +2682,18 @@ def run_audit_job(
         _persist_audit_result(job_id, result)
 
         update_job(job_id, status="done", progress=STAGE_PROGRESS["done"], stage="done", result=result)
+        t_done = time.perf_counter()
+        print(
+            "[Audit Perf] "
+            f"job={job_id} "
+            f"extract_mode={extract_mode} "
+            f"ocr={t_after_ocr - t_start:.2f}s "
+            f"extract={t_after_extract - t_after_ocr:.2f}s "
+            f"rules={t_after_rules - t_after_extract:.2f}s "
+            f"ai={t_after_ai - t_after_rules:.2f}s "
+            f"report={t_done - t_after_ai:.2f}s "
+            f"total={t_done - t_start:.2f}s"
+        )
 
     except Exception as e:
         update_job(job_id, status="failed", progress=STAGE_PROGRESS["failed"], stage="failed", error_message=str(e))

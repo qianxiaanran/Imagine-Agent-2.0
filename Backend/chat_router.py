@@ -22,6 +22,10 @@ BING_SUBSCRIPTION_KEY = os.environ.get("BING_SEARCH_V7_KEY", "")
 # 2. SerpAPI (备选): https://serpapi.com/
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "")
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "2000"))
+RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "1200"))
+RAG_MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHUNK_CHARS", "700"))
+RAG_MAX_CHUNKS = int(os.getenv("RAG_MAX_CHUNKS", "6"))
+RAG_MAX_KB_TEXT_CHARS = int(os.getenv("RAG_MAX_KB_TEXT_CHARS", "4200"))
 FAST_CHAT_DIRECT = os.getenv("FAST_CHAT_DIRECT", "true").lower() != "false"
 FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "4"))
 PROMPT_LAYOUT_VERSION = "v1"
@@ -1201,6 +1205,91 @@ async def chat(
 
     print(f"🚀 [Chat] New Request: User={user_id}, Session={session_id}, Mode={mode}, Backend={model_backend}")
 
+    shared_context_cache: Dict[str, Dict[str, str]] = {}
+
+    def _get_shared_context(target_mode: Optional[str] = None, history_limit: int = FAST_CHAT_HISTORY_LIMIT) -> Dict[str, str]:
+        normalized_mode = (target_mode or mode or "general").strip().lower() or "general"
+        cache_key = f"{normalized_mode}:{history_limit}"
+        cached = shared_context_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        history_text = _get_plain_history(
+            user_id,
+            session_id,
+            limit=history_limit,
+            mode=normalized_mode,
+        )
+        active_context = (context_content or "").strip()
+
+        summary_context = ""
+        try:
+            hub = ContextHub(
+                user_id=user_id,
+                session_id=session_id,
+                query=message,
+                active_context_content=active_context,
+                ui_mode=normalized_mode
+            )
+            if memory_summary:
+                history_msgs = _get_langchain_history(
+                    user_id,
+                    session_id,
+                    limit=max(6, history_limit),
+                    mode=normalized_mode,
+                )
+                if history_msgs:
+                    hub.history_summary = memory_summary.update_from_messages(
+                        user_id=user_id,
+                        session_id=session_id,
+                        current_summary=hub.history_summary,
+                        messages=history_msgs,
+                        model_type=model_backend,
+                    )
+            if not hub.history_summary and history_text:
+                hub.history_summary = history_text[:800]
+            summary_context = hub.get_combined_context(max_len=2000)
+        except Exception:
+            summary_context = ""
+
+        session_state = ""
+        try:
+            compaction_payload = _maybe_compact_context(
+                user_id=user_id,
+                session_id=session_id,
+                mode=normalized_mode,
+                model_backend=model_backend,
+            )
+            session_state = _build_compaction_context_block(compaction_payload)
+        except Exception:
+            session_state = ""
+
+        bundle = {
+            "history_text": history_text or "",
+            "summary_context": summary_context or "",
+            "session_state": session_state or "",
+            "active_context": active_context or "",
+        }
+        shared_context_cache[cache_key] = bundle
+        return bundle
+
+    def _wrap_prompt_with_shared_context(
+            base_prompt: str,
+            shared_ctx: Dict[str, str],
+            user_message: Optional[str] = None,
+            recent_history: Optional[str] = None,
+    ) -> str:
+        merged_summary = (base_prompt or "").strip()
+        summary_ctx = (shared_ctx.get("summary_context") or "").strip()
+        if summary_ctx:
+            merged_summary = f"{summary_ctx}\n\n{merged_summary}" if merged_summary else summary_ctx
+        return _build_cache_friendly_prompt(
+            user_message=(user_message if user_message is not None else message),
+            session_state=shared_ctx.get("session_state", ""),
+            summary_context=merged_summary,
+            recent_history=(recent_history if recent_history is not None else shared_ctx.get("history_text", "")),
+        )
+
     # --------------------------------------------------------
     # ✅ 联网搜索模式：ChatGPT 逻辑 (优化搜索词 -> 搜索 -> 思考 -> 回答)
     # --------------------------------------------------------
@@ -1211,52 +1300,13 @@ async def chat(
         push_chunk, flush_chunk = _make_text_buffer(immediate=True)
         try:
             active_mode = (return_mode or func_type or mode or "chat")
-            history_text = _get_plain_history(
-                user_id,
-                session_id,
-                limit=FAST_CHAT_HISTORY_LIMIT,
-                mode=active_mode,
-            )
-            context_text = (context_content or "").strip()
-
-            summary_context = ""
-            try:
-                hub = ContextHub(
-                    user_id=user_id,
-                    session_id=session_id,
-                    query=message,
-                    active_context_content=context_text,
-                    ui_mode=mode
-                )
-                if memory_summary:
-                    history_msgs = _get_langchain_history(
-                        user_id,
-                        session_id,
-                        limit=6,
-                        mode=active_mode,
-                    )
-                    if history_msgs:
-                        hub.history_summary = memory_summary.update_from_messages(
-                            user_id=user_id,
-                            session_id=session_id,
-                            current_summary=hub.history_summary,
-                            messages=history_msgs,
-                            model_type=model_backend
-                        )
-                if not hub.history_summary and history_text:
-                    hub.history_summary = history_text[:800]
-                summary_context = hub.get_combined_context(max_len=2000)
-            except Exception:
-                summary_context = ""
-
-            prompt_parts = []
-            if summary_context:
-                prompt_parts.append(f"SummaryContext:\n{summary_context}")
-            if history_text:
-                prompt_parts.append(f"RecentHistory:\n{history_text}")
+            shared_ctx = _get_shared_context(active_mode, history_limit=FAST_CHAT_HISTORY_LIMIT)
             system_prompt = _merge_system_prompt(None, personalization_system_prompt)
-            prompt_parts.append(f"User: {message}\nAssistant:")
-            prompt = "\n\n".join(prompt_parts)
+            prompt = _wrap_prompt_with_shared_context(
+                "",
+                shared_ctx,
+                user_message=message,
+            )
 
             for chunk in ask_llm_stream(
                 prompt,
@@ -1339,8 +1389,10 @@ async def chat(
 
         try:
             # === Step 1: 智能生成搜索词 (Query Optimization) ===
-            # 获取少量历史记录，用于补全上下文
-            history_text = _get_plain_history(user_id, session_id, limit=4, mode="search")
+            shared_ctx = _get_shared_context("search", history_limit=4)
+            history_text = shared_ctx.get("history_text", "")
+            summary_text = (shared_ctx.get("summary_context", "") or "").strip()[:1200]
+            active_text = (shared_ctx.get("active_context", "") or "").strip()[:1000]
 
             yield json.dumps({"t": "c", "v": "> 🤔 正在规划搜索策略...\n\n"}, ensure_ascii=False) + "\n"
 
@@ -1354,6 +1406,12 @@ async def chat(
 
 对话历史：
 {history_text}
+
+会话摘要：
+{summary_text or "（无）"}
+
+当前附加上下文：
+{active_text or "（无）"}
 
 用户最新问题：
 {message}
@@ -1515,6 +1573,12 @@ Requirements:
 
 Answer:
 """
+            prompt = _wrap_prompt_with_shared_context(
+                prompt,
+                shared_ctx,
+                user_message=message,
+                recent_history=history_text,
+            )
 
 # === Step 5: 流式输出回答 ===
             # DB 模式更强调“快出字”，合并阈值更小
@@ -1567,6 +1631,7 @@ Answer:
 
         full_reply = ""
         try:
+            shared_ctx = _get_shared_context("database", history_limit=6)
             # 来源：先发数据库信息，后续收到 SQL 事件后会追加
             db_sources: List[Dict[str, Any]] = [{
                 "type": "database",
@@ -1582,6 +1647,10 @@ Answer:
                 message,
                 model_type=model_backend,
                 response_instruction=personalization_system_prompt,
+                history_context=shared_ctx.get("history_text", ""),
+                summary_context=shared_ctx.get("summary_context", ""),
+                session_state=shared_ctx.get("session_state", ""),
+                active_context_content=shared_ctx.get("active_context", ""),
             ):
                 if isinstance(event, dict) and event.get("type") == "status":
                     status_msg = event.get("message")
@@ -1655,9 +1724,23 @@ Answer:
         # 消息中可能包含 "Attached files..." 等前缀，Audit Service 内部有 normalize 步骤
         # 这里直接传 raw message 即可
         try:
+            shared_ctx = _get_shared_context("audit", history_limit=6)
+            audit_message = message
+            ctx_parts: List[str] = []
+            if shared_ctx.get("session_state"):
+                ctx_parts.append(f"[会话状态]\n{shared_ctx['session_state'][:1200]}")
+            if shared_ctx.get("summary_context"):
+                ctx_parts.append(f"[摘要上下文]\n{shared_ctx['summary_context'][:1200]}")
+            if shared_ctx.get("history_text"):
+                ctx_parts.append(f"[近期对话]\n{shared_ctx['history_text'][:1200]}")
+            if shared_ctx.get("active_context"):
+                ctx_parts.append(f"[当前附加上下文]\n{shared_ctx['active_context'][:1000]}")
+            if ctx_parts:
+                audit_message = f"{message}\n\n[审计补充上下文]\n" + "\n\n".join(ctx_parts)
+
             # ✅ 传递 model_type
             push_chunk, flush_chunk = _make_text_buffer()
-            async for chunk in run_audit_pipeline(user_id, session_id, message, model_type=model_backend):
+            async for chunk in run_audit_pipeline(user_id, session_id, audit_message, model_type=model_backend):
                 if chunk:
                     full_reply += chunk
                     out = push_chunk(chunk)
@@ -1706,6 +1789,7 @@ Answer:
 
         full_reply = ""
         try:
+            shared_ctx = _get_shared_context("rag", history_limit=6)
             # 1) 检索
             summary_intent = bool(re.search(r"(总结|概述|摘要|提炼|梳理|归纳)", message))
             docs = search_user_documents(
@@ -1715,6 +1799,18 @@ Answer:
                 match_threshold=0.0 if summary_intent else 0.3
             )
             chunks, srcs = _to_text_and_sources(docs)
+            # 控制 RAG 上下文长度，避免本地模型上下文窗口溢出导致空白回复
+            normalized_chunks: List[str] = []
+            for c in chunks:
+                if not c:
+                    continue
+                t = str(c).strip()
+                if not t:
+                    continue
+                normalized_chunks.append(t[:RAG_MAX_CHUNK_CHARS])
+                if len(normalized_chunks) >= RAG_MAX_CHUNKS:
+                    break
+            chunks = normalized_chunks
 
             # 2) 给前端发来源（可选）
             if srcs:
@@ -1723,7 +1819,7 @@ Answer:
                 yield json.dumps({"t": "m", "sid": session_id, "src": ["知识库检索结果"]}, ensure_ascii=False) + "\n"
 
             # 3) 组装 Prompt
-            active = (req.context_content or "").strip()
+            active = (shared_ctx.get("active_context", "") or "").strip()[:RAG_MAX_ACTIVE_CONTEXT_CHARS]
             kb_sections = []
             if active and (summary_intent or not chunks):
                 kb_sections.append(f"【附件上下文】\n{active}")
@@ -1731,6 +1827,8 @@ Answer:
                 kb_sections.extend([f"【片段{i + 1}】\n{c}" for i, c in enumerate(chunks)])
 
             kb_text = "\n\n".join(kb_sections) if kb_sections else "（未检索到相关资料）"
+            if len(kb_text) > RAG_MAX_KB_TEXT_CHARS:
+                kb_text = kb_text[:RAG_MAX_KB_TEXT_CHARS] + "\n\n[资料过长，已自动截断]"
 
             if not kb_sections:
                 yield json.dumps({"t": "c", "v": "未检索到文档内容。请确认文档已成功上传并完成解析后再试。"}, ensure_ascii=False) + "\n"
@@ -1757,11 +1855,24 @@ Answer:
             prompt += "\n请用中文给出清晰、专业、简洁的回答。\n"
             if summary_intent:
                 prompt += "用户明确要求总结文档，请直接给出结构化摘要（核心主题+关键要点3-7条+结论/建议），不要追问。\n"
+            prompt = _wrap_prompt_with_shared_context(
+                prompt,
+                shared_ctx,
+                user_message=message,
+            )
+            print(
+                f"📚 [RAG] summary={summary_intent}, chunks={len(chunks)}, prompt_chars={len(prompt)}, backend={model_backend}",
+                flush=True
+            )
 
             # 4) 流式输出
             # ✅ 使用 model_backend
             push_chunk, flush_chunk = _make_text_buffer(immediate=True)
-            for chunk in ask_llm_stream(prompt, model_type=model_backend):
+            for chunk in ask_llm_stream(
+                prompt,
+                system_prompt=personalization_system_prompt,
+                model_type=model_backend,
+            ):
                 if chunk:
                     full_reply += chunk
                     out = push_chunk(chunk)
@@ -1774,6 +1885,10 @@ Answer:
                 for part in _split_text(out):
                     yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                     await asyncio.sleep(0)
+            if not full_reply.strip():
+                full_reply = "未收到模型生成内容（可能因为上下文过长或模型暂时无响应）。请重试，或切换到云端模型后再试。"
+                yield json.dumps({"t": "c", "v": full_reply}, ensure_ascii=False) + "\n"
+                await asyncio.sleep(0)
 
             # 5) 保存历史记录
             if user_id != "anonymous":

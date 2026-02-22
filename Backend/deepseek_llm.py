@@ -47,6 +47,9 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen2.5-coder")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "1"))
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "1h")
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "8192"))
 # Local Router (small) model config
 ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "deepseek-r1:1.5b")
 ROUTER_NUM_CTX = int(os.getenv("ROUTER_NUM_CTX", "2048"))
@@ -59,7 +62,7 @@ DEEPSEEK_URL = "https://api.deepseek.com"
 DEEPSEEK_KEY = "***REMOVED_DEEPSEEK_KEY***"
 DEEPSEEK_MODEL_NAME = "deepseek-chat"  # V3
 
-print(f"🤖 [LLM Init] Local: {MODEL_NAME} @ {OLLAMA_BASE_URL}")
+print(f"🤖 [LLM Init] Local: {MODEL_NAME} @ {OLLAMA_BASE_URL} (ctx={OLLAMA_NUM_CTX})")
 
 # 初始化 Local LLM (Ollama)
 try:
@@ -72,9 +75,9 @@ try:
             num_gpu=OLLAMA_NUM_GPU,
             # streaming=True, # langchain_ollama 部分版本可能不需要显式传此参数，视情况而定
             # --- 🚀 性能优化参数 ---
-            num_ctx=2048,
-            keep_alive="1h",
-            num_predict=8192,
+            num_ctx=OLLAMA_NUM_CTX,
+            keep_alive=OLLAMA_KEEP_ALIVE,
+            num_predict=OLLAMA_NUM_PREDICT,
             repeat_penalty=1.1
         )
     else:

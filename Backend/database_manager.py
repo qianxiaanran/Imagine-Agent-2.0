@@ -442,6 +442,15 @@ def _extract_single_value(result_text: str) -> Optional[str]:
     return None
 
 
+def _trim_prompt_text(value: Optional[str], max_chars: int) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
 class DatabaseManager:
     def __init__(self):
         self.db: Optional[SQLDatabase] = None
@@ -470,6 +479,10 @@ class DatabaseManager:
         user_query: str,
         model_type: str = "local",
         response_instruction: Optional[str] = None,
+        history_context: str = "",
+        summary_context: str = "",
+        session_state: str = "",
+        active_context_content: str = "",
     ) -> Generator[Union[str, Dict[str, Any]], None, None]:
         """
         ✅ 只查询一次版本：
@@ -492,13 +505,30 @@ class DatabaseManager:
             return
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        history_context = _trim_prompt_text(history_context, 1200)
+        summary_context = _trim_prompt_text(summary_context, 1200)
+        session_state = _trim_prompt_text(session_state, 1200)
+        active_context_content = _trim_prompt_text(active_context_content, 1000)
 
         selected_tables = _select_tables_for_query(user_query)
         db_spec = _build_db_spec(selected_tables) if DB_PROMPT_TABLE_FILTER else ENTERPRISE_DB_SPEC
 
+        context_sections = []
+        if session_state:
+            context_sections.append(f"【会话状态】\n{session_state}")
+        if summary_context:
+            context_sections.append(f"【摘要上下文】\n{summary_context}")
+        if history_context:
+            context_sections.append(f"【近期对话】\n{history_context}")
+        if active_context_content:
+            context_sections.append(f"【当前附加上下文】\n{active_context_content}")
+        context_block = "\n\n".join(context_sections).strip()
+
         sql_gen_prompt = f"""
 你是一名数据分析专家。请根据以下规范将问题转换为 SQL。
 【当前时间】{now}
+【会话上下文】
+{context_block or "（无）"}
 【用户问题】"{user_query}"
 {db_spec}
 {SQL_GENERATION_RULES}
@@ -506,7 +536,9 @@ class DatabaseManager:
 """
 
         # 1) 只生成一次 SQL（带缓存）
-        cache_key = f"{db_name}::{model_type}::{(user_query or '').strip()}"
+        context_sig_source = f"{history_context}::{summary_context}::{session_state}::{active_context_content}"
+        context_sig = hashlib.sha1(context_sig_source.encode("utf-8")).hexdigest()[:12]
+        cache_key = f"{db_name}::{model_type}::{(user_query or '').strip()}::{context_sig}"
         raw_sql = _SQL_CACHE.get(cache_key)
         if not raw_sql:
             try:
@@ -576,11 +608,30 @@ class DatabaseManager:
         data_text, truncated = _truncate_result_text(query_result, DB_RESULT_PROMPT_MAX_CHARS)
         truncate_note = "（数据已截断，仅供总结）" if truncated else ""
         response_pref = (response_instruction or "").strip()
-        summary_prompt = f"用户问: {user_query}\nSQL: {raw_sql}\n数据{truncate_note}: {data_text}\n请简洁专业地回答。"
+        summary_context_parts = []
+        if session_state:
+            summary_context_parts.append(f"会话状态:\n{session_state}")
+        if summary_context:
+            summary_context_parts.append(f"摘要上下文:\n{summary_context}")
+        if history_context:
+            summary_context_parts.append(f"近期对话:\n{history_context}")
+        if active_context_content:
+            summary_context_parts.append(f"当前附加上下文:\n{active_context_content}")
+        summary_context_text = "\n\n".join(summary_context_parts).strip()
+        context_prefix = f"上下文:\n{summary_context_text}\n" if summary_context_text else ""
+        summary_prompt = (
+            f"用户问: {user_query}\n"
+            f"{context_prefix}"
+            f"SQL: {raw_sql}\n"
+            f"数据{truncate_note}: {data_text}\n"
+            "请简洁专业地回答。"
+        )
         if response_pref:
             summary_prompt += f"\n\n请同时遵循以下输出偏好（仅影响表达，不改变事实与结论）：\n{response_pref}"
 
-        summary_hash = hashlib.sha256(f"{user_query}::{raw_sql}::{data_text}::{response_pref}".encode("utf-8")).hexdigest()
+        summary_hash = hashlib.sha256(
+            f"{user_query}::{raw_sql}::{data_text}::{response_pref}::{context_sig}".encode("utf-8")
+        ).hexdigest()
         summary_cache_key = f"{db_name}::{summary_hash}"
         cached_summary = _SUMMARY_CACHE.get(summary_cache_key)
         if cached_summary:

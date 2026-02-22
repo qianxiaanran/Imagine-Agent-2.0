@@ -2,6 +2,8 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+const API_PROXY_TARGET = process.env.VITE_API_PROXY_TARGET || "http://127.0.0.1:18011";
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
 
@@ -39,7 +41,7 @@ export default defineConfig({
     // 4. API 反向代理 (保持你原有的)
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:18000",
+        target: API_PROXY_TARGET,
         changeOrigin: true,
         secure: false,
       }

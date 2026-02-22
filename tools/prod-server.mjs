@@ -10,7 +10,7 @@ const repoRoot = path.resolve(__dirname, "..");
 const distRoot = path.join(repoRoot, "frontend", "dist");
 
 const PORT = Number(process.env.PORT || 8080);
-const API_TARGET = process.env.API_TARGET || "http://127.0.0.1:18001";
+const API_TARGET = process.env.API_TARGET || "http://127.0.0.1:18011";
 const apiUrl = new URL(API_TARGET);
 
 const MIME_TYPES = {
@@ -129,4 +129,3 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`[prod-server] listening on http://0.0.0.0:${PORT}`);
   console.log(`[prod-server] proxy /api -> ${API_TARGET}`);
 });
-

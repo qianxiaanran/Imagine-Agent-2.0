@@ -4,7 +4,6 @@ import sys
 import time
 import threading
 import uuid
-import uuid
 from datetime import datetime
 from typing import List, Optional
 
@@ -34,6 +33,7 @@ submit_supabase_task = None
 get_file_signed_url = None
 upload_bytes_to_supabase = None
 OCRManager = None
+get_shared_ocr_manager = None
 ocr_agent = None
 save_context = None
 voice_ws_proxy = None
@@ -84,7 +84,7 @@ try:
     from admin_router import router as admin_router
     from documents_processing import upload_document_to_vector_store, delete_user_documents, store_text_to_vector_store, warmup_embeddings
     from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase
-    from ocr_manager import OCRManager
+    from ocr_manager import OCRManager, get_shared_ocr_manager
     from history_manager import save_context
     import share_manager
     from report_email_manager import generate_report_outline, generate_email_draft
@@ -134,7 +134,7 @@ def _warmup_models():
 
 if OCRManager:
     try:
-        ocr_agent = OCRManager()
+        ocr_agent = get_shared_ocr_manager() if get_shared_ocr_manager else OCRManager()
         print("✅ OCR 引擎挂载成功")
     except Exception as e:
         print(f"❌ OCR 引擎初始化失败: {e}")
@@ -520,5 +520,7 @@ def api_gen_email(req: EmailRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    print("🚀 FastAPI 已启动，监听 18001")
-    uvicorn.run(app, host="0.0.0.0", port=18001, ws_ping_interval=20, ws_ping_timeout=20)
+    host = os.getenv("BACKEND_HOST", "0.0.0.0")
+    port = int(os.getenv("BACKEND_PORT", "18011"))
+    print(f"🚀 FastAPI 已启动，监听 {host}:{port}")
+    uvicorn.run(app, host=host, port=port, ws_ping_interval=20, ws_ping_timeout=20)

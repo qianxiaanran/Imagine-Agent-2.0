@@ -2811,6 +2811,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       // FIX START: Capture the value LOCALLY before clearing the ref
       const finalContent = streamDisplayRef.current;
+      const resolvedFinalContent =
+        (!finalContent || !finalContent.trim()) && shouldPostProcessReply
+          ? '未收到模型返回内容，请重试；如在引用文档模式，建议减少上下文长度或切换云端模型。'
+          : finalContent;
       // FIX END
 
       // 1. 先同步更新历史记录 - 保证 UI 有内容可读
@@ -2818,9 +2822,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         if (!prev.length) return prev;
         const lastIndex = prev.length - 1;
         // 如果已经是这个内容了，直接返回
-        if (prev[lastIndex].content === finalContent) return prev; // Use local variable
+        if (prev[lastIndex].content === resolvedFinalContent) return prev; // Use local variable
         const next = [...prev];
-        next[lastIndex] = { ...next[lastIndex], content: finalContent }; // Use local variable
+        next[lastIndex] = { ...next[lastIndex], content: resolvedFinalContent }; // Use local variable
         return next;
       });
 
@@ -2832,7 +2836,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       streamBufferRef.current = '';
       streamDisplayRef.current = "";
 
-      if (shouldPostProcessReply && finalContent && finalContent.trim()) {
+      if (shouldPostProcessReply && resolvedFinalContent && resolvedFinalContent.trim()) {
         if (
           appSettings.desktopNotifications &&
           typeof window !== 'undefined' &&
@@ -2843,7 +2847,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           try {
             // eslint-disable-next-line no-new
             new Notification('助手回复完成', {
-              body: finalContent.slice(0, 120),
+              body: resolvedFinalContent.slice(0, 120),
             });
           } catch {
             // ignore
