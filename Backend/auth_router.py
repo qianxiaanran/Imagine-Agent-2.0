@@ -1,11 +1,13 @@
 from __future__ import annotations
 import httpx
+import mimetypes
 from typing import Optional, Dict, Any
 from uuid import uuid4
 import time
 import os
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from fastapi import APIRouter, HTTPException, Header, UploadFile, File
+from fastapi import APIRouter, HTTPException, Header, UploadFile, File, Query, Request, Response
 from pydantic import BaseModel, Field, ConfigDict, AliasChoices
 
 from supabase_client import require_supabase
@@ -18,10 +20,11 @@ router = APIRouter(prefix="/api/auth", tags=["Auth"])
 user_router = APIRouter(prefix="/api/user", tags=["User"])
 
 # =========================
-# Storage 閰嶇疆
+# Storage 配置
 # =========================
 AVATAR_BUCKET = "avatars"
 MAX_AVATAR_BYTES = 5 * 1024 * 1024  # Raise avatar limit to 5MB for better tolerance.
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 # -----------------------------------------------------------------------------
 # 内存缓存层
@@ -260,6 +263,90 @@ def _extract_public_url(res: Any) -> str:
     if isinstance(res, dict):
         return res.get("publicUrl") or res.get("publicURL") or res.get("public_url") or ""
     return ""
+
+
+def _request_base_url(request: Request) -> str:
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "http").split(",")[0].strip()
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
+    if not host:
+        host = request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    host = (hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in LOOPBACK_HOSTS:
+        return True
+    return host.startswith("127.")
+
+
+def _extract_avatar_path(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    raw = value.strip()
+    if not raw:
+        return ""
+
+    if "/api/auth/avatar/proxy" in raw:
+        parsed_proxy = urlparse(raw)
+        q_path = parse_qs(parsed_proxy.query or "").get("path", [""])[0]
+        return unquote(q_path or "").strip().lstrip("/")
+
+    if "://" not in raw:
+        direct = raw.lstrip("/")
+        if not direct:
+            return ""
+        if "/" not in direct and "." not in direct and len(direct) <= 3:
+            # e.g. "U" / "JD" fallback initials, not a storage object path
+            return ""
+        return direct
+
+    parsed = urlparse(raw)
+    p = parsed.path or ""
+    markers = (
+        f"/storage/v1/object/public/{AVATAR_BUCKET}/",
+        f"/storage/v1/object/sign/{AVATAR_BUCKET}/",
+        f"/storage/v1/object/authenticated/{AVATAR_BUCKET}/",
+    )
+    for marker in markers:
+        idx = p.find(marker)
+        if idx >= 0:
+            return p[idx + len(marker):].lstrip("/")
+    return ""
+
+
+def _build_avatar_proxy_url(request: Request, object_path: str) -> str:
+    clean_path = (object_path or "").strip().lstrip("/")
+    if not clean_path:
+        return ""
+    return f"{_request_base_url(request)}/api/auth/avatar/proxy?path={quote(clean_path, safe='/')}"
+
+
+def _normalize_avatar_for_client(avatar_value: Any, request: Request) -> Any:
+    if not isinstance(avatar_value, str):
+        return avatar_value
+    raw = avatar_value.strip()
+    if not raw:
+        return raw
+
+    object_path = _extract_avatar_path(raw)
+    if not object_path:
+        return raw
+
+    parsed = urlparse(raw)
+    is_proxy_route = "/api/auth/avatar/proxy" in raw
+    if (
+        parsed.scheme in {"http", "https"}
+        and parsed.hostname
+        and not _is_loopback_host(parsed.hostname)
+        and not is_proxy_route
+    ):
+        return raw
+
+    proxy_url = _build_avatar_proxy_url(request, object_path)
+    return proxy_url or raw
 
 
 def _build_signed_url(storage, path: str, expires_in: int = 60 * 60) -> str:
@@ -532,6 +619,7 @@ def api_reset_password(req: ResetPasswordRequest):
 
 @user_router.get("/profile")
 def get_profile(
+        request: Request,
         phone: Optional[str] = None,
         x_user_phone: Optional[str] = Header(default=None),
         authorization: Optional[str] = Header(default=None),
@@ -552,6 +640,7 @@ def get_profile(
                     role = app_meta.get("role", "user")
                     profile = _sync_profile(u, role)
                     status = (profile or {}).get("status", "active")
+                    avatar = _normalize_avatar_for_client(metadata.get("avatar", "S"), request)
                     return {
                         "id": u.id,
                         "phone": metadata.get("phone"),
@@ -559,7 +648,7 @@ def get_profile(
                         "name": default_name,
                         "username": metadata.get("username", default_name),
                         "plan": metadata.get("plan", "Enterprise"),
-                        "avatar": metadata.get("avatar", "S"),
+                        "avatar": avatar,
                         "role": role,
                         "status": status,
                         "department": (profile or {}).get("department"),
@@ -580,6 +669,7 @@ def get_profile(
                     role = app_meta.get("role", "user")
                     profile = _sync_profile(u.user, role)
                     status = (profile or {}).get("status", "active")
+                    avatar = _normalize_avatar_for_client(metadata.get("avatar", "S"), request)
                     return {
                         "id": u.user.id,
                         "phone": metadata.get("phone", session["phone"]),
@@ -587,7 +677,7 @@ def get_profile(
                         "name": metadata.get("name", default_name),
                         "username": metadata.get("username", default_name),
                         "plan": metadata.get("plan", "Enterprise"),
-                        "avatar": metadata.get("avatar", "S"),
+                        "avatar": avatar,
                         "role": role,
                         "status": status,
                         "department": (profile or {}).get("department"),
@@ -607,8 +697,36 @@ def get_profile(
     return {"phone": None, "nickname": "Guest", "avatar": None}
 
 
+@router.get("/avatar/proxy")
+def avatar_proxy(path: str = Query(..., description="Storage object path in avatars bucket")):
+    clean_path = unquote(str(path or "")).strip().lstrip("/")
+    if not clean_path:
+        raise HTTPException(status_code=400, detail="Missing avatar path")
+    if ".." in clean_path:
+        raise HTTPException(status_code=400, detail="Invalid avatar path")
+
+    sb = get_admin_supabase()
+    storage = sb.storage.from_(AVATAR_BUCKET)
+    try:
+        blob = storage.download(clean_path)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Avatar not found: {str(e)}")
+
+    if hasattr(blob, "data"):
+        blob = getattr(blob, "data")
+    if isinstance(blob, str):
+        blob = blob.encode("utf-8", errors="ignore")
+    if not isinstance(blob, (bytes, bytearray)):
+        raise HTTPException(status_code=502, detail="Avatar storage returned invalid payload")
+
+    media_type = mimetypes.guess_type(clean_path)[0] or "application/octet-stream"
+    headers = {"Cache-Control": "public, max-age=300"}
+    return Response(content=bytes(blob), media_type=media_type, headers=headers)
+
+
 @user_router.post("/avatar")
 async def upload_avatar(
+        request: Request,
         file: UploadFile = File(...),
         authorization: Optional[str] = Header(default=None)
 ):
@@ -670,7 +788,8 @@ async def upload_avatar(
 
         return {
             "success": True,
-            "avatar_url": public_url,
+            "avatar_url": _build_avatar_proxy_url(request, object_path) or public_url,
+            "public_url": public_url,
             "path": object_path
         }
 
@@ -682,12 +801,13 @@ async def upload_avatar(
 @user_router.put("/profile")
 def update_profile(
         req: UpdateProfileRequest,
+        request: Request,
         authorization: Optional[str] = Header(default=None)
 ):
     """
     更新用户信息：只更新 name / avatar(URL)
     """
-    sb = require_supabase()
+    sb_admin = get_admin_supabase()
     token = _bearer_token(authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Not logged in")
@@ -697,18 +817,31 @@ def update_profile(
     if req.name is not None:
         updates["name"] = req.name
     if req.avatar is not None:
-        updates["avatar"] = req.avatar  # Storage URL
+        updates["avatar"] = _normalize_avatar_for_client(req.avatar, request)  # Storage URL / proxy URL
 
     if not updates:
         return {"success": True, "message": "Nothing to update"}
 
-    # Important: only Supabase JWT can call /auth/v1/user
-    if len(token) <= 100:
-        raise HTTPException(status_code=401,
-                            detail="Current token is not a Supabase JWT; cannot update profile")
+    # Resolve user_id from either Supabase JWT or custom sms-token.
+    user_id = _resolve_user_id(sb_admin, token)
 
-    # Call GoTrue REST directly to update user_metadata
-    _update_user_metadata_via_gotrue(sb, token, updates)
+    # Use admin API to patch user_metadata, so both token types are supported.
+    try:
+        user_res = sb_admin.auth.admin.get_user_by_id(user_id)
+        current_meta = {}
+        if user_res and getattr(user_res, "user", None):
+            current_meta = getattr(user_res.user, "user_metadata", {}) or {}
+
+        merged_meta = {**current_meta, **updates}
+        if not merged_meta.get("username"):
+            merged_meta["username"] = merged_meta.get("name") or f"User_{user_id[-4:]}"
+
+        sb_admin.auth.admin.update_user_by_id(user_id, {"user_metadata": merged_meta})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update profile metadata: {str(e)}")
+
     return {"success": True}
 
 
@@ -779,4 +912,3 @@ def api_check_account(req: SendCodeRequest):
         "registered": registered,
         "reason": "Already registered" if registered else "This phone number is not registered"
     }
-

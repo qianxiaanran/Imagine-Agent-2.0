@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { X, Camera } from "lucide-react";
+import AvatarContent from "../../components/AvatarContent";
+
+const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 
 const EditProfileModal = ({ isOpen, onClose, userProfile, onSave }) => {
   const [displayName, setDisplayName] = useState("");
@@ -9,6 +12,7 @@ const EditProfileModal = ({ isOpen, onClose, userProfile, onSave }) => {
   const [previewUrl, setPreviewUrl] = useState(null); // ObjectURL
   const [avatarFile, setAvatarFile] = useState(null); // File
   const [isProcessing, setIsProcessing] = useState(false);
+  const [uploadError, setUploadError] = useState("");
 
   const fileInputRef = useRef(null);
 
@@ -18,6 +22,7 @@ const EditProfileModal = ({ isOpen, onClose, userProfile, onSave }) => {
       setUsername(userProfile.username || userProfile.name || "");
       setAvatar(userProfile.avatar || "U");
       setAvatarFile(null);
+      setUploadError("");
 
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       setPreviewUrl(null);
@@ -37,11 +42,15 @@ const EditProfileModal = ({ isOpen, onClose, userProfile, onSave }) => {
 
     setIsProcessing(true);
     try {
-      if (!file.type?.startsWith("image/")) return;
+      setUploadError("");
+      if (!file.type?.startsWith("image/")) {
+        setUploadError("请选择图片文件（PNG/JPG/WEBP/GIF）");
+        return;
+      }
 
-      // 简单大小限制（后端还有 2MB 限制）
-      if (file.size > 2 * 1024 * 1024) {
-        console.error("头像过大（>2MB）");
+      // Keep frontend and backend limit consistent.
+      if (file.size > MAX_AVATAR_BYTES) {
+        setUploadError("头像不能超过 5MB");
         return;
       }
 
@@ -68,13 +77,12 @@ const EditProfileModal = ({ isOpen, onClose, userProfile, onSave }) => {
   if (!isOpen) return null;
 
   const renderAvatar = () => {
-    if (previewUrl) {
-      return <img src={previewUrl} alt="Avatar" className="w-full h-full object-cover" />;
-    }
-    if (typeof avatar === "string" && avatar.length > 5) {
-      return <img src={avatar} alt="Avatar" className="w-full h-full object-cover" />;
-    }
-    return avatar || "U";
+    return (
+      <AvatarContent
+        avatar={previewUrl || avatar}
+        name={displayName || username || userProfile?.name}
+      />
+    );
   };
 
   return (
@@ -118,6 +126,9 @@ const EditProfileModal = ({ isOpen, onClose, userProfile, onSave }) => {
             <span className="mt-2 text-xs text-gray-500 dark:text-gray-400">
               {isProcessing ? "处理中..." : "点击更换头像"}
             </span>
+            {uploadError && (
+              <span className="mt-1 text-xs text-red-500">{uploadError}</span>
+            )}
           </div>
 
           <div className="space-y-4">

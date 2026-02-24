@@ -3,6 +3,12 @@ import { Plus, PanelLeftClose, Search, Database, MessageSquare, Sparkles, Settin
 import ChangePasswordModal from "./ChangePasswordModal";
 import userApi from "../../api/user";
 import historyApi from "../../api/history";
+import AvatarContent from "../../components/AvatarContent";
+import {
+  appendCacheBuster,
+  extractAvatarUrl,
+  getPreferredAvatarSource,
+} from "../../utils/avatar";
 
 // 懒加载 ShareModal
 const EditProfileModal = React.lazy(() => import("./EditProfileModal"));
@@ -36,7 +42,7 @@ const Sidebar = ({
     setLocalUserProfile(userProfile);
   }, [userProfile]);
 
-  // ✨ 置顶会话状态 (本地存储)
+  // Pinned session state (local storage)
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`);
@@ -53,14 +59,14 @@ const Sidebar = ({
   const searchInputRef = useRef(null);
   const searchListRef = useRef(null); // 新增：列表容器Ref
 
-  // 会话操作相关状态
+  // Session operation state
   const [menuOpenId, setMenuOpenId] = useState(null);
   const menuRef = useRef(null);
 
   // 删除确认弹窗
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, sessionId: null, title: "" });
 
-  // 重命名弹窗
+  // Rename modal state
   const [renameModal, setRenameModal] = useState({ isOpen: false, sessionId: null, title: "" });
   const [newTitleInput, setNewTitleInput] = useState("");
 
@@ -73,7 +79,7 @@ const Sidebar = ({
 
   const profileMenuRef = useRef(null);
 
-  // 更新置顶状态并保存到本地
+  // Update pinned state and persist locally
   const togglePinSession = (sessionId) => {
     const newPinned = new Set(pinnedSessionIds);
     if (newPinned.has(sessionId)) {
@@ -87,7 +93,7 @@ const Sidebar = ({
 
   const safeSessions = Array.isArray(sessionList) ? sessionList : [];
 
-  // ✨ 排序逻辑：先过滤删除的 -> 然后置顶的排前面 -> 最后按原顺序(时间)
+  // Sorting: remove deleted -> pinned first -> original chronological order
   const displaySessions = useMemo(() => {
     const active = safeSessions.filter(s => !optimisticDeletedIds.has(s.id));
     return active.sort((a, b) => {
@@ -116,7 +122,7 @@ const Sidebar = ({
   const isRestrictedMode = selectedModel !== 0;
 
   useEffect(() => {
-    // 如果切换到受限模式（非通用模式），强制收起知识库菜单
+    // If switched to restricted mode, force-collapse knowledge menu
     if (isRestrictedMode) {
       setIsKbExpanded(false);
     }
@@ -125,7 +131,7 @@ const Sidebar = ({
   useEffect(() => {
     if (userProfile) {
       setLocalUserProfile((prev) => ({ ...prev, ...userProfile }));
-      // 切换用户时重新加载置顶配置
+      // Reload pinned configuration when user changes
       try {
         const saved = localStorage.getItem(`pinned_sessions_${userProfile.id}`);
         setPinnedSessionIds(new Set(saved ? JSON.parse(saved) : []));
@@ -169,7 +175,7 @@ const Sidebar = ({
     };
   }, [shouldRenderAllSessions, visibleSessionCount, displaySessions.length]);
 
-  // 全局快捷键监听
+  // Global shortcut listener
   useEffect(() => {
     const handleGlobalKeyDown = (e) => {
       // Ctrl + K or Cmd + K to toggle search
@@ -187,7 +193,7 @@ const Sidebar = ({
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [isSearchOpen]);
 
-  // 搜索框打开时聚焦，并重置选中项
+  // Focus search input when opened, and reset selection
   useEffect(() => {
     if (isSearchOpen) {
       setSelectedIndex(0);
@@ -199,12 +205,12 @@ const Sidebar = ({
     }
   }, [isSearchOpen]);
 
-  // 搜索词变化时重置选中项
+  // Reset selection on search query change
   useEffect(() => {
     setSelectedIndex(0);
   }, [searchQuery]);
 
-  // 自动滚动到选中项
+  // Auto-scroll to selected item
   useEffect(() => {
     if (isSearchOpen && searchListRef.current) {
       const selectedElement = searchListRef.current.children[selectedIndex];
@@ -214,7 +220,7 @@ const Sidebar = ({
     }
   }, [selectedIndex, isSearchOpen]);
 
-  // 处理搜索输入框内的按键导航
+  // Keyboard navigation inside search list
   const handleSearchKeyDown = (e) => {
     if (filteredSessions.length === 0) return;
 
@@ -290,48 +296,64 @@ const Sidebar = ({
   };
 
   const renderAvatar = (avatar) => {
-    if (typeof avatar === "string" && avatar.length > 5) {
-      return <img src={avatar} alt="Avatar" className="w-full h-full object-cover" />;
-    }
-    return avatar;
+    return (
+      <AvatarContent
+        avatar={avatar}
+        name={localUserProfile?.name || userProfile?.name}
+      />
+    );
   };
 
   const handleUpdateProfile = async (newProfile) => {
-    // 乐观更新：先在本地显示（虽然可能是临时的 previewUrl）
     setLocalUserProfile((prev) => ({
       ...prev,
-      ...newProfile,
-      avatar: newProfile.previewUrl ? newProfile.previewUrl : prev.avatar,
+      name: newProfile.name ?? prev.name,
+      username: newProfile.username ?? prev.username,
     }));
 
+    let avatarUrlToSave = getPreferredAvatarSource(extractAvatarUrl(newProfile.avatar));
+    let avatarUrlForDisplay = avatarUrlToSave ? appendCacheBuster(avatarUrlToSave) : "";
     try {
-      let avatarUrlToSave = newProfile.avatar;
-
-      // 如果有文件，先上传
       if (newProfile.avatarFile) {
         const up = await userApi.uploadAvatar(newProfile.avatarFile);
-
-        // 🔥 关键修改：因为我们使用了覆盖更新 (Upsert)，URL 可能不变。
-        // 为了强制 React 刷新图片，我们在 URL 后追加时间戳。
-        avatarUrlToSave = `${up.avatar_url}?t=${new Date().getTime()}`;
+        const uploadedUrl = extractAvatarUrl(up);
+        if (!uploadedUrl) {
+          throw new Error("Avatar upload succeeded but no URL was returned");
+        }
+        const preferredUrl = getPreferredAvatarSource(uploadedUrl) || uploadedUrl;
+        avatarUrlToSave = preferredUrl;
+        avatarUrlForDisplay = appendCacheBuster(preferredUrl);
+        setLocalUserProfile((prev) => ({
+          ...prev,
+          avatar: avatarUrlForDisplay || prev.avatar,
+        }));
       }
 
-      // 更新数据库 (user_metadata)
-      await userApi.updateProfile({
+      const payload = {
         name: newProfile.name,
-        avatar: avatarUrlToSave,
         username: newProfile.username,
-      });
+      };
+      if (avatarUrlToSave) payload.avatar = avatarUrlToSave;
+      await userApi.updateProfile(payload);
 
-      // 更新本地状态，确保使用最新的带时间戳的 URL
+      const avatarToRender =
+        avatarUrlForDisplay ||
+        (avatarUrlToSave ? appendCacheBuster(avatarUrlToSave) : "");
+
       setLocalUserProfile((prev) => ({
         ...prev,
         name: newProfile.name,
         username: newProfile.username,
-        avatar: avatarUrlToSave || prev.avatar,
+        avatar: avatarToRender || prev.avatar,
       }));
     } catch (error) {
       console.error("Failed to save profile:", error);
+      if (avatarUrlForDisplay) {
+        setLocalUserProfile((prev) => ({
+          ...prev,
+          avatar: avatarUrlForDisplay,
+        }));
+      }
     }
   };
 
@@ -342,7 +364,7 @@ const Sidebar = ({
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/20 backdrop-blur-[2px] animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-[400px] rounded-2xl shadow-2xl border border-gray-100 dark:border-gray-700 p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
             <div>
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">删除聊天?</h3>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">Delete Chat?</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
                 这会删除“<span className="font-medium text-gray-900 dark:text-gray-200">{deleteModal.title}</span>”。
               </p>
@@ -366,7 +388,7 @@ const Sidebar = ({
         </div>
       )}
 
-      {/* 重命名弹窗 */}
+      {/* Rename modal */}
       {renameModal.isOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/20 backdrop-blur-[2px] animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-[400px] rounded-2xl shadow-2xl border border-gray-100 dark:border-gray-700 p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
@@ -397,7 +419,7 @@ const Sidebar = ({
         </div>
       )}
 
-      {/* 搜索模态框 */}
+      {/* 搜索模框 */}
       {isSearchOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
           <div
@@ -489,13 +511,13 @@ const Sidebar = ({
         </div>
       )}
 
-      {/* 桌面侧边栏主体 */}
+      {/* Desktop sidebar body */}
       <div
         className={`${isOpen ? "w-[260px] border-r" : "w-0 border-none"} bg-[#f9f9f9] dark:bg-gray-900 border-gray-100 dark:border-gray-800 flex-shrink-0 transition-[width] duration-300 hidden md:flex z-20 overflow-hidden relative flex-col`}
       >
         <div className="w-[260px] h-full flex flex-col">
 
-          {/* ✨ 固定在顶部的功能区 (不随历史记录滚动) */}
+          {/* Fixed top controls (not scrolling with history) */}
           <div className="flex-shrink-0">
               {/* 1. Header Buttons */}
               <div className="p-3 pb-1 flex items-center gap-2">
@@ -506,7 +528,7 @@ const Sidebar = ({
                   <div className="w-6 h-6 rounded-full border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 flex items-center justify-center">
                     <Plus size={14} />
                   </div>
-                  新聊天
+                  New Chat
                 </button>
 
                 <button
@@ -579,7 +601,7 @@ const Sidebar = ({
               </div>
           </div>
 
-          {/* 分割线 */}
+          {/* Divider */}
           <div className="h-px bg-gray-100 dark:bg-gray-800 mx-4 mb-2"></div>
 
           {/* 3. 滚动区域：仅包含历史记录 */}
@@ -715,7 +737,7 @@ const Sidebar = ({
                       <Sparkles size={18} strokeWidth={1.5} /> 个性化
                     </button>
 
-                    {/* ✨ [新增] 修改密码按钮 */}
+                    {/* [New] Change password button */}
                     <button
                       className="w-full flex items-center gap-3 px-2 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors text-left"
                       onClick={() => {
@@ -779,7 +801,7 @@ const Sidebar = ({
 
       </div>
 
-      {/* ✨ [新增] 修改密码弹窗 */}
+      {/* [New] Change password modal */}
       <ChangePasswordModal
         isOpen={isChangePasswordOpen}
         onClose={() => setIsChangePasswordOpen(false)}

@@ -6,6 +6,7 @@ import threading
 import uuid
 from datetime import datetime
 from typing import List, Optional
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(errors="replace")
+
+_env_dir = os.path.dirname(__file__)
+load_dotenv(dotenv_path=os.path.join(_env_dir, ".env"), override=False)
+load_dotenv(dotenv_path=os.path.join(_env_dir, ".env.local"), override=True)
 
 # 初始化变量
 auth_router = None
@@ -286,14 +291,28 @@ async def create_share(req: ShareCreateRequest, user_id: Optional[str] = None):
     if not share_manager: return {"success": False, "error": "Share feature is disabled on server"}
     token = share_manager.create_share_link(uid, req.session_id, req.title, req.days)
     if token: return {"success": True, "token": token}
-    return {"success": False, "error": "Failed to create share link"}
+    detail = ""
+    try:
+        detail = (share_manager.get_last_error() or "").strip()
+    except Exception:
+        detail = ""
+    return {"success": False, "error": detail or "Failed to create share link"}
 
 
 @app.get("/api/public/share/{token}")
 async def get_share_content(token: str):
     if not share_manager: return {"success": False, "error": "Share feature is disabled on server"}
     result = share_manager.get_shared_content(token)
-    if "error" in result: return {"success": False, "error": result["error"]}
+    if "error" in result:
+        detail = str(result["error"] or "").strip()
+        if detail == "Internal server error":
+            try:
+                extra = (share_manager.get_last_error() or "").strip()
+                if extra:
+                    detail = f"{detail}: {extra}"
+            except Exception:
+                pass
+        return {"success": False, "error": detail}
     return {"success": True, "data": result}
 
 

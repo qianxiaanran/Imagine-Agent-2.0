@@ -1,152 +1,440 @@
-import secrets
 import hashlib
 import json
+import secrets
 from datetime import datetime, timedelta, timezone
-from supabase_client import supabase
+from threading import Lock
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import text
+
 from history_manager import get_history
+from supabase_client import engine, supabase
+
+_SCHEMA_READY = False
+_SCHEMA_LOCK = Lock()
+_LAST_ERROR = ""
 
 
-def generate_token():
-    """生成 32 字节的安全随机 Token"""
+def _set_last_error(message: str) -> None:
+    global _LAST_ERROR
+    _LAST_ERROR = str(message or "").strip()
+
+
+def get_last_error() -> str:
+    return _LAST_ERROR
+
+
+def generate_token() -> str:
     return secrets.token_urlsafe(32)
 
 
 def hash_token(token: str) -> str:
-    """对 Token 进行 SHA256 哈希"""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def create_share_link(user_id: str, session_id: str, title: str = None, days: int = 7):
-    """
-    创建分享链接并生成快照
-    """
+def _ensure_share_schema() -> bool:
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return True
+
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return True
+
+        try:
+            with engine.begin() as conn:
+                # Keep table definitions compatible with existing schema.
+                conn.execute(
+                    text(
+                        """
+                        create table if not exists public.share_links (
+                          id bigint primary key,
+                          session_id text not null,
+                          owner_user_id text not null,
+                          token_hash text not null,
+                          title text,
+                          expires_at timestamptz,
+                          revoked boolean not null default false,
+                          created_at timestamptz not null default now(),
+                          last_access_at timestamptz
+                        );
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        alter table public.share_links
+                        alter column session_id type text using session_id::text;
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        alter table public.share_links
+                        alter column owner_user_id type text using owner_user_id::text;
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        create table if not exists public.share_snapshots (
+                          id bigint primary key,
+                          share_link_id bigint not null,
+                          payload jsonb not null,
+                          created_at timestamptz not null default now()
+                        );
+                        """
+                    )
+                )
+
+                conn.execute(text("create sequence if not exists public.share_links_id_seq;"))
+                conn.execute(text("create sequence if not exists public.share_snapshots_id_seq;"))
+
+                conn.execute(
+                    text(
+                        """
+                        alter table public.share_links
+                        alter column id set default nextval('public.share_links_id_seq');
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        alter table public.share_snapshots
+                        alter column id set default nextval('public.share_snapshots_id_seq');
+                        """
+                    )
+                )
+
+                conn.execute(
+                    text(
+                        """
+                        alter sequence public.share_links_id_seq
+                        owned by public.share_links.id;
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        alter sequence public.share_snapshots_id_seq
+                        owned by public.share_snapshots.id;
+                        """
+                    )
+                )
+
+                conn.execute(
+                    text(
+                        """
+                        select setval(
+                          'public.share_links_id_seq',
+                          coalesce((select max(id) from public.share_links), 0) + 1,
+                          false
+                        );
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        select setval(
+                          'public.share_snapshots_id_seq',
+                          coalesce((select max(id) from public.share_snapshots), 0) + 1,
+                          false
+                        );
+                        """
+                    )
+                )
+
+                conn.execute(
+                    text(
+                        """
+                        create unique index if not exists share_links_token_hash_uq
+                        on public.share_links(token_hash);
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        create index if not exists share_snapshots_share_link_id_idx
+                        on public.share_snapshots(share_link_id);
+                        """
+                    )
+                )
+
+                conn.execute(
+                    text(
+                        """
+                        do $$
+                        begin
+                          if not exists (
+                            select 1
+                            from pg_constraint
+                            where conname = 'share_snapshots_share_link_id_fkey'
+                          ) then
+                            alter table public.share_snapshots
+                            add constraint share_snapshots_share_link_id_fkey
+                            foreign key (share_link_id)
+                            references public.share_links(id)
+                            on delete cascade;
+                          end if;
+                        end
+                        $$;
+                        """
+                    )
+                )
+
+            _SCHEMA_READY = True
+            return True
+        except Exception as exc:
+            _set_last_error(f"Share schema init failed: {exc}")
+            return False
+
+
+def _normalize_days(days: Any) -> int:
     try:
-        # 1. 生成 Token 和 Hash
+        value = int(days)
+    except Exception:
+        value = 7
+    if value < 0:
+        return 0
+    if value > 3650:
+        return 3650
+    return value
+
+
+def _build_snapshot(raw_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    snapshot_data: List[Dict[str, Any]] = []
+    allowed_roles = {"user", "assistant", "system", "context", "meta"}
+    for msg in raw_history or []:
+        role = msg.get("role")
+        if role not in allowed_roles:
+            continue
+        snapshot_data.append(
+            {
+                "role": role,
+                "content": msg.get("content"),
+                "created_at": msg.get("created_at"),
+                "func_type": msg.get("func_type"),
+            }
+        )
+    return snapshot_data
+
+
+def _normalize_snapshot_payload(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        return [payload]
+    if not isinstance(payload, str):
+        return []
+
+    raw = payload.strip()
+    if not raw:
+        return []
+
+    try:
+        first = json.loads(raw)
+    except Exception:
+        return []
+
+    if isinstance(first, list):
+        return first
+    if isinstance(first, dict):
+        return [first]
+    if isinstance(first, str):
+        try:
+            second = json.loads(first)
+            if isinstance(second, list):
+                return second
+            if isinstance(second, dict):
+                return [second]
+        except Exception:
+            return []
+    return []
+
+
+def _infer_owner_user_id(session_id: str) -> str:
+    try:
+        res = (
+            supabase.table("history")
+            .select("user_id")
+            .eq("session_id", str(session_id))
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if getattr(res, "data", None):
+            owner = str(res.data[0].get("user_id") or "").strip()
+            if owner and owner.lower() != "anonymous":
+                return owner
+    except Exception:
+        pass
+    return ""
+
+
+def _load_history_for_share(owner_user_id: str, session_id: str) -> List[Dict[str, Any]]:
+    # Prefer strict owner+session match first.
+    rows = get_history(str(owner_user_id), str(session_id)) or []
+    if rows:
+        return rows
+
+    # Fallback: if owner cannot be confirmed, at least share current session snapshot.
+    try:
+        fallback = (
+            supabase.table("history")
+            .select("*")
+            .eq("session_id", str(session_id))
+            .order("created_at")
+            .execute()
+        )
+        return fallback.data or []
+    except Exception:
+        return []
+
+
+def create_share_link(user_id: str, session_id: str, title: Optional[str] = None, days: int = 7):
+    if not _ensure_share_schema():
+        return None
+
+    try:
         token = generate_token()
         token_hash = hash_token(token)
-
-        # 2. 计算过期时间
+        ttl_days = _normalize_days(days)
         expires_at = None
-        if days > 0:
-            expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        if ttl_days > 0:
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=ttl_days)).isoformat()
 
-        # 3. 获取当前会话历史作为快照
-        # 注意：这里我们直接从 history 表拉取数据，确保存入的是当时的静态副本
-        raw_history = get_history(user_id, session_id)
+        normalized_title = (title or "").strip()[:200] or "Untitled Session"
+        owner_user_id = str(user_id or "").strip()
+        if not owner_user_id or owner_user_id.lower() == "anonymous":
+            owner_user_id = _infer_owner_user_id(str(session_id)) or owner_user_id or "anonymous"
 
-        # 简化数据，只存需要的字段
-        snapshot_data = []
-        for msg in raw_history:
-            # 过滤掉不需要的元数据，只保留角色和内容
-            if msg.get('role') in ['user', 'assistant', 'system', 'context', 'meta']:
-                snapshot_data.append({
-                    "role": msg.get('role'),
-                    "content": msg.get('content'),
-                    "created_at": msg.get('created_at'),
-                    "func_type": msg.get('func_type')  # 保留 func_type 以便前端正确渲染 (如 ocr_context)
-                })
+        raw_history = _load_history_for_share(owner_user_id, str(session_id))
+        snapshot_data = _build_snapshot(raw_history)
 
-        # 4. 存入 share_links 表
-        link_res = supabase.table("share_links").insert({
+        link_payload = {
             "session_id": str(session_id),
-            "owner_user_id": str(user_id),
+            "owner_user_id": owner_user_id,
             "token_hash": token_hash,
-            "title": title or "未命名会话",
-            "expires_at": expires_at
-        }).execute()
+            "title": normalized_title,
+            "expires_at": expires_at,
+        }
+        link_res = supabase.table("share_links").insert(link_payload).execute()
 
-        if not link_res.data:
-            return None
+        share_id = None
+        if getattr(link_res, "data", None):
+            share_id = link_res.data[0].get("id")
+        if not share_id:
+            lookup = (
+                supabase.table("share_links")
+                .select("id")
+                .eq("token_hash", token_hash)
+                .order("id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if getattr(lookup, "data", None):
+                share_id = lookup.data[0].get("id")
+        if not share_id:
+            raise RuntimeError("Failed to resolve created share link id")
 
-        share_id = link_res.data[0]['id']
+        try:
+            supabase.table("share_snapshots").insert(
+                {"share_link_id": share_id, "payload": snapshot_data}
+            ).execute()
+        except Exception:
+            supabase.table("share_links").delete().eq("id", share_id).execute()
+            raise
 
-        # 5. 存入 share_snapshots 表
-        supabase.table("share_snapshots").insert({
-            "share_link_id": share_id,
-            "payload": json.dumps(snapshot_data)  # 存为 JSON 字符串或直接 jsonb
-        }).execute()
-
+        _set_last_error("")
         return token
-    except Exception as e:
-        print(f"Error creating share link: {e}")
+    except Exception as exc:
+        _set_last_error(str(exc))
+        print(f"Error creating share link: {exc}")
         return None
 
 
 def get_shared_content(token: str):
-    """
-    获取分享的内容 (公开访问)
-    """
+    if not _ensure_share_schema():
+        return {"error": get_last_error() or "Share schema initialization failed"}
+
     try:
         token_hash = hash_token(token)
-
-        # 1. 查找链接信息
-        # 校验 revoked = false 且 (expires_at > now OR expires_at is null)
-        # 注意：Supabase JS 客户端比较时间可能比较麻烦，这里我们先取出记录在代码里校验时间，或者使用 Postgres 过滤器
-        res = supabase.table("share_links") \
-            .select("*") \
-            .eq("token_hash", token_hash) \
-            .eq("revoked", False) \
+        res = (
+            supabase.table("share_links")
+            .select("*")
+            .eq("token_hash", token_hash)
+            .eq("revoked", False)
+            .limit(1)
             .execute()
-
+        )
         if not res.data:
             return {"error": "Invalid or revoked link"}
 
         link_info = res.data[0]
-
-        # 2. 校验过期时间
-        if link_info['expires_at']:
-            expire_time = datetime.fromisoformat(link_info['expires_at'].replace('Z', '+00:00'))
+        expires_at = link_info.get("expires_at")
+        if expires_at:
+            expire_time = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
             if datetime.now(timezone.utc) > expire_time:
                 return {"error": "Link expired"}
 
-        # 3. 异步更新 last_access_at (不等待结果)
-        # 实际生产中建议用后台任务，这里简化直接调用
         try:
             now_iso = datetime.now(timezone.utc).isoformat()
-            supabase.table("share_links").update({"last_access_at": now_iso}).eq("id", link_info['id']).execute()
-        except:
+            supabase.table("share_links").update({"last_access_at": now_iso}).eq(
+                "id", link_info["id"]
+            ).execute()
+        except Exception:
             pass
 
-        # 4. 获取快照内容
-        snap_res = supabase.table("share_snapshots") \
-            .select("payload, created_at") \
-            .eq("share_link_id", link_info['id']) \
+        snap_res = (
+            supabase.table("share_snapshots")
+            .select("payload, created_at")
+            .eq("share_link_id", link_info["id"])
+            .order("id", desc=True)
+            .limit(1)
             .execute()
-
+        )
         if not snap_res.data:
             return {"error": "Snapshot not found"}
 
         snapshot = snap_res.data[0]
+        payload = snapshot.get("payload", [])
+        messages = _normalize_snapshot_payload(payload)
 
-        # 5. 返回组合数据
-        # 解析 payload JSON 字符串
-        try:
-            messages = json.loads(snapshot['payload']) if isinstance(snapshot['payload'], str) else snapshot['payload']
-        except:
-            messages = []
-
+        _set_last_error("")
         return {
-            "title": link_info['title'],
-            "created_at": link_info['created_at'],  # 分享创建时间
-            "snapshot_at": snapshot['created_at'],  # 快照时间
-            "owner_id": link_info['owner_user_id'],  # 仅用于前端显示是否是"我"的，不泄露敏感信息
-            "messages": messages
+            "title": link_info.get("title"),
+            "created_at": link_info.get("created_at"),
+            "snapshot_at": snapshot.get("created_at"),
+            "owner_id": link_info.get("owner_user_id"),
+            "messages": messages,
         }
-
-    except Exception as e:
-        print(f"Error fetching shared content: {e}")
+    except Exception as exc:
+        _set_last_error(str(exc))
+        print(f"Error fetching shared content: {exc}")
         return {"error": "Internal server error"}
 
 
 def revoke_share_link(user_id: str, share_id: int):
-    """撤销分享链接 (仅拥有者)"""
+    if not _ensure_share_schema():
+        return False
     try:
-        supabase.table("share_links") \
-            .update({"revoked": True}) \
-            .eq("id", share_id) \
-            .eq("owner_user_id", str(user_id)) \
+        (
+            supabase.table("share_links")
+            .update({"revoked": True})
+            .eq("id", share_id)
+            .eq("owner_user_id", str(user_id))
             .execute()
+        )
+        _set_last_error("")
         return True
-    except Exception as e:
-        print(f"Error revoking share: {e}")
+    except Exception as exc:
+        _set_last_error(str(exc))
+        print(f"Error revoking share: {exc}")
         return False

@@ -3,8 +3,14 @@ import { X, Plus, Search, Database, MessageSquare, ChevronDown, Sparkles, Settin
 import userApi from "../../api/user";
 import historyApi from "../../api/history";
 import ChangePasswordModal from "./ChangePasswordModal";
+import AvatarContent from "../../components/AvatarContent";
+import {
+  appendCacheBuster,
+  extractAvatarUrl,
+  getPreferredAvatarSource,
+} from "../../utils/avatar";
 
-// 🚀 性能优化：懒加载弹窗
+// Performance optimization: lazy-load modal
 const EditProfileModal = lazy(() => import("./EditProfileModal"));
 const ShareModal = lazy(() => import('./ShareModal'));
 const INITIAL_SESSION_RENDER_COUNT = 40;
@@ -43,7 +49,7 @@ const MobileSidebar = memo(({
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef(null);
 
-  // ✨ 置顶会话状态 (本地存储)
+  // Pinned session state (local storage)
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`);
@@ -53,7 +59,7 @@ const MobileSidebar = memo(({
     }
   });
 
-  // ✨ 会话操作
+  // Session operation state
   const [menuOpenId, setMenuOpenId] = useState(null);
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, sessionId: null, title: "" });
   const [renameModal, setRenameModal] = useState({ isOpen: false, sessionId: null, title: "" });
@@ -66,10 +72,10 @@ const MobileSidebar = memo(({
   const [optimisticDeletedIds, setOptimisticDeletedIds] = useState(new Set());
   const [optimisticRenames, setOptimisticRenames] = useState({});
 
-  // 过滤显示列表：原始列表 - 乐观删除项
+  // Visible list: base list minus optimistic deletions
   const safeSessions = Array.isArray(sessionList) ? sessionList : [];
 
-  // ✨ 排序逻辑
+  // Sorting logic
   const displaySessions = useMemo(() => {
     const active = safeSessions.filter(s => !optimisticDeletedIds.has(s.id));
     return active.sort((a, b) => {
@@ -92,7 +98,7 @@ const MobileSidebar = memo(({
     : displaySessions.slice(0, visibleSessionCount);
   const hasMoreSessions = !shouldRenderAllSessions && displaySessions.length > sessionsToRender.length;
 
-  // 更新置顶状态并保存到本地
+  // Update pinned state and persist locally
   const togglePinSession = (sessionId) => {
     const newPinned = new Set(pinnedSessionIds);
     if (newPinned.has(sessionId)) {
@@ -109,7 +115,7 @@ const MobileSidebar = memo(({
   const isRestrictedMode = selectedModel !== 0;
 
   useEffect(() => {
-    // 如果切换到受限模式，强制收起知识库菜单
+    // If switched to restricted mode, collapse knowledge menu
     if (isRestrictedMode) {
       setIsKbExpanded(false);
     }
@@ -118,7 +124,7 @@ const MobileSidebar = memo(({
   useEffect(() => {
     if (userProfile) {
       setLocalUserProfile((prev) => ({ ...prev, ...userProfile }));
-      // 切换用户时重新加载置顶配置
+      // Reload pinned config when user changes
       try {
         const saved = localStorage.getItem(`pinned_sessions_${userProfile.id}`);
         setPinnedSessionIds(new Set(saved ? JSON.parse(saved) : []));
@@ -226,43 +232,64 @@ const MobileSidebar = memo(({
   };
 
   const renderAvatar = (avatar) => {
-    if (typeof avatar === "string" && avatar.length > 5) {
-      return <img src={avatar} alt="Avatar" className="w-full h-full object-cover" />;
-    }
-    return avatar;
+    return (
+      <AvatarContent
+        avatar={avatar}
+        name={localUserProfile?.name || userProfile?.name}
+      />
+    );
   };
 
   const handleUpdateProfile = async (newProfile) => {
     setLocalUserProfile((prev) => ({
       ...prev,
-      ...newProfile,
-      avatar: newProfile.previewUrl ? newProfile.previewUrl : prev.avatar,
+      name: newProfile.name ?? prev.name,
+      username: newProfile.username ?? prev.username,
     }));
-    try {
-      let avatarUrlToSave = newProfile.avatar;
 
-      // 如果有文件，先上传
+    let avatarUrlToSave = getPreferredAvatarSource(extractAvatarUrl(newProfile.avatar));
+    let avatarUrlForDisplay = avatarUrlToSave ? appendCacheBuster(avatarUrlToSave) : "";
+    try {
       if (newProfile.avatarFile) {
         const up = await userApi.uploadAvatar(newProfile.avatarFile);
-
-        // 🔥 关键修改：因为我们使用了覆盖更新 (Upsert)，URL 可能不变。
-        // 为了强制 React 刷新图片，我们在 URL 后追加时间戳。
-        avatarUrlToSave = `${up.avatar_url}?t=${new Date().getTime()}`;
+        const uploadedUrl = extractAvatarUrl(up);
+        if (!uploadedUrl) {
+          throw new Error("Avatar upload succeeded but no URL was returned");
+        }
+        const preferredUrl = getPreferredAvatarSource(uploadedUrl) || uploadedUrl;
+        avatarUrlToSave = preferredUrl;
+        avatarUrlForDisplay = appendCacheBuster(preferredUrl);
+        setLocalUserProfile((prev) => ({
+          ...prev,
+          avatar: avatarUrlForDisplay || prev.avatar,
+        }));
       }
 
-      await userApi.updateProfile({
+      const payload = {
         name: newProfile.name,
-        avatar: avatarUrlToSave,
         username: newProfile.username,
-      });
+      };
+      if (avatarUrlToSave) payload.avatar = avatarUrlToSave;
+      await userApi.updateProfile(payload);
+
+      const avatarToRender =
+        avatarUrlForDisplay ||
+        (avatarUrlToSave ? appendCacheBuster(avatarUrlToSave) : "");
+
       setLocalUserProfile((prev) => ({
         ...prev,
         name: newProfile.name,
         username: newProfile.username,
-        avatar: avatarUrlToSave || prev.avatar,
+        avatar: avatarToRender || prev.avatar,
       }));
     } catch (error) {
       console.error("Failed to save profile:", error);
+      if (avatarUrlForDisplay) {
+        setLocalUserProfile((prev) => ({
+          ...prev,
+          avatar: avatarUrlForDisplay,
+        }));
+      }
     }
   };
 
@@ -270,12 +297,12 @@ const MobileSidebar = memo(({
 
   return (
     <>
-      {/* ✨ 删除确认模态框 (Mobile) */}
+      {/* Delete confirmation modal (Mobile) */}
       {deleteModal.isOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-full max-w-sm rounded-2xl shadow-2xl p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
              <div>
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">删除聊天?</h3>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">Delete Chat?</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
                 这会删除“<span className="font-medium text-gray-900 dark:text-gray-200">{deleteModal.title}</span>”。
               </p>
@@ -299,7 +326,7 @@ const MobileSidebar = memo(({
         </div>
       )}
 
-      {/* ✨ 重命名模态框 */}
+      {/* Rename modal */}
       {renameModal.isOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-full max-w-sm rounded-2xl shadow-2xl p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
@@ -337,7 +364,7 @@ const MobileSidebar = memo(({
           style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
         >
 
-          {/* 搜索覆盖层 */}
+          {/* Search overlay */}
           {isSearchOpen ? (
             <div
               className="absolute inset-0 bg-[#f9f9f9] dark:bg-gray-900 z-20 flex flex-col animate-in fade-in duration-200"
@@ -378,7 +405,7 @@ const MobileSidebar = memo(({
                               }}
                               className="px-3 py-3 text-sm text-gray-600 dark:text-gray-300 border-b border-gray-100 dark:border-gray-800/50 last:border-0 hover:bg-gray-100 dark:hover:bg-gray-800"
                           >
-                              {/* 🌟 优先显示乐观更新后的标题 */}
+                              {/* Prefer optimistic title when available */}
                               <div className="font-medium truncate">{optimisticRenames[session.id] || session.title}</div>
                               <div className="text-xs text-gray-400 mt-0.5">{new Date(session.date).toLocaleDateString()}</div>
                           </div>
@@ -399,7 +426,7 @@ const MobileSidebar = memo(({
                 </button>
               </div>
 
-              {/* ✨ 固定在顶部的功能区 (Mobile) */}
+              {/* Fixed top controls (Mobile) */}
               <div className="flex-shrink-0 px-3 pt-4 pb-2">
                 <button
                     className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-gray-200/60 dark:hover:bg-gray-800 transition-colors text-sm text-gray-700 dark:text-gray-200 font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm mb-3"
@@ -460,10 +487,10 @@ const MobileSidebar = memo(({
                 </div>
               </div>
 
-               {/* 分割线 */}
+               {/* Divider */}
               <div className="h-px bg-gray-100 dark:bg-gray-800 mx-4 mb-2"></div>
 
-              {/* ✨ 滚动区域：仅历史记录 */}
+              {/* Scroll area: history list only */}
               <div className="flex-1 overflow-y-auto px-3 py-2 custom-scrollbar" onClick={() => setMenuOpenId(null)}>
                 <div className="">
                   <h3 className="px-3 text-xs font-medium text-gray-400 mb-3">最近聊天</h3>
@@ -598,7 +625,7 @@ const MobileSidebar = memo(({
                       <Sparkles size={16} /> 个性化
                     </button>
 
-                     {/* ✨ [新增] 修改密码按钮 */}
+                     {/* [New] Change password button */}
                     <button
                        onClick={() => {
                          setIsChangePasswordOpen(true);
@@ -675,7 +702,7 @@ const MobileSidebar = memo(({
               userProfile={localUserProfile || {}}
               onSave={handleUpdateProfile}
           />
-          {/* ✨ [新增] 修改密码弹窗 */}
+          {/* [New] Change password modal */}
           <ChangePasswordModal
             isOpen={isChangePasswordOpen}
             onClose={() => setIsChangePasswordOpen(false)}
