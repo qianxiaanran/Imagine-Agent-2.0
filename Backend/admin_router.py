@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import re
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -60,6 +61,13 @@ class KbDeletePayload(BaseModel):
 class KbReindexPayload(BaseModel):
     source: str
     user_id: str
+
+
+class CreateUserPayload(BaseModel):
+    account: str
+    password: str
+    role: str = "user"
+    name: Optional[str] = None
 
 
 def _load_rules_file(doc_type: str) -> str:
@@ -155,6 +163,93 @@ def list_users(
             })
 
     return {"success": True, "data": results}
+
+
+def _account_to_email_and_phone(account: str) -> tuple[str, Optional[str]]:
+    raw = (account or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Account is required")
+    if "@" in raw:
+        return raw.lower(), None
+    phone = re.sub(r"\D+", "", raw)
+    if not phone:
+        raise HTTPException(status_code=400, detail="Invalid account format")
+    return f"{phone}@flowus.cn", phone
+
+
+@router.post("/users")
+def create_user(
+    payload: CreateUserPayload,
+    ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN])),
+):
+    account = (payload.account or "").strip()
+    password = str(payload.password or "")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+
+    role = _normalize_role(payload.role or "user")
+    if role not in {"user", "admin", "auditor", "kb_admin"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    email, phone = _account_to_email_and_phone(account)
+    default_name = (payload.name or "").strip() or (f"User_{phone[-4:]}" if phone else email.split("@")[0])
+
+    sb_admin = get_admin_supabase(fresh=True)
+    user_meta = {"name": default_name, "username": default_name}
+    if phone:
+        user_meta["phone"] = phone
+
+    try:
+        created = sb_admin.auth.admin.create_user(
+            {
+                "email": email,
+                "password": password,
+                "email_confirm": True,
+                "user_metadata": user_meta,
+                "app_metadata": {"role": role},
+            }
+        )
+        user_obj = created.user if hasattr(created, "user") else created
+        new_user_id = getattr(user_obj, "id", None)
+        if not new_user_id:
+            raise HTTPException(status_code=500, detail="User created but missing user id")
+    except HTTPException:
+        raise
+    except Exception as e:
+        msg = str(e).lower()
+        if "already" in msg or "exists" in msg or "duplicate" in msg:
+            raise HTTPException(status_code=409, detail="Account already exists")
+        raise HTTPException(status_code=500, detail=f"Create user failed: {e}")
+
+    now = datetime.now(timezone.utc).isoformat()
+    safe_upsert_profile(
+        {
+            "id": new_user_id,
+            "email": email,
+            "role": role,
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    log_admin_action(
+        ctx["user_id"],
+        "user.create",
+        new_user_id,
+        {"account": account, "email": email, "role": role},
+    )
+    return {
+        "success": True,
+        "data": {
+            "id": new_user_id,
+            "email": email,
+            "phone": phone,
+            "name": default_name,
+            "role": role,
+            "status": "active",
+        },
+    }
 
 
 @router.post("/users/{user_id}/role")
@@ -287,17 +382,54 @@ def delete_user(
                 detail=f"Service role key invalid and DB fallback failed: {db_err}",
             )
 
+    purged = {
+        "profiles": False,
+        "documents": False,
+        "history": False,
+        "session_titles": False,
+        "share_links": False,
+        "share_snapshots": False,
+    }
+
+    try:
+        sb.table("history").delete().eq("user_id", user_id).execute()
+        purged["history"] = True
+    except Exception:
+        pass
+
+    try:
+        sb.table("session_titles").delete().eq("user_id", user_id).execute()
+        purged["session_titles"] = True
+    except Exception:
+        pass
+
+    try:
+        links_res = sb.table("share_links").select("id").eq("owner_user_id", user_id).execute()
+        link_ids = [row.get("id") for row in (links_res.data or []) if row.get("id") is not None]
+        if link_ids:
+            try:
+                sb.table("share_snapshots").delete().in_("share_link_id", link_ids).execute()
+                purged["share_snapshots"] = True
+            except Exception:
+                pass
+        sb.table("share_links").delete().eq("owner_user_id", user_id).execute()
+        purged["share_links"] = True
+    except Exception:
+        pass
+
     try:
         sb.table("profiles").delete().eq("id", user_id).execute()
+        purged["profiles"] = True
     except Exception:
         pass
 
     try:
         sb.table("documents").delete().eq("metadata->>user_id", user_id).execute()
+        purged["documents"] = True
     except Exception:
         pass
 
-    log_admin_action(ctx["user_id"], "user.delete", user_id, {"purge_profile": True, "purge_documents": True})
+    log_admin_action(ctx["user_id"], "user.delete", user_id, purged)
     return {"success": True}
 
 

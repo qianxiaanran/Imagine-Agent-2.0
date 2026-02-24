@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
 import adminApi from "../../api/admin";
 import userApi from "../../api/user";
@@ -113,6 +113,13 @@ const UsersTab = ({ currentUserId }) => {
   const [users, setUsers] = useState([]);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [newUser, setNewUser] = useState({
+    account: "",
+    password: "",
+    name: "",
+    role: "user",
+  });
 
   const loadUsers = async () => {
     setLoading(true);
@@ -147,10 +154,43 @@ const UsersTab = ({ currentUserId }) => {
 
   const deleteUser = async (user) => {
     const label = user.email || user.phone || user.id;
-    const confirmed = window.confirm(`确认删除用户 ${label} 吗？此操作不可恢复。`);
+    const confirmed = window.confirm(`确认删除用户 ${label} 吗？将同时删除其历史会话与分享记录，且不可恢复。`);
     if (!confirmed) return;
     await adminApi.deleteUser(user.id);
     loadUsers();
+  };
+
+  const createUser = async () => {
+    const account = (newUser.account || "").trim();
+    const password = newUser.password || "";
+    const role = newUser.role || "user";
+    const name = (newUser.name || "").trim();
+
+    if (!account) {
+      window.alert("请输入账号（邮箱或手机号）");
+      return;
+    }
+    if (password.length < 6) {
+      window.alert("密码至少 6 位");
+      return;
+    }
+
+    setCreating(true);
+    try {
+      await adminApi.createUser({
+        account,
+        password,
+        role,
+        name: name || undefined,
+      });
+      setNewUser({ account: "", password: "", name: "", role: "user" });
+      await loadUsers();
+      window.alert("用户创建成功");
+    } catch (e) {
+      window.alert(e?.message || "创建用户失败");
+    } finally {
+      setCreating(false);
+    }
   };
 
   return (
@@ -169,6 +209,47 @@ const UsersTab = ({ currentUserId }) => {
             className="px-3 py-2 rounded-lg border border-gray-200 text-sm"
           >
             搜索
+          </button>
+        </div>
+      </div>
+      <div className="p-4 border-b border-gray-100 bg-gray-50">
+        <div className="text-xs text-gray-500 mb-2">添加用户</div>
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+          <input
+            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            placeholder="账号（邮箱或手机号）"
+            value={newUser.account}
+            onChange={(e) => setNewUser((prev) => ({ ...prev, account: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            type="password"
+            placeholder="密码（至少6位）"
+            value={newUser.password}
+            onChange={(e) => setNewUser((prev) => ({ ...prev, password: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            placeholder="姓名（可选）"
+            value={newUser.name}
+            onChange={(e) => setNewUser((prev) => ({ ...prev, name: e.target.value }))}
+          />
+          <select
+            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            value={newUser.role}
+            onChange={(e) => setNewUser((prev) => ({ ...prev, role: e.target.value }))}
+          >
+            <option value="user">user</option>
+            <option value="admin">admin</option>
+            <option value="auditor">auditor</option>
+            <option value="kb_admin">kb_admin</option>
+          </select>
+          <button
+            onClick={createUser}
+            disabled={creating}
+            className="px-3 py-2 rounded-lg bg-black text-white text-sm disabled:opacity-60"
+          >
+            {creating ? "创建中..." : "创建用户"}
           </button>
         </div>
       </div>
@@ -640,3 +721,4 @@ const LogsTab = () => {
 };
 
 export default AdminPage;
+

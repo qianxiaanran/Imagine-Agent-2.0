@@ -1,6 +1,11 @@
 import apiClient from "./apiClient";
 
 const adminApi = {
+  createUser: (payload) =>
+    apiClient(`/api/admin/users`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   listUsers: (params = {}) => {
     const search = new URLSearchParams(params).toString();
     return apiClient(`/api/admin/users${search ? `?${search}` : ""}`, { method: "GET" });
