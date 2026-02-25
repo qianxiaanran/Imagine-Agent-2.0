@@ -2,13 +2,23 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
 
 # config/supabase_config.py
-SUPABASE_URL = "https://gjbmkzduwtcfhmivvklj.supabase.co"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "http://127.0.0.1:54321")
 
 # 👇 前端等价权限（登录 / 查询 / 校验 JWT）
-SUPABASE_ANON_KEY = "***REMOVED_SUPABASE_ANON_TOKEN***"
+SUPABASE_ANON_KEY = os.getenv(
+    "SUPABASE_ANON_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9."
+    "CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0",
+)
 
 # 👇 后端管理员权限（仅后端使用）
-SUPABASE_SERVICE_ROLE_KEY = "***REMOVED_SUPABASE_SERVICE_ROLE_TOKEN***"
+SUPABASE_SERVICE_ROLE_KEY = os.getenv(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0."
+    "EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU",
+)
 
 # API 配置 (建议从环境变量获取)
 DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com")
@@ -38,7 +48,6 @@ RAG_SYS_PROMPT = """
 {question}
 请根据文档回答。
 """
-
 MEETING_MINUTES_PROMPT = """
 【角色】会议记录员
 【内容】

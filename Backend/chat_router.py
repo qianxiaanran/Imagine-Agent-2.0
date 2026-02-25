@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -6,10 +6,11 @@ import re
 import urllib.parse
 import os
 import hashlib
+import threading
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -44,7 +45,7 @@ from deepseek_llm import ask_llm_stream, ask_llm
 from context_hub import ContextHub
 
 # ✅ 直接数据库查询：强制走 database_manager，不经过 langgraph
-from database_manager import db_manager, DB_NAME as DEFAULT_DB_NAME
+from database_manager import db_manager, DB_NAME as DEFAULT_DB_NAME, ALLOWED_TABLES
 
 # ✅ 引入 Audit Service
 try:
@@ -78,6 +79,8 @@ except Exception as e:
     print(f"⚠️ [ChatRouter] langgraph_agent 加载失败: {e}")
 
 router = APIRouter(prefix="/api", tags=["Chat"])
+_ACTIVE_STREAM_CANCELS: Dict[str, threading.Event] = {}
+_ACTIVE_STREAM_LOCK = threading.Lock()
 
 
 class ChatRequest(BaseModel):
@@ -85,16 +88,16 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     session_id: Optional[str] = None
 
-    # ✅ 前端会传：mode / modelId
+    # Frontend fields: mode / modelId
     mode: Optional[str] = Field(default="general", description="对话模式：general / database / rag / search / audit ...")
-    modelId: Optional[str] = Field(default=None, description="前端选择的模型ID（字符串）")
+    modelId: Optional[str] = Field(default=None, description="Selected model ID from frontend")
 
-    # ✨ [新增] 模型后端选择
+    # New field: model backend selection
     model_backend: Optional[str] = Field(default="local", description="backend: local (Qwen) / cloud (DeepSeek)")
 
     # 上下文内容（OCR/会议/订单文本）
     context_content: Optional[str] = None
-    # 显式文件列表 (预留)
+    # Explicit file list (reserved)
     files: List[str] = []
     personalization: Dict[str, Any] = Field(default_factory=dict)
 
@@ -104,36 +107,36 @@ class RenameRequest(BaseModel):
 
 
 # ------------------------------------------------------------
-# 辅助函数：构建历史消息对象
+# Helper: sanitize history content
 # ------------------------------------------------------------
 def _sanitize_history_content(text: str) -> str:
-    """清洗历史内容，避免把调试/工具日志混入上下文导致模型跑偏。"""
+    """Clean history text and remove tool/debug traces before prompting."""
     if text is None:
         return ""
     s = str(text)
 
-    # 移除一些可能出现在文本里的特殊标记
+    # Remove special tokens that may leak into history
     s = s.replace("<|im_start|>", "").replace("<|im_end|>", "")
     # 移除前端/中间层注入的 meta 行
     s = re.sub(r'^\s*Assistant:\s*\{.*?\}\s*$', '', s, flags=re.MULTILINE)
     # 移除 Explainable AI/工具思考日志
-    s = re.sub(r'^\s*>\s*🧠.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*🧠.*$', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^\s*??.*$', '', s, flags=re.MULTILINE)
 
-    # ✨ [新增] 移除 搜索过程 日志 (防止下次对话时 LLM 看到这些临时状态)
-    s = re.sub(r'^\s*>\s*🔍.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*📄.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*🤔.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*⚠️.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*☁️.*$', '', s, flags=re.MULTILINE)  # 天气
-    s = re.sub(r'^\s*>\s*📈.*$', '', s, flags=re.MULTILINE)  # 股票
-    s = re.sub(r'^\s*>\s*🔄.*$', '', s, flags=re.MULTILINE)  # 重试
+    # [New] remove search-process logs to avoid prompt contamination
+    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
+    s = re.sub(r'^\s*>\s*WEATHER.*$', '', s, flags=re.MULTILINE)  # weather status
+    s = re.sub(r'^\s*>\s*STOCK.*$', '', s, flags=re.MULTILINE)  # stock status
+    s = re.sub(r'^\s*>\s*RETRY.*$', '', s, flags=re.MULTILINE)  # retry status
 
     # 移除 ReAct 过程日志
     s = re.sub(r'^\s*ReAct\s*(思考|行动|观察).*$', '', s, flags=re.MULTILINE)
-    # 移除各种调试图标日志行
-    s = re.sub(r'^\s*[🔍🗄️📅🚦⚙️📢].*$', '', s, flags=re.MULTILINE)
-    # 多余空行收敛
+    # Remove generic debug banner lines
+    s = re.sub(r'^\s*\[[A-Z_]+\].*$', '', s, flags=re.MULTILINE)
+    # Collapse excessive blank lines
     s = re.sub(r'\n{3,}', '\n\n', s)
 
     return s.strip()
@@ -144,11 +147,11 @@ def _looks_like_meeting_minutes(text: str) -> bool:
         return False
     s = str(text)
     markers = [
-        "会议主题",
+        "浼氳涓婚",
         "关键决策",
         "行动项",
-        "风险与待确认事项",
-        "会议纪要",
+        "风险与待事项",
+        "浼氳绾",
     ]
     hit_count = sum(1 for marker in markers if marker in s)
     return hit_count >= 2
@@ -395,6 +398,156 @@ def _build_cache_friendly_prompt(
     return "\n\n".join(blocks)
 
 
+_QUERY_TERM_STOPWORDS = {
+    "请问", "一个", "这个", "那个", "然后", "还有", "就是", "现在", "帮我", "我们",
+    "what", "which", "about", "please", "thanks", "thank", "tell", "show", "give",
+}
+
+
+def _normalize_match_text(text: Optional[str]) -> str:
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _extract_query_terms(text: Optional[str], max_terms: int = 14) -> List[str]:
+    raw = str(text or "").lower()
+    terms: List[str] = []
+
+    for zh_seq in re.findall(r"[\u4e00-\u9fff]{2,}", raw):
+        seq = zh_seq.strip()
+        if not seq:
+            continue
+        if len(seq) <= 4:
+            if seq not in _QUERY_TERM_STOPWORDS:
+                terms.append(seq)
+            continue
+
+        # For long Chinese phrases, use n-grams so topic overlap can still be detected.
+        for n in (4, 3, 2):
+            for i in range(0, len(seq) - n + 1):
+                t = seq[i:i + n]
+                if t and t not in _QUERY_TERM_STOPWORDS:
+                    terms.append(t)
+
+    for t in re.findall(r"[a-z0-9_]{3,}", raw):
+        if t and t not in _QUERY_TERM_STOPWORDS:
+            terms.append(t)
+
+    uniq: List[str] = []
+    seen = set()
+    for t in sorted(terms, key=len, reverse=True):
+        if t in seen:
+            continue
+        seen.add(t)
+        uniq.append(t)
+        if len(uniq) >= max_terms:
+            break
+    return uniq
+
+
+def _is_context_related(query: Optional[str], candidate_text: Optional[str], min_hits: int = 1) -> bool:
+    if not candidate_text:
+        return False
+    query_terms = _extract_query_terms(query)
+    if not query_terms:
+        return True
+
+    normalized = _normalize_match_text(candidate_text)
+    hits = 0
+    for term in query_terms:
+        if term in normalized:
+            hits += 1
+            if hits >= min_hits:
+                return True
+    return False
+
+
+_FOLLOWUP_HINTS = [
+    "这个", "那个", "这样", "那就", "继续", "然后", "按这个", "就按这个",
+    "可以", "行", "好的", "嗯", "随便", "直接", "开始", "写吧", "你来", "就是",
+]
+
+_DIRECT_EXECUTION_HINTS = [
+    "直接写", "你来写", "你来定", "自由发挥", "随便", "先出稿", "先写",
+    "直接开始", "不要追问", "别问了", "不用问", "就按这个写", "你决定",
+]
+
+_WRITING_TASK_HINTS = [
+    "作文", "文章", "写作", "写一篇", "文案", "报告", "发言稿", "邮件",
+    "总结", "周报", "方案", "脚本", "提纲",
+]
+
+
+def _looks_like_followup_turn(text: Optional[str]) -> bool:
+    q = _normalize_match_text(text)
+    if not q:
+        return False
+    if len(q) <= 18 and any(k in q for k in _FOLLOWUP_HINTS):
+        return True
+    return bool(re.search(r"(??|??|??|??|??|??|??|??|??|??)", q))
+
+
+def _should_force_direct_draft(user_text: Optional[str], history_text: Optional[str]) -> bool:
+    q = _normalize_match_text(user_text)
+    if not q:
+        return False
+    if not any(k in q for k in _DIRECT_EXECUTION_HINTS):
+        return False
+    h = _normalize_match_text(history_text)
+    return any(k in q for k in _WRITING_TASK_HINTS) or any(k in h for k in _WRITING_TASK_HINTS)
+
+
+def _pick_relevant_history_records(
+        records: List[Dict[str, Any]],
+        query: Optional[str],
+        limit: int,
+        mode: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not records:
+        return []
+
+    current_mode = (mode or "").strip().lower()
+    scope = max(limit * 3, limit)
+    candidate_records = records[-scope:]
+    query_terms = _extract_query_terms(query, max_terms=10)
+    query_has_signal = bool(query_terms)
+    is_followup_turn = _looks_like_followup_turn(query)
+    min_hits = 2 if len(query_terms) >= 5 else 1
+    keep_tail_count = 3 if is_followup_turn else 2
+
+    selected_rev: List[Dict[str, Any]] = []
+    for idx, r in enumerate(reversed(candidate_records)):
+        raw_role = (r.get("role") or "").strip().lower()
+        if raw_role == "meta":
+            continue
+
+        content = _sanitize_history_content(r.get("content"))
+        if not content:
+            continue
+
+        raw_func_type = (r.get("func_type") or "").strip().lower()
+        if current_mode != "meeting" and raw_func_type == "meeting":
+            continue
+        if current_mode != "meeting" and raw_role == "assistant" and _looks_like_meeting_minutes(content):
+            continue
+
+        keep_latest = len(selected_rev) < keep_tail_count
+        related = _is_context_related(query, content, min_hits=min_hits)
+        same_mode_recent = bool(
+            (is_followup_turn or (not query_has_signal))
+            and current_mode
+            and raw_func_type == current_mode
+            and idx < 4
+        )
+        fallback_same_mode = bool((not query_has_signal) and current_mode and raw_func_type == current_mode)
+
+        if keep_latest or related or same_mode_recent or fallback_same_mode:
+            selected_rev.append(r)
+            if len(selected_rev) >= limit:
+                break
+
+    return list(reversed(selected_rev))
+
+
 def _read_recent_history_records(user_id: str, session_id: str, limit: int) -> List[Dict[str, Any]]:
     if user_id == "anonymous":
         return []
@@ -580,35 +733,32 @@ def _maybe_compact_context(
         return latest_payload
 
 
-def _get_plain_history(user_id: str, session_id: str, limit: int = 4, mode: Optional[str] = None) -> str:
-    """获取纯文本历史，用于 LLM 生成搜索词"""
+def _get_plain_history(
+        user_id: str,
+        session_id: str,
+        limit: int = 4,
+        mode: Optional[str] = None,
+        query: Optional[str] = None,
+) -> str:
+    """Get plain text history for LLM context, with lightweight relevance filtering."""
     if user_id == "anonymous":
         return ""
     try:
-        records = get_history_limited(user_id, session_id, limit=limit)
-        # 取最近几条
-        recent = records[-limit:]
+        records = get_history_limited(user_id, session_id, limit=max(limit * 3, limit))
+        recent = _pick_relevant_history_records(records, query=query, limit=limit, mode=mode)
         history_str = ""
-        current_mode = (mode or "").strip().lower()
         for r in recent:
-            raw_role = r.get('role')
-            if raw_role == 'meta':
-                continue
-            raw_func_type = (r.get("func_type") or "").strip().lower()
-            if current_mode != "meeting" and raw_func_type == "meeting":
-                continue
-            if raw_role == 'user':
+            raw_role = (r.get("role") or "").strip().lower()
+            if raw_role == "user":
                 role = "User"
-            elif raw_role == 'assistant':
+            elif raw_role == "assistant":
                 role = "Assistant"
-            elif raw_role == 'context':
+            elif raw_role == "context":
                 role = "Context"
             else:
                 role = "Assistant"
 
-            content = _sanitize_history_content(r.get('content'))
-            if current_mode != "meeting" and role == "Assistant" and _looks_like_meeting_minutes(content):
-                continue
+            content = _sanitize_history_content(r.get("content"))
             if content:
                 history_str += f"{role}: {content}\n"
         return history_str
@@ -616,30 +766,31 @@ def _get_plain_history(user_id: str, session_id: str, limit: int = 4, mode: Opti
         return ""
 
 
-def _get_langchain_history(user_id: str, session_id: str, limit: int = 6, mode: Optional[str] = None):
+def _get_langchain_history(
+        user_id: str,
+        session_id: str,
+        limit: int = 6,
+        mode: Optional[str] = None,
+        query: Optional[str] = None,
+):
     from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
     if user_id == "anonymous":
         return []
     try:
-        records = get_history_limited(user_id, session_id, limit=limit)
+        records = get_history_limited(user_id, session_id, limit=max(limit * 3, limit))
+        filtered_records = _pick_relevant_history_records(records, query=query, limit=limit, mode=mode)
         messages = []
-        current_mode = (mode or "").strip().lower()
-        for r in records[-limit:]:
-            role = r.get('role')
-            content = _sanitize_history_content(r.get('content'))
-            raw_func_type = (r.get("func_type") or "").strip().lower()
-            if current_mode != "meeting" and raw_func_type == "meeting":
-                continue
-            if current_mode != "meeting" and role == 'assistant' and _looks_like_meeting_minutes(content):
-                continue
+        for r in filtered_records:
+            role = r.get("role")
+            content = _sanitize_history_content(r.get("content"))
             if not content:
                 continue
-            if role == 'user':
+            if role == "user":
                 messages.append(HumanMessage(content=content))
-            elif role == 'assistant':
+            elif role == "assistant":
                 messages.append(AIMessage(content=content))
-            elif role == 'context':
+            elif role == "context":
                 messages.append(SystemMessage(content=f"Context: {content}"))
             else:
                 messages.append(AIMessage(content=content))
@@ -661,6 +812,40 @@ def _normalize_mode(mode: Optional[str]) -> str:
     if m in {"general", "chat", "default"}:
         return "general"
     return m
+
+
+_DB_INTENT_ACTION_WORDS = [
+    "sql", "database", "table", "select", "where", "join", "groupby", "count", "sum",
+    "数据库", "数据表", "表里", "查询", "查", "查下", "查找", "统计", "汇总", "筛选", "排序", "排名", "明细",
+    "多少", "总额", "总数", "占比",
+]
+
+_DB_INTENT_ENTITY_WORDS = [
+    "订单", "客户", "员工", "库存", "供应商", "采购", "产品", "商品", "部门", "角色", "公司",
+    "orders", "customers", "employees", "inventory", "suppliers", "purchases", "products", "departments",
+]
+
+
+def _looks_like_db_request(text: str) -> bool:
+    q = _normalize_match_text(text)
+    if not q:
+        return False
+
+    # Direct table-name hit from whitelist.
+    for table_name in ALLOWED_TABLES:
+        if table_name.lower() in q:
+            return True
+
+    has_action = any(k in q for k in _DB_INTENT_ACTION_WORDS)
+    has_entity = any(k in q for k in _DB_INTENT_ENTITY_WORDS)
+    if has_action and has_entity:
+        return True
+
+    # Raw SQL pattern
+    if re.search(r"\bselect\b.*\bfrom\b", q):
+        return True
+
+    return False
 
 
 def _safe_int(value) -> Optional[int]:
@@ -685,7 +870,7 @@ def _build_doc_source(metadata: Dict[str, Any], content: Optional[str]) -> Dict[
         or metadata.get("source")
         or metadata.get("filename")
         or metadata.get("title")
-        or "文档"
+        or "unknown_source"
     )
     src_type = metadata.get("type")
     page_display = None
@@ -725,7 +910,7 @@ def _build_doc_source(metadata: Dict[str, Any], content: Optional[str]) -> Dict[
 
 
 def _to_text_and_sources(items) -> tuple[list[str], list[Dict[str, Any]]]:
-    """把 search_user_documents 的返回值（可能是 Document 对象或字符串）统一成文本列表 + 来源列表。"""
+    """Normalize retrieved document items into plain texts and source metadata."""
     texts: list[str] = []
     srcs: list[Dict[str, Any]] = []
     if not items:
@@ -734,7 +919,7 @@ def _to_text_and_sources(items) -> tuple[list[str], list[Dict[str, Any]]]:
     for it in items:
         if it is None:
             continue
-        # 直接字符串
+        # Save short-term snapshot
         if isinstance(it, str):
             t = it.strip()
             if t:
@@ -748,7 +933,7 @@ def _to_text_and_sources(items) -> tuple[list[str], list[Dict[str, Any]]]:
         if isinstance(page_content, str) and page_content.strip():
             texts.append(page_content.strip())
 
-        # 组装来源（尽量友好，不抛异常）
+        # Build compact shared context
         if isinstance(metadata, dict):
             src = _build_doc_source(metadata, page_content if isinstance(page_content, str) else None)
             src_key = f"{src.get('file_name')}|{src.get('page')}|{src.get('snippet')}"
@@ -763,7 +948,7 @@ def _to_text_and_sources(items) -> tuple[list[str], list[Dict[str, Any]]]:
 
 
 # ------------------------------------------------------------
-# 🛠️ 搜索结果打分与优化模块 (新增)
+# Search relevance scoring helpers
 # ------------------------------------------------------------
 HIGH_VALUE_DOMAINS = [
     ".gov", ".edu", ".org",  # 政府、教育、非盈利
@@ -782,13 +967,13 @@ LOW_VALUE_DOMAINS = [
 
 
 def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
-    """计算单个搜索结果的相关性分数"""
+    """Calculate a relevance score for one search result."""
     score = 0.0
     title = result.get("title", "").lower()
     snippet = result.get("snippet", "").lower()
     link = result.get("link", "").lower()
 
-    # 1. 关键词匹配 (简单加权)
+    # 1. Title keyword boost
     for kw in query_keywords:
         kw = kw.lower()
         if kw in title:
@@ -796,21 +981,21 @@ def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
         if kw in snippet:
             score += 1.0  # 摘要包含关键词
 
-    # 2. 域名权威性加权
+    # 2. Domain credibility boost
     domain_boost = False
     for domain in HIGH_VALUE_DOMAINS:
         if domain in link:
-            score += 5.0  # 官方/权威域名大幅加分
+            score += 5.0  # High-trust domain gets stronger weight
             domain_boost = True
             break
 
-    # 3. 低质域名降权
+    # 3. Low-value domain penalty
     if not domain_boost:
         for domain in LOW_VALUE_DOMAINS:
             if domain in link:
                 score -= 2.0
 
-    # 4. 惩罚过短的摘要
+    # 4. Very short snippet penalty
     if len(snippet) < 20:
         score -= 5.0
 
@@ -818,12 +1003,12 @@ def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
 
 
 def _rank_search_results(results: List[dict], query: str, min_score: float = 3.0) -> List[dict]:
-    """对搜索结果进行打分、排序和过滤"""
+    """Rank and filter search results by relevance."""
     if not results:
         return []
 
-    # 简单分词 (按空格分，如果是中文其实最好用结巴，这里为了轻量化用简单逻辑)
-    # 对于中文，简单的把 query 作为整体或者按空格切分
+    # Tokenize query for relevance scoring
+    # Fallback to full query if tokenization is empty
     keywords = [k for k in query.split() if len(k) > 1]
     if not keywords:
         keywords = [query]
@@ -831,22 +1016,22 @@ def _rank_search_results(results: List[dict], query: str, min_score: float = 3.0
     scored_results = []
     for r in results:
         score = _calculate_result_score(r, keywords)
-        # 将分数附加到对象中方便调试，但不返回给前端
+        # Persist intermediate relevance score
         r["_score"] = score
         if score >= min_score:
             scored_results.append(r)
 
-    # 按分数降序排列
+    # Sort by score descending
     scored_results.sort(key=lambda x: x["_score"], reverse=True)
 
     return scored_results
 
 
 # ------------------------------------------------------------
-# 🛠️ 工具函数：结构化数据 API (天气 / 股票)
+# Weather tool API
 # ------------------------------------------------------------
 def tool_get_weather(city_name: str) -> List[dict]:
-    """获取天气信息 (使用 wttr.in, 中国大陆可用)"""
+    """Get weather information from wttr.in."""
     import requests
     results = []
     print(f"☁️ [Weather Tool] Getting weather for: {city_name}")
@@ -868,14 +1053,14 @@ def tool_get_weather(city_name: str) -> List[dict]:
 
 
 def tool_get_stock(query: str) -> List[dict]:
-    """获取股票信息 (使用新浪财经接口, 中国大陆极速)"""
+    """Get stock quote information."""
     import requests
     results = []
     print(f"📈 [Stock Tool] Analyzing query: {query}")
     try:
         # 1. 简单的正则匹配股票代码 (支持 sh/sz/hk/us)
         # 如果用户输入 "贵州茅台股价"，这里需要先有一个 Search 步骤去换取代码，
-        # 为了简化，我们先尝试直接搜索，如果用户输入代码则精确匹配。
+        # If market prefix is missing, call suggest first
         # 这里做一个简化策略：如果包含中文，先去 suggest 接口拿代码
 
         stock_code = ""
@@ -902,14 +1087,14 @@ def tool_get_stock(query: str) -> List[dict]:
             # 格式: var suggestdata_xxx="贵州茅台,11,600519,sh600519,..."
             match = re.search(r'="(.*?)"', resp.text)
             if match and len(match.group(1)) > 5:
-                # 取第一个结果
+        # 这里做一个简化策略：如果包含中文，先去 suggest 接口拿代码
                 data = match.group(1).split(',')
                 # data[3] 通常是带市场前缀的代码 (e.g. sh600519)
                 stock_code = data[3]
                 stock_name = data[0]
 
         if stock_code:
-            # 2. 获取实时行情
+            # 2. 閼惧嘲褰囩€圭偞妞傜悰灞惧剰
             hq_url = f"http://hq.sinajs.cn/list={stock_code}"
             headers = {"Referer": "https://finance.sina.com.cn/"}
             hq_resp = requests.get(hq_url, headers=headers, timeout=5)
@@ -926,16 +1111,16 @@ def tool_get_stock(query: str) -> List[dict]:
                         percent = (change / float(prev_close)) * 100
 
                         results.append({
-                            "title": f"{stock_name} ({stock_code}) 实时行情",
+                            "title": f"{stock_name} ({stock_code}) Realtime Quote",
                             "link": f"https://finance.sina.com.cn/realstock/company/{stock_code}/nc.shtml",
                             "snippet": f"当前价格: ¥{price}\n涨跌幅: {percent:.2f}%\n涨跌额: {change:.2f}\n今开: {open_p} | 最高: {high} | 最低: {low}\n时间: {date} {time}"
                         })
                     elif len(vals) > 5:  # 美股/港股格式略有不同，做简单容错
                         price = vals[1] if len(vals) > 1 else "N/A"
                         results.append({
-                            "title": f"{stock_name} ({stock_code}) 实时行情",
+                            "title": f"{stock_name} ({stock_code}) Realtime Quote",
                             "link": f"https://finance.sina.com.cn",
-                            "snippet": f"当前价格: {price} (详细数据请点击链接)"
+                            "snippet": f"最新价: {price} (fallback quote)"
                         })
 
     except Exception as e:
@@ -945,23 +1130,23 @@ def tool_get_stock(query: str) -> List[dict]:
 
 
 # ------------------------------------------------------------
-# 🛠️ 核心搜索工具：官方 API + 爬虫兜底
+# Search tool: prefer official API, fallback to scraping
 # ------------------------------------------------------------
 def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
     """
-    智能搜索路由：
-    1. 意图识别 -> 天气/股票结构化 API
-    2. Bing API (如有 Key)
-    3. SerpAPI (如有 Key)
-    4. 爬虫兜底 (Bing CN / Sogou)
+    Smart web search routing:
+    1. Intent tools (weather/stock) when applicable
+    2. Bing API (if key exists)
+    3. SerpAPI (if key exists)
+    4. Fallback scraping
     """
     results = []
 
-    # --- 1. 意图识别 (简单的关键词匹配) ---
+    # --- 1. Try direct tools first (weather / stock) ---
     q_lower = query.lower()
     if "天气" in q_lower or "weather" in q_lower or "气温" in q_lower:
-        # 提取地名简单的做法：交给 tool 处理，tool 会把整个 query 传给 wttr.in，它很聪明
-        # 这里简单清洗一下 query，比如 "北京天气" -> "北京"
+        # Invoke registered tool (tool)
+        # Normalize query before parsing
         city = query.replace("天气", "").replace("气温", "").replace("weather", "").strip()
         if not city: city = "Shanghai"  # 默认
 
@@ -995,7 +1180,7 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
                         "link": page.get("url"),
                         "snippet": page.get("snippet", "")
                     })
-                return results  # 成功则直接返回
+                return results  # Success: return immediately
             else:
                 print(f"⚠️ [Bing API] Error {resp.status_code}: {resp.text}")
         except Exception as e:
@@ -1033,7 +1218,7 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
 
 
 def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
-    """(私有函数) 之前的爬虫实现，作为兜底方案"""
+    """Fallback HTML scraping search implementation."""
     results = []
     import requests
     from bs4 import BeautifulSoup
@@ -1092,14 +1277,17 @@ def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
                         else:
                             continue
                     snippet_div = item.select_one('.text-layout') or item.select_one('.ft') or item.select_one('p')
-                    snippet = snippet_div.get_text(strip=True) if snippet_div else "点击查看详情"
+                    snippet = snippet_div.get_text(strip=True) if snippet_div else "No snippet"
                     results.append({"title": title, "link": link, "snippet": snippet})
         except Exception:
             pass
 
     if not results:
-        results.append({"title": "未搜索到结果", "link": "#",
-                        "snippet": "主要搜索引擎均未返回有效数据，请尝试更简单的关键词或检查网络。"})
+        results.append({
+            "title": "No search results",
+            "link": "#",
+            "snippet": "Primary search engines returned no valid results. Try simpler keywords or check network.",
+        })
 
     return results
 
@@ -1107,9 +1295,45 @@ def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
 # ------------------------------------------------------------
 # 核心 Chat 接口
 # ------------------------------------------------------------
+# Fixed identity reply for creator/model questions.
+IDENTITY_FIXED_REPLY = "我是由浅夏安然创造的imagine agent，是你的办公小助手，感谢使用。"
+
+_IDENTITY_CN_PATTERNS = [
+    r"你是谁",
+    r"你是.*(创造|开发|构建|训练).*的",
+    r"(谁|谁在).*?(创造|开发|构建|训练).*你",
+    r"你(用的|是什么|属于)?什么模型",
+    r"你的模型(是|叫)?什么",
+    r"你是(chatgpt|gpt|qwen|deepseek)吗",
+]
+
+_IDENTITY_EN_PATTERNS = [
+    r"who(created|made|built|developed)you",
+    r"whoareyou",
+    r"what(model|llm)areyou",
+    r"whichmodelareyou",
+    r"whatisyourmodel",
+]
+
+
+def _is_identity_profile_question(text: str) -> bool:
+    if not text:
+        return False
+
+    normalized = re.sub(r"\s+", "", str(text)).lower()
+    for pattern in _IDENTITY_CN_PATTERNS:
+        if re.search(pattern, normalized):
+            return True
+    for pattern in _IDENTITY_EN_PATTERNS:
+        if re.search(pattern, normalized):
+            return True
+    return False
+
+
 @router.post("/chat")
 async def chat(
         req: ChatRequest,
+        request: Request,
         x_user_id: Optional[str] = Header(default=None),
         x_session_id: Optional[str] = Header(default=None),
 ):
@@ -1118,8 +1342,96 @@ async def chat(
         "X-Accel-Buffering": "no",
     }
 
+    cancel_state = {"cancelled": False, "logged": False}
+    cancel_event = threading.Event()
+    stream_key = ""
+    _ITER_DONE = object()
+
+    def _unregister_active_stream():
+        if not stream_key:
+            return
+        with _ACTIVE_STREAM_LOCK:
+            current_event = _ACTIVE_STREAM_CANCELS.get(stream_key)
+            if current_event is cancel_event:
+                _ACTIVE_STREAM_CANCELS.pop(stream_key, None)
+
+    def _mark_cancelled():
+        if cancel_state["cancelled"] and cancel_event.is_set():
+            return
+        cancel_state["cancelled"] = True
+        cancel_event.set()
+        if not cancel_state["logged"]:
+            cancel_state["logged"] = True
+            print("[Chat] Client disconnected, cancel streaming response.")
+
+    def _is_cancelled() -> bool:
+        return bool(cancel_state["cancelled"] or cancel_event.is_set())
+
+    async def _check_client_disconnected() -> bool:
+        if cancel_event.is_set():
+            cancel_state["cancelled"] = True
+            return True
+        if cancel_state["cancelled"]:
+            return True
+        try:
+            if await request.is_disconnected():
+                _mark_cancelled()
+        except Exception:
+            pass
+        return bool(cancel_state["cancelled"] or cancel_event.is_set())
+
+    def _close_iterator(iterator: Any):
+        close_fn = getattr(iterator, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
+
+    def _next_or_done(iterator):
+        try:
+            return next(iterator)
+        except StopIteration:
+            return _ITER_DONE
+
+    async def _iter_sync_stream(sync_iter):
+        iterator = iter(sync_iter)
+        try:
+            while True:
+                if await _check_client_disconnected():
+                    break
+                item = await asyncio.to_thread(_next_or_done, iterator)
+                if item is _ITER_DONE:
+                    break
+                if await _check_client_disconnected():
+                    break
+                yield item
+        except asyncio.CancelledError:
+            _mark_cancelled()
+            raise
+        finally:
+            _close_iterator(iterator)
+
+    async def _disconnect_aware_stream(gen):
+        try:
+            async for item in gen:
+                if await _check_client_disconnected():
+                    break
+                yield item
+        except asyncio.CancelledError:
+            _mark_cancelled()
+            raise
+        finally:
+            aclose_fn = getattr(gen, "aclose", None)
+            if callable(aclose_fn):
+                try:
+                    await aclose_fn()
+                except Exception:
+                    pass
+            _unregister_active_stream()
+
     def _stream(gen, media_type: str = "application/x-ndjson"):
-        return StreamingResponse(gen, media_type=media_type, headers=stream_headers)
+        return StreamingResponse(_disconnect_aware_stream(gen), media_type=media_type, headers=stream_headers)
 
     def _should_flush(
             buf: str,
@@ -1173,15 +1485,24 @@ async def chat(
             return [text]
         return [text[i:i + size] for i in range(0, len(text), size)]
 
-    # 1. 基础参数解析
+    # 1. Request validation
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(422, "message 不能为空")
 
     user_id = (req.user_id or x_user_id or "anonymous").strip()
     session_id = (req.session_id or x_session_id or str(uuid4())).strip()
+    stream_key = f"{user_id}:{session_id}"
 
-    # 获取模型后端设置
+    previous_event = None
+    with _ACTIVE_STREAM_LOCK:
+        previous_event = _ACTIVE_STREAM_CANCELS.get(stream_key)
+        _ACTIVE_STREAM_CANCELS[stream_key] = cancel_event
+    if previous_event and previous_event is not cancel_event:
+        previous_event.set()
+        print(f"[Chat] Cancel previous in-flight stream for {stream_key}")
+
+    # 閼惧嘲褰囧Ο鈥崇€烽崥搴ｇ拋鍓х枂
     model_backend = req.model_backend or "local"
     model_id = (req.modelId or "").strip()
 
@@ -1190,6 +1511,35 @@ async def chat(
     if mode == "general" and model_id == "1":
         mode = "meeting"
         print("🔒 [Router] Force mode -> meeting (modelId=1)")
+    if _is_identity_profile_question(message):
+        async def fixed_identity_response_generator():
+            yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
+            yield json.dumps({"t": "c", "v": IDENTITY_FIXED_REPLY}, ensure_ascii=False) + "\n"
+
+            if user_id != "anonymous":
+                try:
+                    sb = require_supabase()
+                    sb.table("history").insert({
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "role": "user",
+                        "content": message,
+                        "func_type": "identity",
+                    }).execute()
+                    sb.table("history").insert({
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "role": "assistant",
+                        "content": IDENTITY_FIXED_REPLY,
+                        "func_type": "identity",
+                    }).execute()
+                except Exception as e:
+                    print(f"Identity reply history save failed: {e}")
+
+            yield json.dumps({"t": "m", "sid": session_id, "mode": mode, "end": True}, ensure_ascii=False) + "\n"
+
+        return _stream(fixed_identity_response_generator())
+
     context_content = _truncate_context(req.context_content)
     personalization = _normalize_personalization(req.personalization)
     personalization_system_prompt = _build_personalization_system_prompt(personalization)
@@ -1219,6 +1569,7 @@ async def chat(
             session_id,
             limit=history_limit,
             mode=normalized_mode,
+            query=message,
         )
         active_context = (context_content or "").strip()
 
@@ -1237,6 +1588,7 @@ async def chat(
                     session_id,
                     limit=max(6, history_limit),
                     mode=normalized_mode,
+                    query=message,
                 )
                 if history_msgs:
                     hub.history_summary = memory_summary.update_from_messages(
@@ -1249,6 +1601,9 @@ async def chat(
             if not hub.history_summary and history_text:
                 hub.history_summary = history_text[:800]
             summary_context = hub.get_combined_context(max_len=2000)
+            if summary_context and not _is_context_related(message, summary_context, min_hits=1):
+                # Drop stale summary context when the topic has shifted.
+                summary_context = ""
         except Exception:
             summary_context = ""
 
@@ -1291,7 +1646,7 @@ async def chat(
         )
 
     # --------------------------------------------------------
-    # ✅ 联网搜索模式：ChatGPT 逻辑 (优化搜索词 -> 搜索 -> 思考 -> 回答)
+    # Fast fallback path: Chat mode without Graph
     # --------------------------------------------------------
     async def fast_chat_response_generator(func_type: str = "chat", return_mode: str = "chat"):
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
@@ -1301,18 +1656,33 @@ async def chat(
         try:
             active_mode = (return_mode or func_type or mode or "chat")
             shared_ctx = _get_shared_context(active_mode, history_limit=FAST_CHAT_HISTORY_LIMIT)
-            system_prompt = _merge_system_prompt(None, personalization_system_prompt)
+            execution_guard_prompt = (
+                "You are an enterprise office assistant. Execute tasks directly when intent is clear.\n"
+                "1) If the user asks for direct drafting, produce output immediately without repeated clarification.\n"
+                "2) For short follow-up prompts, continue the task based on recent context.\n"
+                "3) If information is incomplete, make minimal assumptions and list them at the end."
+            )
+            system_prompt = _merge_system_prompt(execution_guard_prompt, personalization_system_prompt)
+            history_text = shared_ctx.get("history_text", "")
+            base_prompt = ""
+            if _should_force_direct_draft(message, history_text):
+                base_prompt = (
+                    "用户已明确允许自由发挥并要求直接开始。"
+                    "请直接输出可用初稿，不要重复询问主题、字数或格式。"
+                )
             prompt = _wrap_prompt_with_shared_context(
-                "",
+                base_prompt,
                 shared_ctx,
                 user_message=message,
             )
 
-            for chunk in ask_llm_stream(
+            llm_stream = ask_llm_stream(
                 prompt,
                 system_prompt=system_prompt,
                 model_type=model_backend,
-            ):
+                stop_checker=_is_cancelled,
+            )
+            async for chunk in _iter_sync_stream(llm_stream):
                 if chunk:
                     full_reply += chunk
                     out = push_chunk(chunk)
@@ -1323,8 +1693,13 @@ async def chat(
             out = flush_chunk()
             if out:
                 for part in _split_text(out):
+                    if _is_cancelled():
+                        return
                     yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                     await asyncio.sleep(0)
+
+            if _is_cancelled():
+                return
 
             if user_id != "anonymous":
                 try:
@@ -1340,6 +1715,8 @@ async def chat(
                 except Exception as e:
                     print(f" History save failed: {e}")
 
+            if _is_cancelled():
+                return
             yield json.dumps({"t": "m", "sid": session_id, "mode": return_mode, "end": True}, ensure_ascii=False) + "\n"
         except Exception as e:
             print(f" [Chat Mode Error]: {e}")
@@ -1381,251 +1758,109 @@ async def chat(
             return ""
         q = text.replace("股票", "").replace("股价", "").replace("行情", "").replace("价格", "").strip()
         return q or text
-
     async def search_response_generator():
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
         full_reply_clean = ""
+        push_chunk, flush_chunk = _make_text_buffer(immediate=True)
 
         try:
-            # === Step 1: 智能生成搜索词 (Query Optimization) ===
             shared_ctx = _get_shared_context("search", history_limit=4)
             history_text = shared_ctx.get("history_text", "")
-            summary_text = (shared_ctx.get("summary_context", "") or "").strip()[:1200]
-            active_text = (shared_ctx.get("active_context", "") or "").strip()[:1000]
-
-            yield json.dumps({"t": "c", "v": "> 🤔 正在规划搜索策略...\n\n"}, ensure_ascii=False) + "\n"
-
-            # 调用 LLM 生成搜索词，要求生成 JSON 或特定格式以便提取主词和备选词
-            query_gen_prompt = f"""请根据以下对话历史和用户最新问题，生成搜索关键词。
-要求：
-1. 输出格式为：主搜索词 | 备选搜索词
-2. 如果用户问题包含代词，请替换为具体名称。
-3. 主搜索词要精准，备选搜索词可以宽泛或尝试不同角度。
-4. 只输出一行，用 "|" 分隔。
-
-对话历史：
-{history_text}
-
-会话摘要：
-{summary_text or "（无）"}
-
-当前附加上下文：
-{active_text or "（无）"}
-
-用户最新问题：
-{message}
-
-搜索词："""
 
             is_weather_intent = _is_weather_query(message)
             is_stock_intent = _is_stock_query(message)
 
-            raw_queries = ""
-            alt_query = None
-            if not is_weather_intent and not is_stock_intent:
-                # Keep current backend while generating query with fast model fallback.
-                for chunk in ask_llm_stream(query_gen_prompt, model_type=model_backend):
-                    if chunk:
-                        raw_queries += chunk
-
-                raw_queries = raw_queries.strip().replace('"', '').replace("'", "")
-                parts = [p.strip() for p in raw_queries.split('|') if p.strip()]
-
-                main_query = parts[0] if parts else message
-                alt_query = parts[1] if len(parts) > 1 else None
-                search_query = main_query
+            if is_weather_intent:
+                city = _extract_city(message, history_text)
+                search_query = f"{city} ??"
+            elif is_stock_intent:
+                search_query = _normalize_stock_query(message)
             else:
-                if is_weather_intent:
-                    city = _extract_city(message, history_text)
-                    search_query = f"{city} 天气"
-                else:
-                    search_query = _normalize_stock_query(message)
-            # === Step 2: 执行搜索 (支持自动重试) ===
+                search_query = message
 
-            # 简单判断是否是结构化意图
-            status_icon = "🔍"
-            if is_weather_intent or ("天气" in search_query):
-                status_icon = "☁️"
-            elif is_stock_intent or ("股价" in search_query):
-                status_icon = "📈"
+            yield json.dumps({"t": "c", "v": f"> 正在搜索：{search_query}\n\n"}, ensure_ascii=False) + "\n"
 
-            search_results = []
-            final_used_query = search_query
-
-            # --- 第一轮搜索 ---
-            yield json.dumps({"t": "c", "v": f"> {status_icon} 正在搜索：**{search_query}** ...\n\n"},
-                             ensure_ascii=False) + "\n"
             raw_results = perform_web_search(search_query)
+            search_results = [r for r in raw_results if r.get("link") != "#"][:6]
 
-            # --- 结果打分与过滤 ---
-            # 如果是 API 返回的（包含 title/link），进行打分
-            valid_raw_results = [r for r in raw_results if r['link'] != '#']
+            if _is_cancelled():
+                return
 
-            # 只有当结果数量足够且不是特定的工具结果（如天气）时，才应用严格打分
-            is_tool_result = any("天气" in r['title'] or "行情" in r['title'] for r in valid_raw_results)
-
-            if not is_tool_result and valid_raw_results:
-                ranked = _rank_search_results(valid_raw_results, search_query)
-                # 【新增逻辑】如果过滤太狠导致没结果了，就用原始结果的前3条兜底
-                if not ranked and valid_raw_results:
-                    print("⚠️ [Search] 过滤后无结果，启用兜底策略")
-                    search_results = valid_raw_results[:3]
-                else:
-                    search_results = ranked
+            if not search_results:
+                no_result_text = "未检索到可靠结果。请换个关键词再试。"
+                full_reply_clean = no_result_text
+                yield json.dumps({"t": "c", "v": no_result_text}, ensure_ascii=False) + "\n"
             else:
-                search_results = valid_raw_results  # 工具结果或无结果直接用
+                context_lines = []
+                for i, item in enumerate(search_results[:5], start=1):
+                    title = str(item.get("title") or "").strip()
+                    snippet = str(item.get("snippet") or "").strip()
+                    link = str(item.get("link") or "").strip()
+                    context_lines.append(f"[{i}] {title}\n{snippet}\n来源: {link}")
 
-            # --- 低质量/无结果自动重试 ---
-            # 如果打分后的结果太少，且有备选词，尝试第二轮
-            if len(search_results) < 2 and alt_query and not is_tool_result:
-                yield json.dumps({"t": "c", "v": f"> 🔄 初步结果相关度低，尝试备选词：**{alt_query}** ...\n\n"},
-                                 ensure_ascii=False) + "\n"
+                search_context = "\n\n".join(context_lines)
+                response_prompt = (
+                    "请基于以下检索结果，给出准确、简洁、可执行的回答。"
+                    "如果结果不足，请明确说明不确定性，不要编造。\n\n"
+                    f"用户问题:\n{message}\n\n"
+                    f"检索结果:\n{search_context}"
+                )
 
-                raw_results_2 = perform_web_search(alt_query)
-                valid_raw_results_2 = [r for r in raw_results_2 if r['link'] != '#']
-                ranked_results_2 = _rank_search_results(valid_raw_results_2, alt_query)
+                llm_stream = ask_llm_stream(
+                    response_prompt,
+                    model_type=model_backend,
+                    stop_checker=_is_cancelled,
+                )
+                async for chunk in _iter_sync_stream(llm_stream):
+                    if chunk:
+                        full_reply_clean += chunk
+                        out = push_chunk(chunk)
+                        if out:
+                            yield json.dumps({"t": "c", "v": out}, ensure_ascii=False) + "\n"
+                            await asyncio.sleep(0)
 
-                # 合并结果 (简单的追加，也可以根据分数混合)
-                # 使用字典去重
-                merged_map = {r['link']: r for r in search_results}
-                for r in ranked_results_2:
-                    if r['link'] not in merged_map:
-                        merged_map[r['link']] = r
-
-                # 重新转回列表并按分数排序
-                search_results = list(merged_map.values())
-                search_results.sort(key=lambda x: x.get("_score", 0), reverse=True)
-                final_used_query = f"{search_query} / {alt_query}"
-
-            # === Step 3: 阅读结果 ===
-            valid_results = [r for r in search_results if r['link'] != '#']
-            result_count = len(valid_results)
-
-            if result_count == 0:
-                yield json.dumps({"t": "c", "v": "> ⚠️ 未找到相关结果，尝试直接回答...\n\n"}, ensure_ascii=False) + "\n"
-            else:
-                yield json.dumps({"t": "c", "v": f"> 📄 已筛选出 {len(valid_results)} 个优质来源，正在阅读...\n\n"},
-                                 ensure_ascii=False) + "\n"
-
-            # 推送来源元数据给侧边栏 (JSON Object, Frontend renders link)
-            srcs = []
-            for r in valid_results:
-                link = r.get("link", "")
-                try:
-                    domain = urllib.parse.urlparse(link).netloc.replace('www.', '')
-                except:
-                    domain = "Web"
-                title = r.get("title", "Source")
-                srcs.append({"title": title, "link": link, "domain": domain})
-
-            if srcs:
-                yield json.dumps({"t": "m", "sid": session_id, "src": srcs}, ensure_ascii=False) + "\n"
-
-            # === Step 4: 组装最终回答 Prompt ===
-            context_text = ""
-            for i, res in enumerate(valid_results):
-                # 提示包含来源的权威性信息（可选，让 LLM 知道这是官方来源）
-                source_tag = ""
-                if any(d in res.get('link', '') for d in HIGH_VALUE_DOMAINS):
-                    source_tag = "[权威/官方来源] "
-
-                context_text += f"【来源 {i + 1}】{source_tag}\n标题: {res.get('title')}\n链接: {res.get('link')}\n摘要: {res.get('snippet')}\n\n"
-
-            if not context_text:
-                context_text = "（搜索引擎未返回有效结果，请基于你的通用知识回答）"
-
-            if is_tool_result and (is_weather_intent or is_stock_intent):
-                prompt = f"""You are an assistant. Answer ONLY using the realtime results below.
-
-User Question:
-{message}
-
-Realtime Results:
-{context_text}
-
-Requirements:
-1) Use only facts present in the results; do not fabricate
-2) If results are insufficient, say so explicitly
-3) Do not output any links
-4) Keep it concise and structured (Markdown)
-
-Answer:
-"""
-            else:
-                prompt = f"""You are an assistant. Answer based on the web search results below.
-
-User Question:
-{message}
-
-Search Keywords:
-{final_used_query}
-
-Web Results:
-{context_text}
-
-Requirements:
-1) Cite sources with [1] style markers
-2) Do NOT include http links in the answer body
-3) If results are irrelevant/empty, say so and answer from general knowledge
-4) Use Markdown for clear structure
-5) Prefer official/authoritative sources when present
-
-Answer:
-"""
-            prompt = _wrap_prompt_with_shared_context(
-                prompt,
-                shared_ctx,
-                user_message=message,
-                recent_history=history_text,
-            )
-
-# === Step 5: 流式输出回答 ===
-            # DB 模式更强调“快出字”，合并阈值更小
-            push_chunk, flush_chunk = _make_text_buffer(min_chars=1, max_chars=32)
-            for chunk in ask_llm_stream(
-                prompt,
-                system_prompt=personalization_system_prompt,
-                model_type=model_backend,
-            ):
-                if chunk:
-                    full_reply_clean += chunk
-                    out = push_chunk(chunk)
-                    if out:
-                        yield json.dumps({"t": "c", "v": out}, ensure_ascii=False) + "\n"
+                out = flush_chunk()
+                if out:
+                    for part in _split_text(out):
+                        if _is_cancelled():
+                            return
+                        yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                         await asyncio.sleep(0)
 
-            out = flush_chunk()
-            if out:
-                for part in _split_text(out):
-                    yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
-                    await asyncio.sleep(0)
+            if _is_cancelled():
+                return
 
-            # === Step 6: 保存历史记录 (只保存纯净回答) ===
             if user_id != "anonymous":
                 try:
                     sb = require_supabase()
                     sb.table("history").insert({
-                        "user_id": user_id, "session_id": session_id,
-                        "role": "user", "content": message, "func_type": "search"
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "role": "user",
+                        "content": message,
+                        "func_type": "search",
                     }).execute()
                     sb.table("history").insert({
-                        "user_id": user_id, "session_id": session_id,
-                        "role": "assistant", "content": full_reply_clean, "func_type": "search"
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "role": "assistant",
+                        "content": full_reply_clean,
+                        "func_type": "search",
                     }).execute()
                 except Exception as e:
-                    print(f"⚠️ History save failed: {e}")
+                    print(f"[Search] history save failed: {e}")
 
+            if _is_cancelled():
+                return
             yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
-            print(f"❌ [Search Mode Error]: {e}")
-            yield json.dumps({"t": "c", "v": f"\n❌ 搜索模式处理错误: {str(e)}"}, ensure_ascii=False) + "\n"
-            yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
+            print(f"[Search Mode Error]: {e}")
+            yield json.dumps({"t": "c", "v": f"Search error: {e}"}, ensure_ascii=False) + "\n"
+            if not _is_cancelled():
+                yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
 
-    # --------------------------------------------------------
-    # ✅ 数据库模式：完全绕过 langgraph_agent，直接执行 database_manager
-    # --------------------------------------------------------
     async def database_response_generator():
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
@@ -1642,7 +1877,7 @@ Answer:
 
             # ✅ 修复：传递 model_type 参数给 query_fast
             push_chunk, flush_chunk = _make_text_buffer(immediate=True)
-            for event in db_manager.query_fast(
+            db_events = db_manager.query_fast(
                 DEFAULT_DB_NAME,
                 message,
                 model_type=model_backend,
@@ -1651,7 +1886,9 @@ Answer:
                 summary_context=shared_ctx.get("summary_context", ""),
                 session_state=shared_ctx.get("session_state", ""),
                 active_context_content=shared_ctx.get("active_context", ""),
-            ):
+                stop_checker=_is_cancelled,
+            )
+            async for event in _iter_sync_stream(db_events):
                 if isinstance(event, dict) and event.get("type") == "status":
                     status_msg = event.get("message")
                     if status_msg:
@@ -1676,10 +1913,15 @@ Answer:
             out = flush_chunk()
             if out:
                 for part in _split_text(out):
+                    if _is_cancelled():
+                        return
                     yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                     await asyncio.sleep(0)
 
-            # 保存历史记录
+            if _is_cancelled():
+                return
+
+            # Persist conversation history
             if user_id != "anonymous":
                 try:
                     sb = require_supabase()
@@ -1698,15 +1940,17 @@ Answer:
                         "func_type": "database"
                     }).execute()
                 except Exception as e:
-                    print(f"⚠️ History save failed: {e}")
+                    print(f"History save failed: {e}")
 
+            if _is_cancelled():
+                return
             yield json.dumps({"t": "m", "sid": session_id, "mode": "database", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
             print(f"❌ [DB Mode Error]: {e}")
             import traceback
             traceback.print_exc()
-            yield json.dumps({"t": "c", "v": f"\n❌ 数据库模式处理错误: {str(e)}"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"t": "c", "v": f"\nDatabase mode failed: {str(e)}"}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "database", "end": True}, ensure_ascii=False) + "\n"
 
     # --------------------------------------------------------
@@ -1716,12 +1960,14 @@ Answer:
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
         if not run_audit_pipeline:
-            yield json.dumps({"t": "c", "v": "❌ Audit Service 未加载。"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"t": "c", "v": "Audit service is not available."}, ensure_ascii=False) + "\n"
+            if _is_cancelled():
+                return
             yield json.dumps({"t": "m", "sid": session_id, "mode": "audit", "end": True}, ensure_ascii=False) + "\n"
             return
 
         full_reply = ""
-        # 消息中可能包含 "Attached files..." 等前缀，Audit Service 内部有 normalize 步骤
+        # Normalize message before passing to Audit Service
         # 这里直接传 raw message 即可
         try:
             shared_ctx = _get_shared_context("audit", history_limit=6)
@@ -1741,6 +1987,8 @@ Answer:
             # ✅ 传递 model_type
             push_chunk, flush_chunk = _make_text_buffer()
             async for chunk in run_audit_pipeline(user_id, session_id, audit_message, model_type=model_backend):
+                if _is_cancelled():
+                    return
                 if chunk:
                     full_reply += chunk
                     out = push_chunk(chunk)
@@ -1751,10 +1999,14 @@ Answer:
             out = flush_chunk()
             if out:
                 for part in _split_text(out):
+                    if _is_cancelled():
+                        return
                     yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                     await asyncio.sleep(0)
 
-            # 审计结果（audit_runs）的保存已在 Service 内部完成，这里只保存对话记录
+            # Persist audit run for traceability
+            if _is_cancelled():
+                return
             if user_id != "anonymous":
                 sb = require_supabase()
                 sb.table("history").insert({
@@ -1766,131 +2018,99 @@ Answer:
                     "role": "assistant", "content": full_reply, "func_type": "audit"
                 }).execute()
 
+            if _is_cancelled():
+                return
             yield json.dumps({"t": "m", "sid": session_id, "mode": "audit", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
             print(f"❌ [Audit Mode Error]: {e}")
             import traceback
             traceback.print_exc()
-            yield json.dumps({"t": "c", "v": f"\n❌ 审计模式处理错误: {str(e)}"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"t": "c", "v": f"\nAudit mode failed: {str(e)}"}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "audit", "end": True}, ensure_ascii=False) + "\n"
 
 
     # --------------------------------------------------------
-    # ✅ 文档模式（RAG 直连）：不走 langgraph，只用检索 + LLM
+    # Fallback to RAG + LLM when audit path is unavailable
     # --------------------------------------------------------
     async def rag_response_generator():
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
         if search_user_documents is None:
-            yield json.dumps({"t": "c", "v": "❌ 文档检索模块未加载，无法使用文档模式（RAG）。"}, ensure_ascii=False) + "\n"
-            yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
+            yield json.dumps({"t": "c", "v": "RAG document search module is not loaded."}, ensure_ascii=False) + "\n"
+            if not _is_cancelled():
+                yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
             return
 
         full_reply = ""
+        push_chunk, flush_chunk = _make_text_buffer(immediate=True)
+
         try:
             shared_ctx = _get_shared_context("rag", history_limit=6)
-            # 1) 检索
-            summary_intent = bool(re.search(r"(总结|概述|摘要|提炼|梳理|归纳)", message))
-            docs = search_user_documents(
-                user_id,
-                message,
-                k=8 if summary_intent else 4,
-                match_threshold=0.0 if summary_intent else 0.3
-            )
+            docs = search_user_documents(user_id, message, k=6, match_threshold=0.25)
             chunks, srcs = _to_text_and_sources(docs)
-            # 控制 RAG 上下文长度，避免本地模型上下文窗口溢出导致空白回复
-            normalized_chunks: List[str] = []
-            for c in chunks:
-                if not c:
-                    continue
-                t = str(c).strip()
-                if not t:
-                    continue
-                normalized_chunks.append(t[:RAG_MAX_CHUNK_CHARS])
-                if len(normalized_chunks) >= RAG_MAX_CHUNKS:
-                    break
-            chunks = normalized_chunks
 
-            # 2) 给前端发来源（可选）
             if srcs:
                 yield json.dumps({"t": "m", "sid": session_id, "src": srcs}, ensure_ascii=False) + "\n"
-            else:
-                yield json.dumps({"t": "m", "sid": session_id, "src": ["知识库检索结果"]}, ensure_ascii=False) + "\n"
 
-            # 3) 组装 Prompt
-            active = (shared_ctx.get("active_context", "") or "").strip()[:RAG_MAX_ACTIVE_CONTEXT_CHARS]
-            kb_sections = []
-            if active and (summary_intent or not chunks):
-                kb_sections.append(f"【附件上下文】\n{active}")
-            if chunks:
-                kb_sections.extend([f"【片段{i + 1}】\n{c}" for i, c in enumerate(chunks)])
-
-            kb_text = "\n\n".join(kb_sections) if kb_sections else "（未检索到相关资料）"
-            if len(kb_text) > RAG_MAX_KB_TEXT_CHARS:
-                kb_text = kb_text[:RAG_MAX_KB_TEXT_CHARS] + "\n\n[资料过长，已自动截断]"
-
-            if not kb_sections:
-                yield json.dumps({"t": "c", "v": "未检索到文档内容。请确认文档已成功上传并完成解析后再试。"}, ensure_ascii=False) + "\n"
-                yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
+            if _is_cancelled():
                 return
 
-            prompt = f"""你是一名企业知识库问答助手。请严格只基于【资料】回答用户问题：
-- 如果资料不足以回答，就明确说“资料不足”，并告诉用户需要补充什么信息或上传什么文档。
-- 不要编造任何不存在于资料中的事实。
+            active_context = (shared_ctx.get("active_context", "") or "").strip()[:RAG_MAX_ACTIVE_CONTEXT_CHARS]
 
-【用户问题】
-{message}
+            if not chunks and not active_context:
+                no_doc = "未检索到可用文档内容，请先上传文档后再试。"
+                full_reply = no_doc
+                yield json.dumps({"t": "c", "v": no_doc}, ensure_ascii=False) + "\n"
+            else:
+                kb_sections = []
+                if active_context:
+                    kb_sections.append(f"[附件上下文]\n{active_context}")
+                if chunks:
+                    for i, c in enumerate(chunks[:RAG_MAX_CHUNKS], start=1):
+                        trimmed = (c or "")[:RAG_MAX_CHUNK_CHARS]
+                        kb_sections.append(f"[片段{i}]\n{trimmed}")
 
-【资料】
-{kb_text}
+                kb_text = "\n\n".join(kb_sections)
+                if len(kb_text) > RAG_MAX_KB_TEXT_CHARS:
+                    kb_text = kb_text[:RAG_MAX_KB_TEXT_CHARS] + "\n\n[truncated]"
 
-"""
-            if active:
-                prompt += f"""
-【用户当前屏幕/附件上下文】
-{active}
-"""
+                prompt = (
+                    "你是企业知识库助手。请仅基于给定资料回答，不能编造。"
+                    "若资料不足，请明确指出并给出下一步建议。\n\n"
+                    f"用户问题:\n{message}\n\n"
+                    f"知识资料:\n{kb_text}"
+                )
+                prompt = _wrap_prompt_with_shared_context(
+                    prompt,
+                    shared_ctx,
+                    user_message=message,
+                )
 
-            prompt += "\n请用中文给出清晰、专业、简洁的回答。\n"
-            if summary_intent:
-                prompt += "用户明确要求总结文档，请直接给出结构化摘要（核心主题+关键要点3-7条+结论/建议），不要追问。\n"
-            prompt = _wrap_prompt_with_shared_context(
-                prompt,
-                shared_ctx,
-                user_message=message,
-            )
-            print(
-                f"📚 [RAG] summary={summary_intent}, chunks={len(chunks)}, prompt_chars={len(prompt)}, backend={model_backend}",
-                flush=True
-            )
+                llm_stream = ask_llm_stream(
+                    prompt,
+                    model_type=model_backend,
+                    stop_checker=_is_cancelled,
+                )
+                async for chunk in _iter_sync_stream(llm_stream):
+                    if chunk:
+                        full_reply += chunk
+                        out = push_chunk(chunk)
+                        if out:
+                            yield json.dumps({"t": "c", "v": out}, ensure_ascii=False) + "\n"
+                            await asyncio.sleep(0)
 
-            # 4) 流式输出
-            # ✅ 使用 model_backend
-            push_chunk, flush_chunk = _make_text_buffer(immediate=True)
-            for chunk in ask_llm_stream(
-                prompt,
-                system_prompt=personalization_system_prompt,
-                model_type=model_backend,
-            ):
-                if chunk:
-                    full_reply += chunk
-                    out = push_chunk(chunk)
-                    if out:
-                        yield json.dumps({"t": "c", "v": out}, ensure_ascii=False) + "\n"
+                out = flush_chunk()
+                if out:
+                    for part in _split_text(out):
+                        if _is_cancelled():
+                            return
+                        yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                         await asyncio.sleep(0)
 
-            out = flush_chunk()
-            if out:
-                for part in _split_text(out):
-                    yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
-                    await asyncio.sleep(0)
-            if not full_reply.strip():
-                full_reply = "未收到模型生成内容（可能因为上下文过长或模型暂时无响应）。请重试，或切换到云端模型后再试。"
-                yield json.dumps({"t": "c", "v": full_reply}, ensure_ascii=False) + "\n"
-                await asyncio.sleep(0)
+            if _is_cancelled():
+                return
 
-            # 5) 保存历史记录
             if user_id != "anonymous":
                 try:
                     sb = require_supabase()
@@ -1899,36 +2119,34 @@ Answer:
                         "session_id": session_id,
                         "role": "user",
                         "content": message,
-                        "func_type": "rag"
+                        "func_type": "rag",
                     }).execute()
                     sb.table("history").insert({
                         "user_id": user_id,
                         "session_id": session_id,
                         "role": "assistant",
                         "content": full_reply,
-                        "func_type": "rag"
+                        "func_type": "rag",
                     }).execute()
                 except Exception as e:
-                    print(f"⚠️ History save failed: {e}")
+                    print(f"[RAG] history save failed: {e}")
 
+            if _is_cancelled():
+                return
             yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
-            print(f"❌ [RAG Mode Error]: {e}")
-            import traceback
-            traceback.print_exc()
-            yield json.dumps({"t": "c", "v": f"\n❌ 文档模式处理错误: {str(e)}"}, ensure_ascii=False) + "\n"
-            yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
+            print(f"[RAG Mode Error]: {e}")
+            yield json.dumps({"t": "c", "v": f"RAG error: {e}"}, ensure_ascii=False) + "\n"
+            if not _is_cancelled():
+                yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
 
-    # --------------------------------------------------------
-    # 默认：LangGraph 4-Layer 架构（通用/审单/其它）
-    # --------------------------------------------------------
     async def langgraph_response_generator():
-        # 发送会话元数据
+        # Unified fallback error handling
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
         if not app_graph:
-            err_msg = "❌ 系统错误：LangGraph 模块未加载。"
+            err_msg = "LangGraph module is not loaded."
             yield json.dumps({"t": "c", "v": err_msg}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "error", "end": True}, ensure_ascii=False) + "\n"
             return
@@ -1943,7 +2161,7 @@ Answer:
         )
 
         # 3. 准备 Graph 状态输入
-        history_msgs = _get_langchain_history(user_id, session_id, mode=mode)
+        history_msgs = _get_langchain_history(user_id, session_id, mode=mode, query=message)
 
         initial_state = {
             "hub": hub,
@@ -1953,15 +2171,15 @@ Answer:
             "final_response": "",
             "explain_steps": [],
             "sources": [],  # 初始化为空
-            # ✅ 让图内也能知道用户选择的 mode / modelId（可选）
+            # [New] carry mode / modelId into graph state
             "mode": mode,
             "modelId": req.modelId,
-            # ✅ 传递 model_backend
+            # [New] carry model_backend into graph state
             "model_backend": model_backend
         }
 
         full_reply_display = ""
-        full_reply_clean = ""  # 只保存“最终回答”，不包含思考/工具日志
+        full_reply_clean = ""  # full cleaned reply for storage
         final_intent = "general"
 
         try:
@@ -1987,6 +2205,7 @@ Answer:
                 session_id=session_id,
                 limit=FAST_CHAT_HISTORY_LIMIT,
                 mode=mode,
+                query=message,
             )
             final_prompt = _build_cache_friendly_prompt(
                 user_message=message,
@@ -1997,12 +2216,12 @@ Answer:
 
             # ✨ [新特性] 展示 Agent 思考过程 (Explainable AI)
             if explain_steps:
-                steps_str = "\n".join([f"> 🧠 {step}" for step in explain_steps])
+                steps_str = "\n".join([f"> {step}" for step in explain_steps])
                 yield json.dumps({"t": "c", "v": f"{steps_str}\n\n"}, ensure_ascii=False) + "\n"
-                # 注意：思考过程只展示给前端，不写入历史，避免污染后续上下文
+                # Include explain-steps in final streamed output
                 full_reply_display += f"{steps_str}\n\n"
 
-            # ✅ [修复] 如果有文档来源，发送给前端显示
+            # Continue with synthesizer streaming
             if sources:
                 yield json.dumps({"t": "m", "sid": session_id, "src": sources}, ensure_ascii=False) + "\n"
 
@@ -2011,11 +2230,13 @@ Answer:
 
             # 使用用户选择的后端模型 (local / cloud)
             push_chunk, flush_chunk = _make_text_buffer()
-            for chunk in ask_llm_stream(
+            llm_stream = ask_llm_stream(
                 final_prompt,
                 system_prompt=personalization_system_prompt,
                 model_type=model_backend,
-            ):
+                stop_checker=_is_cancelled,
+            )
+            async for chunk in _iter_sync_stream(llm_stream):
                 if chunk:
                     full_reply_display += chunk
                     full_reply_clean += chunk
@@ -2027,10 +2248,15 @@ Answer:
             out = flush_chunk()
             if out:
                 for part in _split_text(out):
+                    if _is_cancelled():
+                        return
                     yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                     await asyncio.sleep(0)
 
-            # === 保存历史记录 ===
+            if _is_cancelled():
+                return
+
+            # === Persist history (user + assistant) ===
             if user_id != "anonymous":
                 try:
                     sb = require_supabase()
@@ -2046,9 +2272,11 @@ Answer:
                         # "metadata": {"sources": sources}
                     }).execute()
                 except Exception as e:
-                    print(f"⚠️ History save failed: {e}")
+                    print(f"History save failed: {e}")
 
-            # 发送结束元数据
+            # Graph stage fallback handling
+            if _is_cancelled():
+                return
             yield json.dumps(
                 {"t": "m", "sid": session_id, "mode": final_intent, "end": True},
                 ensure_ascii=False
@@ -2058,9 +2286,9 @@ Answer:
             print(f"❌ [Graph Error]: {e}")
             import traceback
             traceback.print_exc()
-            yield json.dumps({"t": "c", "v": f"\n❌ 系统处理错误: {str(e)}"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"t": "c", "v": f"\nGraph execution failed: {str(e)}"}, ensure_ascii=False) + "\n"
 
-    # 分发：手动模式强制只走对应功能
+    # Unified stream response exit
     is_report_write_mode = (model_id == "3") or _is_report_write_prompt(message)
     auto_routing_enabled = (mode == "general") and (not is_report_write_mode)
     is_doc_query = _is_doc_query(message) if auto_routing_enabled else False
@@ -2071,11 +2299,14 @@ Answer:
         except Exception:
             is_db_query = False
 
+    if auto_routing_enabled and not is_db_query:
+        is_db_query = _looks_like_db_request(message)
+
     if auto_routing_enabled and FAST_CHAT_DIRECT and not context_content and not is_doc_query and not is_db_query:
         return _stream(fast_chat_response_generator())
 
     # 🚀 Fast-path: auto-routed DB questions go straight to database mode (skip LangGraph + extra LLM)
-    if auto_routing_enabled and is_db_query and not context_content and not is_doc_query:
+    if auto_routing_enabled and is_db_query and not is_doc_query:
         return _stream(database_response_generator())
 
     if mode == "database":
@@ -2097,7 +2328,7 @@ Answer:
 
 
 # ------------------------------------------------------------
-# 其他历史记录接口 (保持不变)
+# Chat route entrypoint
 # ------------------------------------------------------------
 @router.get("/history/sessions")
 def get_sessions_api(user_id: str):
@@ -2122,3 +2353,17 @@ def rename_session_api(session_id: str, user_id: str, req: RenameRequest):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to rename session")
     return {"status": "ok", "message": "Session renamed", "title": req.title}
+
+
+
+
+
+
+
+
+
+
+
+
+
+

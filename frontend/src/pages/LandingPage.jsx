@@ -467,7 +467,7 @@ const LandingPage = ({ onOpenLogin }) => {
               </button>
             </div>
             <p className="text-sm md:text-base leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
-              这个小项目我的毕业小设计，肯定存在许多逻辑设计问题或bug，有的功能设计思路甚至都是我凭空想象出来的，如有建议请务必联系我，我会尽力吸纳改正的，等毕业答辩结束后我会将完整源码在github上公开，感谢使用！
+              这个小项目我的毕业小设计，肯定存在许多逻辑设计问题或bug，有的功能设计多有欠缺，如有建议请务必联系我，我会尽力吸纳改正的，等毕业答辩结束后我会将完整源码在github上公开，感谢使用！
             </p>
             <div className="mt-6 flex justify-end">
               <button

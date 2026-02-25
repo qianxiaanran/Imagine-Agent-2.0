@@ -41,6 +41,7 @@ const Reveal = ({ children, className = '', delay = 0 }) => {
   );
 };
 
+
 const capabilityModules = [
   {
     title: '对话与知识检索',

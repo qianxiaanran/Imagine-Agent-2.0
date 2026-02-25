@@ -1,7 +1,10 @@
-import os
+﻿import os
 import sys
+import json
+import threading
 from datetime import datetime
-from typing import Generator, Optional, Any
+from queue import Queue, Empty
+from typing import Generator, Optional, Any, Callable, List, Dict
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="replace")
@@ -33,7 +36,7 @@ except ImportError:
     try:
         from langchain.schema import HumanMessage, SystemMessage
     except ImportError:
-        # 最后的兜底
+        # Fallback import path for compatibility
         print("❌ [DeepSeek] 无法导入 HumanMessage/SystemMessage")
         HumanMessage = None
         SystemMessage = None
@@ -74,7 +77,7 @@ try:
             top_p=0.9,
             num_gpu=OLLAMA_NUM_GPU,
             # streaming=True, # langchain_ollama 部分版本可能不需要显式传此参数，视情况而定
-            # --- 🚀 性能优化参数 ---
+            # --- performance tuning options ---
             num_ctx=OLLAMA_NUM_CTX,
             keep_alive=OLLAMA_KEEP_ALIVE,
             num_predict=OLLAMA_NUM_PREDICT,
@@ -136,15 +139,11 @@ def get_llm_instance(model_type: str = "local", temperature: float = 0.7) -> Any
 
 
 def _build_messages(prompt: str, system_prompt: Optional[str] = None):
-    """
-    构建消息列表，自动注入当前时间
-    """
+    """Build prompt messages for chat models."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # 默认系统提示词（注入时间）
     base_sys = (
         f"Current System Time: {now}\n"
-        "你是企业智能助手。请专注完成用户任务，避免自我介绍或虚构身份设定。"
+        "You are an enterprise assistant. Focus on user tasks and avoid inventing identity details."
     )
 
     if system_prompt:
@@ -165,8 +164,8 @@ def _build_messages(prompt: str, system_prompt: Optional[str] = None):
 
 def _build_router_messages(prompt: str, system_prompt: Optional[str] = None):
     base_sys = system_prompt or (
-        "你是一个路由分类器，只负责输出严格 JSON。"
-        "不要解释，不要输出 Markdown。"
+        "You are a router classifier. Output strict JSON only. "
+        "Do not explain and do not output Markdown."
     )
     if not SystemMessage or not HumanMessage:
         return [
@@ -176,56 +175,205 @@ def _build_router_messages(prompt: str, system_prompt: Optional[str] = None):
     return [SystemMessage(content=base_sys), HumanMessage(content=prompt)]
 
 
+def _is_local_backend(model_type: str) -> bool:
+    mt = (model_type or "").strip().lower()
+    return mt in {"", "local", "ollama"}
+
+
+def _to_ollama_messages(messages: List[Any]) -> List[Dict[str, str]]:
+    converted: List[Dict[str, str]] = []
+    for msg in messages:
+        role = "user"
+        content = ""
+
+        if isinstance(msg, dict):
+            role = str(msg.get("role") or "user").strip().lower() or "user"
+            content = str(msg.get("content") or "")
+        else:
+            content = str(getattr(msg, "content", "") or "")
+            msg_type = str(getattr(msg, "type", "") or "").lower()
+            cls_name = msg.__class__.__name__.lower()
+            if msg_type == "system" or "system" in cls_name:
+                role = "system"
+            elif msg_type in {"ai", "assistant"} or "assistant" in cls_name or cls_name.startswith("ai"):
+                role = "assistant"
+            else:
+                role = "user"
+
+        if not content:
+            continue
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        converted.append({"role": role, "content": content})
+
+    if converted:
+        return converted
+    return [{"role": "user", "content": ""}]
+
+
+def _stream_local_ollama_http(
+    messages: List[Any],
+    stop_checker: Optional[Callable[[], bool]] = None,
+) -> Generator[str, None, None]:
+    try:
+        import requests
+    except Exception as e:
+        raise RuntimeError(f"requests not available: {e}")
+
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+    payload = {
+        "model": MODEL_NAME,
+        "messages": _to_ollama_messages(messages),
+        "stream": True,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "num_gpu": OLLAMA_NUM_GPU,
+            "num_ctx": OLLAMA_NUM_CTX,
+            "num_predict": OLLAMA_NUM_PREDICT,
+            "repeat_penalty": 1.1,
+        },
+    }
+
+    queue: Queue = Queue(maxsize=256)
+    stop_event = threading.Event()
+    response_ref: Dict[str, Any] = {"response": None}
+
+    def _close_response():
+        resp = response_ref.get("response")
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+    def _worker():
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=(8, 120)) as resp:
+                response_ref["response"] = resp
+                resp.raise_for_status()
+                for raw_line in resp.iter_lines(decode_unicode=True):
+                    if stop_event.is_set():
+                        break
+                    if not raw_line:
+                        continue
+                    try:
+                        event = json.loads(raw_line)
+                    except Exception:
+                        continue
+                    if event.get("error"):
+                        queue.put(("error", str(event.get("error"))))
+                        break
+
+                    chunk = (event.get("message") or {}).get("content") or ""
+                    if chunk:
+                        queue.put(("chunk", chunk))
+                    if event.get("done"):
+                        break
+        except Exception as e:
+            if not stop_event.is_set():
+                queue.put(("error", str(e)))
+        finally:
+            stop_event.set()
+            _close_response()
+            queue.put(("done", None))
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    try:
+        while True:
+            if stop_checker and stop_checker():
+                stop_event.set()
+                _close_response()
+                break
+            try:
+                item_type, payload_item = queue.get(timeout=0.1)
+            except Empty:
+                continue
+
+            if item_type == "chunk":
+                yield payload_item
+            elif item_type == "error":
+                raise RuntimeError(payload_item)
+            elif item_type == "done":
+                break
+    finally:
+        stop_event.set()
+        _close_response()
+        worker.join(timeout=1.0)
+
+
 # =================================================
 # ✅ 新接口：流式调用 (供 Chat Router 使用)
 # =================================================
-def ask_llm_stream(prompt: str, system_prompt: Optional[str] = None, model_type: str = "local") -> Generator[
-    str, None, None]:
-    """
-    流式调用接口
-    :param prompt: 用户输入
-    :param system_prompt: 系统提示词
-    :param model_type: 'local' (Qwen/Ollama) 或 'cloud' (DeepSeek API)
-    """
-    target_llm = None
-
-    try:
-        # DeepSeek V3 建议稍高温度以获得更好性能
-        temp = 1.3 if (model_type == "cloud" or model_type == "deepseek") else 0.3
-        target_llm = get_llm_instance(model_type, temperature=temp)
-    except Exception as e:
-        print(f"❌ [LLM Init Error]: {e}")
-        yield f"⚠️ 模型初始化失败 ({model_type}): {str(e)}"
-        return
-
+def ask_llm_stream(
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    model_type: str = "local",
+    stop_checker: Optional[Callable[[], bool]] = None,
+) -> Generator[str, None, None]:
+    """Stream text chunks from selected model backend."""
     if not prompt or not prompt.strip():
-        yield "内容不能为空"
+        yield "Input message is empty."
         return
 
     messages = _build_messages(prompt, system_prompt)
 
+    if _is_local_backend(model_type):
+        try:
+            for piece in _stream_local_ollama_http(messages, stop_checker=stop_checker):
+                if stop_checker and stop_checker():
+                    break
+                if piece:
+                    yield piece
+            return
+        except Exception as e:
+            print(f"[LLM Stream] local HTTP stream failed, fallback to LangChain stream: {e}")
+
+    target_llm = None
     try:
-        # 使用 LangChain 的 stream 方法
-        for chunk in target_llm.stream(messages):
-            if hasattr(chunk, "content"):
-                yield chunk.content
-            elif isinstance(chunk, str):
-                yield chunk
+        temp = 1.3 if (model_type == "cloud" or model_type == "deepseek") else 0.3
+        target_llm = get_llm_instance(model_type, temperature=temp)
     except Exception as e:
-        print(f"❌ [LLM Stream Error] ({model_type}): {e}")
-        yield f"⚠️ 模型调用出错 ({model_type})，请检查服务状态。\n错误信息: {str(e)}"
+        print(f"[LLM Init Error] {model_type}: {e}")
+        yield f"Model init failed ({model_type}): {e}"
+        return
 
+    stream_iter = None
+    try:
+        stream_iter = target_llm.stream(messages)
+        for chunk in stream_iter:
+            if stop_checker and stop_checker():
+                break
+            if hasattr(chunk, "content"):
+                content = chunk.content
+            elif isinstance(chunk, str):
+                content = chunk
+            else:
+                content = ""
+            if content:
+                yield content
+    except Exception as e:
+        print(f"[LLM Stream Error] ({model_type}): {e}")
+        yield f"Model stream failed ({model_type}): {e}"
+    finally:
+        if stream_iter is not None:
+            close_fn = getattr(stream_iter, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
 
-# =================================================
-# 🔄 兼容性接口 (供老代码使用)
-# =================================================
 
 def ask_llm(prompt: str, model_type: str = "local") -> str:
     """
-    同步调用接口
+    Synchronous invoke helper.
     """
     try:
-        # 复用 get_llm_instance
+        # Get model instance via get_llm_instance
         target_llm = get_llm_instance(model_type)
     except Exception as e:
         return f"❌ 系统错误：LLM 模型未初始化 ({e})"
@@ -236,10 +384,10 @@ def ask_llm(prompt: str, model_type: str = "local") -> str:
         response = target_llm.invoke(messages)
         return response.content
     except Exception as e:
-        return f"模型调用失败：{str(e)}"
+        return f"Model invoke failed: {str(e)}"
 
 
-# 导出默认本地实例，供旧代码兼容 (但建议尽量改用 get_llm_instance)
+# Export default instance for legacy callers (prefer get_llm_instance)
 def ask_router(prompt: str, system_prompt: Optional[str] = None) -> str:
     """
     Local small-model router for intent classification.
@@ -277,3 +425,4 @@ def warmup_models():
         print(f" [Warmup] Router warmup failed: {e}")
 
 llm = llm_local
+

@@ -118,7 +118,31 @@ const MODEL_OPTIONS = [
   { id: 4, name: "智能审单", icon: ClipboardCheck }
 ];
 
+const CONVERSATION_PATH_PREFIX = '/c/';
+
 const isLikelyMarkdown = (text = '') => USER_MARKDOWN_HINT_RE.test(text);
+
+const normalizePathname = (pathname = '/') => {
+    const normalized = String(pathname || '/').replace(/\/+$/, '');
+    return normalized || '/';
+};
+
+const extractConversationSessionId = (pathname = '') => {
+    const normalizedPath = normalizePathname(pathname);
+    if (!normalizedPath.startsWith(CONVERSATION_PATH_PREFIX)) return null;
+    const encodedSessionId = normalizedPath.slice(CONVERSATION_PATH_PREFIX.length).split('/')[0];
+    if (!encodedSessionId) return null;
+    try {
+        return decodeURIComponent(encodedSessionId);
+    } catch {
+        return encodedSessionId;
+    }
+};
+
+const buildConversationPath = (sessionId) => {
+    if (!sessionId) return '/';
+    return `${CONVERSATION_PATH_PREFIX}${encodeURIComponent(String(sessionId))}`;
+};
 
 const splitUserMessageContent = (raw = '') => {
     const lines = raw.split('\n');
@@ -459,6 +483,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const trackedBlobUrlsRef = useRef(new Set());
   const sessionClickHandlerRef = useRef(null);
   const newChatHandlerRef = useRef(null);
+  const hasHandledInitialRouteRef = useRef(false);
+  const isApplyingRouteSessionRef = useRef(false);
 
 
   const dropdownRef = useRef(null);
@@ -1985,6 +2011,54 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   sessionClickHandlerRef.current = handleSessionClick;
   newChatHandlerRef.current = handleNewChat;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (hasHandledInitialRouteRef.current) return;
+    if (isProfileLoading || isSessionsLoading) return;
+    const uid = userProfile?.id;
+    if (!uid || uid === 'anonymous') return;
+
+    hasHandledInitialRouteRef.current = true;
+    const routeSessionId = extractConversationSessionId(window.location.pathname);
+    if (!routeSessionId || routeSessionId === currentSessionId) return;
+
+    isApplyingRouteSessionRef.current = true;
+    Promise.resolve(sessionClickHandlerRef.current?.(routeSessionId)).finally(() => {
+      isApplyingRouteSessionRef.current = false;
+    });
+  }, [isProfileLoading, isSessionsLoading, userProfile?.id, currentSessionId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!hasHandledInitialRouteRef.current) return;
+    if (isApplyingRouteSessionRef.current) return;
+    const nextPath = buildConversationPath(currentSessionId);
+    const currentPath = normalizePathname(window.location.pathname);
+    if (currentPath === nextPath) return;
+    window.history.pushState(window.history.state, '', nextPath);
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handlePopState = () => {
+      const routeSessionId = extractConversationSessionId(window.location.pathname);
+      if (routeSessionId) {
+        if (routeSessionId === currentSessionId) return;
+        isApplyingRouteSessionRef.current = true;
+        Promise.resolve(sessionClickHandlerRef.current?.(routeSessionId)).finally(() => {
+          isApplyingRouteSessionRef.current = false;
+        });
+        return;
+      }
+      if (currentSessionId) {
+        newChatHandlerRef.current?.();
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [currentSessionId]);
 
   const models = useMemo(() => {
     if (appSettings?.showAdvancedModels === false) {

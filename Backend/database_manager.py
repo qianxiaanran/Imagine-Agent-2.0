@@ -7,7 +7,7 @@ import urllib.parse
 import logging
 from collections import OrderedDict
 from datetime import datetime
-from typing import Any, Dict, Generator, Optional, Union
+from typing import Any, Dict, Generator, Optional, Union, Callable
 
 # ✅ [修复] 兼容 LangChain 新旧版本的导入路径
 try:
@@ -25,20 +25,21 @@ from deepseek_llm import get_llm_instance
 # ============================================================
 # 🔌 数据库连接配置 (Supabase PostgreSQL)
 # ============================================================
-DB_HOST = os.getenv("SUPABASE_DB_HOST", "db.gjbmkzduwtcfhmivvklj.supabase.co")
+DB_HOST = os.getenv("SUPABASE_DB_HOST", "127.0.0.1")
 DB_USER = os.getenv("SUPABASE_DB_USER", "postgres")
-DB_PORT = os.getenv("SUPABASE_DB_PORT", "5432")
+DB_PORT = os.getenv("SUPABASE_DB_PORT", "54322")
 DB_NAME = os.getenv("SUPABASE_DB_NAME", "postgres")
-DB_PASSWORD_RAW = os.getenv("SUPABASE_DB_PASSWORD", "12010420031023211X")
+DB_PASSWORD_RAW = os.getenv("SUPABASE_DB_PASSWORD", "postgres")
+DB_SSLMODE = os.getenv("SUPABASE_DB_SSLMODE", "disable")
 
 encoded_password = urllib.parse.quote_plus(DB_PASSWORD_RAW)
 DB_CONNECTION_STRING = (
     f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    f"?sslmode=require&connect_timeout=15"
+    f"?sslmode={DB_SSLMODE}&connect_timeout=15"
 )
 
 # ============================================================
-# 🛡️ 严格表名白名单定义
+# Define strict table whitelist
 # ============================================================
 ALLOWED_TABLES = {
     "company_info", "departments", "roles", "employees", "customers",
@@ -113,7 +114,7 @@ DB_SUMMARY_CACHE_TTL = int(os.getenv("DB_SUMMARY_CACHE_TTL", "300"))
 # 🧭 DDL 与 规范定义 (已根据 SQL 脚本更新)
 # ============================================================
 ENTERPRISE_DB_SPEC = r"""
-================【企业数据库结构规范（严格白名单）】================
+================【企业数据库结构规范（严格白名单）?===============
 ⚠️ 权限警告：只允许查询以下 11 张表。禁止查询任何系统表（如 pg_table）或臆造表。
 
 1) company_info (公司信息): id, company_name, registration_code, address, contact_phone, business_scope, established_date
@@ -129,7 +130,7 @@ ENTERPRISE_DB_SPEC = r"""
 11) purchases (采购): purchase_id, purchase_no, purchase_date, supp_id, emp_id, total_amount, status
 
 
-----------------【核心关联逻辑】----------------
+---------------- Core Relationships ---------------
 - employees.dept_id = departments.dept_id
 - orders.cust_id = customers.cust_id
 - orders.emp_id = employees.emp_id
@@ -140,7 +141,7 @@ ENTERPRISE_DB_SPEC = r"""
 """
 
 SQL_GENERATION_RULES = r"""
-================【SQL 生成与输出规范】================
+================ SQL Generation Rules ================
 1) 仅输出 SQL 本身，不要解释。必须使用 PostgreSQL 语法。
 2) 禁止执行除了 SELECT 以外的任何操作。
 3) 禁止查询上述 11 张表以外的任何表。
@@ -149,7 +150,7 @@ SQL_GENERATION_RULES = r"""
 """
 
 # ============================================================
-# 🛡️ 安全与规范校验工具
+# Safety and policy validators
 # ============================================================
 _ONLY_SELECT_PATTERN = re.compile(r"^\s*(WITH\b[\s\S]+?\bSELECT\b|SELECT\b)", re.IGNORECASE)
 _FORBIDDEN_PATTERN = re.compile(
@@ -179,7 +180,7 @@ def _is_safe_readonly_sql(sql: str) -> bool:
 
 def _validate_table_whitelist(sql: str) -> tuple[bool, str]:
     """
-    使用正则表达式提取 SQL 中所有的表名，并与白名单比对。
+    Extract all table names from SQL and compare against the whitelist.
     """
     # 匹配 FROM 或 JOIN 后面的单词，尝试识别表名
     # 逻辑：找 FROM/JOIN 后面跟着的单词，排除子查询 (SELECT ...)
@@ -268,7 +269,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
         tables = TABLE_ORDER
 
     lines = [
-        "================【Enterprise DB Schema (Whitelisted)】================",
+        "================?Enterprise DB Schema (Whitelisted)?===============",
         "Only use the tables listed below. Do NOT access system tables.",
     ]
 
@@ -282,7 +283,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
     ]
     if relations:
         lines.append("")
-        lines.append("----------------【Relationships】----------------")
+        lines.append("----------------?Relationships?---------------")
         for rel in relations:
             lines.append(f"- {rel}")
 
@@ -390,7 +391,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
         tables = TABLE_ORDER
 
     lines = [
-        "================【Enterprise DB Schema (Whitelisted)】================",
+        "================?Enterprise DB Schema (Whitelisted)?===============",
         "Only use the tables listed below. Do NOT access system tables.",
     ]
 
@@ -404,7 +405,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
     ]
     if relations:
         lines.append("")
-        lines.append("----------------【Relationships】----------------")
+        lines.append("----------------?Relationships?---------------")
         for rel in relations:
             lines.append(f"- {rel}")
 
@@ -483,14 +484,24 @@ class DatabaseManager:
         summary_context: str = "",
         session_state: str = "",
         active_context_content: str = "",
+        stop_checker: Optional[Callable[[], bool]] = None,
     ) -> Generator[Union[str, Dict[str, Any]], None, None]:
         """
-        ✅ 只查询一次版本：
-        - 只生成一次 SQL
-        - 只执行一次 SQL
-        - 不重试、不二次查询
+        One-shot execution policy:
+        - Generate SQL only once
+        - Execute SQL only once
+        - 不重试不二次查询
         - 支持 model_type (local/cloud)
         """
+        def _should_stop() -> bool:
+            try:
+                return bool(stop_checker and stop_checker())
+            except Exception:
+                return False
+
+        if _should_stop():
+            return
+
         if not self.db:
             self._init_db_connection()
             if not self.db:
@@ -498,6 +509,8 @@ class DatabaseManager:
                 return
 
         # 获取对应的 LLM 实例
+        if _should_stop():
+            return
         try:
             target_llm = get_llm_instance(model_type)
         except Exception as e:
@@ -525,14 +538,16 @@ class DatabaseManager:
         context_block = "\n\n".join(context_sections).strip()
 
         sql_gen_prompt = f"""
-你是一名数据分析专家。请根据以下规范将问题转换为 SQL。
-【当前时间】{now}
+你是一名数据分析助手，请将用户问题转换为 PostgreSQL SQL。
+【当前时间】
+{now}
 【会话上下文】
 {context_block or "（无）"}
-【用户问题】"{user_query}"
+【用户问题】
+{user_query}
 {db_spec}
 {SQL_GENERATION_RULES}
-请直接输出 SQL：
+请仅输出 SQL。
 """
 
         # 1) 只生成一次 SQL（带缓存）
@@ -541,6 +556,8 @@ class DatabaseManager:
         cache_key = f"{db_name}::{model_type}::{(user_query or '').strip()}::{context_sig}"
         raw_sql = _SQL_CACHE.get(cache_key)
         if not raw_sql:
+            if _should_stop():
+                return
             try:
                 if not HumanMessage:
                     yield "❌ HumanMessage 模块加载失败，无法构建提示词。"
@@ -548,7 +565,7 @@ class DatabaseManager:
                 response = target_llm.invoke([HumanMessage(content=sql_gen_prompt)])
                 raw_sql = _clean_sql(response.content)
             except Exception as e:
-                yield f"⚠️ 模型生成异常: {e}"
+                yield f"Model generation error: {e}"
                 return
             raw_sql = _ensure_limit(raw_sql, user_query, DB_AUTO_LIMIT)
 
@@ -585,6 +602,8 @@ class DatabaseManager:
         result_cache_key = f"{db_name}::{raw_sql}"
         query_result = _SQL_RESULT_CACHE.get(result_cache_key)
         if query_result is None:
+            if _should_stop():
+                return
             print(f"🔍 [DB] 执行 SQL (via {model_type}): {raw_sql}")
             try:
                 query_result = self.db.run(raw_sql)
@@ -605,6 +624,8 @@ class DatabaseManager:
                 return
 
         # 5) 成功后进行总结（只总结一次，带缓存）
+        if _should_stop():
+            return
         data_text, truncated = _truncate_result_text(query_result, DB_RESULT_PROMPT_MAX_CHARS)
         truncate_note = "（数据已截断，仅供总结）" if truncated else ""
         response_pref = (response_instruction or "").strip()
@@ -626,6 +647,12 @@ class DatabaseManager:
             f"数据{truncate_note}: {data_text}\n"
             "请简洁专业地回答。"
         )
+        summary_prompt += (
+            "\n\n回答规则:\n"
+            "1) 只能基于“数据”中的事实回答，严禁编造任何数字、记录或结论。\n"
+            "2) 如果数据不足以回答问题，请明确说“数据库结果不足以回答该问题”。\n"
+            "3) 不要把上下文里的假设当成数据库事实。"
+        )
         if response_pref:
             summary_prompt += f"\n\n请同时遵循以下输出偏好（仅影响表达，不改变事实与结论）：\n{response_pref}"
 
@@ -638,10 +665,14 @@ class DatabaseManager:
             yield cached_summary
             return
 
-        # 总结也使用流式
+        # Use streaming for summary as well
         summary_chunks = []
+        stream_iter = None
         try:
-            for chunk in target_llm.stream([HumanMessage(content=summary_prompt)]):
+            stream_iter = target_llm.stream([HumanMessage(content=summary_prompt)])
+            for chunk in stream_iter:
+                if _should_stop():
+                    break
                 if hasattr(chunk, "content"):
                     summary_chunks.append(chunk.content)
                     yield chunk.content
@@ -651,6 +682,15 @@ class DatabaseManager:
         except Exception as e:
             yield f"总结生成失败: {e}"
             return
+
+        finally:
+            if stream_iter is not None:
+                close_fn = getattr(stream_iter, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:
+                        pass
 
         if summary_chunks:
             _SUMMARY_CACHE.set(summary_cache_key, "".join(summary_chunks))

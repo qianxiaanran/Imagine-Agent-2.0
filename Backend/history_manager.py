@@ -1,9 +1,103 @@
-from supabase_client import supabase
+﻿from sqlalchemy import text
+
+from supabase_client import engine, supabase
+
+
+_HISTORY_ID_FIXED = False
+
+
+def _ensure_history_id_autoincrement():
+    """
+    Self-heal local schema drift: some migrated databases may miss
+    `history.id` default sequence, causing silent insert failures.
+    """
+    global _HISTORY_ID_FIXED
+    if _HISTORY_ID_FIXED:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE SEQUENCE IF NOT EXISTS public.history_id_seq"))
+            conn.execute(
+                text(
+                    "ALTER TABLE public.history "
+                    "ALTER COLUMN id SET DEFAULT nextval('public.history_id_seq')"
+                )
+            )
+            conn.execute(
+                text(
+                    "SELECT setval("
+                    "'public.history_id_seq', "
+                    "COALESCE((SELECT MAX(id) FROM public.history), 0) + 1, "
+                    "false)"
+                )
+            )
+        _HISTORY_ID_FIXED = True
+    except Exception as e:
+        print(f"[History] ensure history.id sequence failed: {e}")
+
+
+def _count_history_rows(user_id):
+    try:
+        res = (
+            supabase.table("history")
+            .select("id", count="exact", head=True)
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+        return int(res.count or 0)
+    except Exception:
+        return 0
+
+
+def _relink_legacy_history_by_email(user_id):
+    """
+    If current user has no history, try to migrate legacy rows from profiles
+    that share the same email but use an older user_id.
+    """
+    uid = str(user_id)
+    try:
+        prof_res = supabase.table("profiles").select("email").eq("id", uid).limit(1).execute()
+        profile_rows = prof_res.data or []
+        if not profile_rows:
+            return 0
+
+        email = (profile_rows[0].get("email") or "").strip().lower()
+        if not email:
+            return 0
+
+        legacy_profiles = (
+            supabase.table("profiles")
+            .select("id")
+            .eq("email", email)
+            .neq("id", uid)
+            .execute()
+        )
+
+        moved_rows = 0
+        for row in (legacy_profiles.data or []):
+            legacy_id = row.get("id")
+            if not legacy_id:
+                continue
+
+            legacy_count = _count_history_rows(legacy_id)
+            if legacy_count <= 0:
+                continue
+
+            supabase.table("history").update({"user_id": uid}).eq("user_id", str(legacy_id)).execute()
+            supabase.table("session_titles").update({"user_id": uid}).eq("user_id", str(legacy_id)).execute()
+            moved_rows += legacy_count
+
+            print(f"[History] relinked legacy history {legacy_id} -> {uid}, rows={legacy_count}")
+
+        return moved_rows
+    except Exception as e:
+        print(f"[History] relink failed: {e}")
+        return 0
 
 
 def add_history_to_supabase(user_id, session_id, func_type, role, content):
-    """写入历史记录"""
     try:
+        _ensure_history_id_autoincrement()
         supabase.table("history").insert({
             "user_id": str(user_id),
             "session_id": str(session_id),
@@ -11,8 +105,10 @@ def add_history_to_supabase(user_id, session_id, func_type, role, content):
             "role": role,
             "content": content
         }).execute()
+        return True
     except Exception as e:
         print(f"Error logging history: {e}")
+        return False
 
 
 def save_context(user_id, session_id, content, func_type="context_save"):
@@ -20,21 +116,23 @@ def save_context(user_id, session_id, content, func_type="context_save"):
     try:
         role = "meta" if func_type == "session_meta" else "context"
 
-        add_history_to_supabase(
+        saved = add_history_to_supabase(
             user_id=user_id,
             session_id=session_id,
             func_type=func_type,
             role=role,
             content=content
         )
+        if not saved:
+            return False
 
         if role == "context":
             titles = {
-                "voice_context": "会议录音转写",
-                "ocr_context": "文档识别结果",
-                "audit_context": "智能审单记录"
+                "voice_context": "Meeting Transcript",
+                "ocr_context": "OCR Result",
+                "audit_context": "Audit Log",
             }
-            default_title = titles.get(func_type, "新对话")
+            default_title = titles.get(func_type, "New Chat")
             rename_session(user_id, session_id, default_title)
         return True
     except Exception as e:
@@ -44,7 +142,7 @@ def save_context(user_id, session_id, content, func_type="context_save"):
 
 def get_history(user_id, session_id):
     """
-    获取指定会话的消息记录。
+    Retrieve messages of the specified session.
     """
     try:
         res = supabase.table("history") \
@@ -80,7 +178,7 @@ def get_history_limited(user_id, session_id, limit=20):
 
 def get_user_sessions(user_id):
     """
-    获取用户的最近会话列表。
+    Retrieve recent sessions for the user.
     优化点：
     1. 增加健壮性，确保即使消息记录很多，会话也不会消失。
     2. 兼容 Python 3.10 (修复 f-string 中不能使用反斜杠的问题)。
@@ -103,6 +201,26 @@ def get_user_sessions(user_id):
             .limit(4000) \
             .execute()
 
+        # If current account has no history, try to merge legacy rows that
+        # belong to another profile id with the same email.
+        if not (t_res.data or []) and not (res.data or []):
+            moved = _relink_legacy_history_by_email(user_id)
+            if moved > 0:
+                custom_titles = {}
+                t_res = supabase.table("session_titles").select("session_id, title").eq("user_id", str(user_id)).execute()
+                for row in (t_res.data or []):
+                    sid = row.get('session_id')
+                    title = row.get('title')
+                    if sid:
+                        custom_titles[sid] = title
+
+                res = supabase.table("history") \
+                    .select("session_id, content, created_at, role") \
+                    .eq("user_id", str(user_id)) \
+                    .order("created_at", desc=True) \
+                    .limit(4000) \
+                    .execute()
+
         sessions = []
         seen_sessions = set()
 
@@ -114,7 +232,7 @@ def get_user_sessions(user_id):
             if sid in seen_sessions:
                 continue
 
-            # 只要是用户发过的、或者是系统上下文、或者是有标题的，都属于有效会话
+            # 只要是用户发过的、或者是系统上下文或者是有标题的，都属于有效会话
             role = row.get('role')
             is_valid = role in ['user', 'context'] or sid in custom_titles
 
@@ -187,7 +305,7 @@ def get_user_sessions(user_id):
 
 
 def delete_session(user_id, session_id):
-    """物理删除或隐藏会话"""
+    """Delete one session and its title rows."""
     try:
         supabase.table("history").delete().eq("session_id", session_id).eq("user_id", str(user_id)).execute()
         supabase.table("session_titles").delete().eq("session_id", session_id).eq("user_id", str(user_id)).execute()
@@ -198,7 +316,7 @@ def delete_session(user_id, session_id):
 
 
 def rename_session(user_id, session_id, new_title):
-    """重命名会话"""
+    """Rename session title."""
     try:
         supabase.table("session_titles").upsert({
             "session_id": str(session_id),
@@ -209,3 +327,5 @@ def rename_session(user_id, session_id, new_title):
     except Exception as e:
         print(f"Error renaming session: {e}")
         return False
+
+

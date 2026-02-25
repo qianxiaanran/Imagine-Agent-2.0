@@ -1,8 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 
-// 使用你提供的 Supabase 项目信息
-const SUPABASE_URL = "https://gjbmkzduwtcfhmivvklj.supabase.co";
-const SUPABASE_ANON_KEY = "***REMOVED_SUPABASE_SERVICE_ROLE_TOKEN***";
+const DEFAULT_SUPABASE_URL = 'http://127.0.0.1:54321';
+const DEFAULT_SUPABASE_ANON_KEY =
+  '***REMOVED_SUPABASE_DEMO_TOKEN***';
+
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY;
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
@@ -11,5 +14,4 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   },
 });
 
-// 存储桶名称常量
 export const STORAGE_BUCKET = 'voice_uploads';

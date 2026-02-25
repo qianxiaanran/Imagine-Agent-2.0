@@ -4,6 +4,13 @@ setlocal
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
+if not defined NPM_CONFIG_CACHE (
+  if exist "F:\" (
+    set "NPM_CONFIG_CACHE=F:\codex-npm-cache"
+    if not exist "%NPM_CONFIG_CACHE%" mkdir "%NPM_CONFIG_CACHE%" >nul 2>&1
+  )
+)
+
 set "FRONTEND_PORT=%~1"
 if not defined FRONTEND_PORT set "FRONTEND_PORT=8080"
 set "BACKEND_PORT=%~2"
@@ -30,15 +37,98 @@ if not exist "%ROOT%\frontend\dist\index.html" (
   echo [WARN] frontend\dist not found. Run rebuild-prod.bat first.
 )
 
-echo [1/2] Starting backend on %BACKEND_PORT%...
-start "Enterprise Backend (%BACKEND_PORT%)" cmd /k "cd /d ""%ROOT%\Backend"" && set PYTHONUTF8=1 && set BACKEND_PORT=%BACKEND_PORT% && .venv\Scripts\python.exe -X utf8 main.py"
+set "OLLAMA_BASE_URL="
+if exist "%ROOT%\Backend\.env.local" (
+  for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /i "OLLAMA_BASE_URL=" "%ROOT%\Backend\.env.local"`) do set "OLLAMA_BASE_URL=%%B"
+)
+if not defined OLLAMA_BASE_URL set "OLLAMA_BASE_URL=http://127.0.0.1:11500"
 
-echo [2/2] Starting frontend prod server on %FRONTEND_PORT%...
-start "Enterprise Frontend (%FRONTEND_PORT%)" cmd /k "cd /d ""%ROOT%"" && set PORT=%FRONTEND_PORT% && set API_TARGET=%API_TARGET% && node tools\prod-server.mjs"
+set "OLLAMA_HOSTPORT=127.0.0.1:11500"
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$u=[uri]'%OLLAMA_BASE_URL%'; Write-Output ($u.Host + ':' + $u.Port)"`) do set "OLLAMA_HOSTPORT=%%A"
+
+echo [0/4] Ensuring local Ollama is running...
+curl.exe -sS --max-time 2 "%OLLAMA_BASE_URL%/api/tags" >nul 2>&1
+if errorlevel 1 (
+  where ollama >nul 2>&1
+  if errorlevel 1 (
+    echo [WARN] Ollama not found in PATH. Local model may be unavailable.
+  ) else (
+    start "Enterprise Ollama (%OLLAMA_HOSTPORT%)" /min cmd /c "set OLLAMA_HOST=%OLLAMA_HOSTPORT%&& ollama serve"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "$ok=$false; for($i=0;$i -lt 20;$i++){ try { Invoke-RestMethod -Method Get -Uri '%OLLAMA_BASE_URL%/api/tags' -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
+    if errorlevel 1 (
+      echo [WARN] Ollama did not become ready at %OLLAMA_BASE_URL%.
+    ) else (
+      echo [INFO] Ollama is ready at %OLLAMA_BASE_URL%.
+    )
+  )
+) else (
+  echo [INFO] Ollama already running at %OLLAMA_BASE_URL%.
+)
+
+if exist "%ROOT%\supabase\config.toml" (
+  docker info >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] Docker daemon is not running. Start Docker Desktop and retry.
+    exit /b 1
+  )
+
+  echo [0/3] Ensuring local Supabase is running...
+  pushd "%ROOT%" >nul
+  curl.exe -sS --max-time 2 "http://127.0.0.1:54321/rest/v1/" >nul 2>&1
+  if errorlevel 1 (
+    call npx supabase start
+    if errorlevel 1 (
+      echo [WARN] supabase start failed. Retrying after cleanup...
+      call npx supabase stop >nul 2>&1
+      timeout /t 1 /nobreak >nul
+      call npx supabase start
+      if errorlevel 1 (
+        echo [ERROR] Failed to start local Supabase.
+        popd >nul
+        exit /b 1
+      )
+    )
+  ) else (
+    echo [INFO] Supabase already running.
+  )
+  curl.exe -sS --max-time 2 "http://127.0.0.1:54321/rest/v1/" >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] Supabase API is not reachable on 127.0.0.1:54321.
+    popd >nul
+    exit /b 1
+  )
+  popd >nul
+) else (
+  echo [WARN] supabase\config.toml not found. Skipping local Supabase startup.
+)
+
+echo [1/2] Checking backend on %BACKEND_PORT%...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "if (Get-NetTCPConnection -State Listen -LocalPort %BACKEND_PORT% -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+if errorlevel 1 (
+  echo [1/2] Starting backend on %BACKEND_PORT%...
+  start "Enterprise Backend (%BACKEND_PORT%)" cmd /k "cd /d ""%ROOT%\Backend"" && set PYTHONUTF8=1 && set BACKEND_PORT=%BACKEND_PORT% && set OLLAMA_BASE_URL=%OLLAMA_BASE_URL% && .venv\Scripts\python.exe -X utf8 main.py"
+) else (
+  echo [INFO] Backend already listening on %BACKEND_PORT%, skip start.
+)
+
+echo [2/2] Checking frontend on %FRONTEND_PORT%...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "if (Get-NetTCPConnection -State Listen -LocalPort %FRONTEND_PORT% -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+if errorlevel 1 (
+  echo [2/2] Starting frontend prod server on %FRONTEND_PORT%...
+  start "Enterprise Frontend (%FRONTEND_PORT%)" cmd /k "cd /d ""%ROOT%"" && set PORT=%FRONTEND_PORT% && set API_TARGET=%API_TARGET% && node tools\prod-server.mjs"
+) else (
+  echo [INFO] Frontend already listening on %FRONTEND_PORT%, skip start.
+)
 
 echo.
 echo Started.
 echo Frontend URL: http://127.0.0.1:%FRONTEND_PORT%
 echo Backend URL : http://127.0.0.1:%BACKEND_PORT%
+echo Ollama URL  : %OLLAMA_BASE_URL%
+echo Supabase API: http://127.0.0.1:54321
+echo Supabase Studio: http://127.0.0.1:54323
 echo.
 exit /b 0
