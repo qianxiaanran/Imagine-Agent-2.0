@@ -16,6 +16,27 @@ const ShareModal = React.lazy(() => import('./ShareModal'));
 const INITIAL_SESSION_RENDER_COUNT = 40;
 const SESSION_RENDER_STEP = 40;
 
+const SessionListSkeleton = ({ rows = 7 }) => (
+  <div className="space-y-2 px-1 pt-1">
+    {Array.from({ length: rows }).map((_, idx) => (
+      <div key={`session-skeleton-${idx}`} className="flex items-center gap-2 rounded-lg px-2 py-2">
+        <div className="h-4 w-4 rounded-full bg-gray-200 dark:bg-gray-700 animate-pulse" />
+        <div className="h-3 w-full rounded bg-gray-200 dark:bg-gray-700 animate-pulse" />
+      </div>
+    ))}
+  </div>
+);
+
+const ProfileCardSkeleton = () => (
+  <div className="flex items-center gap-3 w-full px-3 py-2 rounded-lg">
+    <div className="h-8 w-8 rounded-full bg-gray-200 dark:bg-gray-700 animate-pulse flex-shrink-0" />
+    <div className="flex-1 min-w-0 space-y-1.5">
+      <div className="h-3 w-20 rounded bg-gray-200 dark:bg-gray-700 animate-pulse" />
+      <div className="h-2.5 w-14 rounded bg-gray-100 dark:bg-gray-800 animate-pulse" />
+    </div>
+  </div>
+);
+
 const Sidebar = ({
   isOpen,
   onClose,
@@ -29,6 +50,8 @@ const Sidebar = ({
   currentMode = "general",
   onModeChange = () => {},
   onSessionListUpdate,
+  isLoadingSessions = false,
+  isLoadingProfile = false,
   selectedModel = 0, // 新增：接收当前选择的模型ID
 }) => {
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -41,6 +64,12 @@ const Sidebar = ({
   useEffect(() => {
     setLocalUserProfile(userProfile);
   }, [userProfile]);
+
+  useEffect(() => {
+    if (isLoadingProfile) {
+      setIsProfileMenuOpen(false);
+    }
+  }, [isLoadingProfile]);
 
   // Pinned session state (local storage)
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
@@ -608,7 +637,9 @@ const Sidebar = ({
           <div className="flex-1 overflow-y-auto px-3 pb-2 custom-scrollbar" onClick={() => setMenuOpenId(null)}>
             <div className="pt-0">
               <h3 className="px-3 text-xs font-medium text-gray-400 mb-2">最近聊天</h3>
-              {displaySessions.length === 0 ? (
+              {isLoadingSessions && displaySessions.length === 0 ? (
+                <SessionListSkeleton rows={8} />
+              ) : displaySessions.length === 0 ? (
                 <div className="px-3 py-2 text-xs text-gray-400">暂无历史记录</div>
               ) : (
                 sessionsToRender.map((session) => (
@@ -696,12 +727,23 @@ const Sidebar = ({
                   </div>
                 ))
               )}
+              {!isLoadingSessions && hasMoreSessions && (
+                <div className="px-3 pt-2 pb-3">
+                  <button
+                    type="button"
+                    onClick={() => setVisibleSessionCount((count) => Math.min(displaySessions.length, count + SESSION_RENDER_STEP))}
+                    className="w-full text-center text-[11px] font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 px-3 py-1.5 rounded-full border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                  >
+                    加载更多
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
           {/* 底部用户菜单 */}
           <div className="p-3 border-t border-gray-100 dark:border-gray-800 relative" ref={profileMenuRef}>
-            {isProfileMenuOpen && (
+            {isProfileMenuOpen && !isLoadingProfile && (
               <div className="absolute bottom-full left-0 w-full px-3 mb-2 z-50 animate-in fade-in zoom-in-95 duration-200 origin-bottom">
                 <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden w-full">
                   <div className="p-1.5">
@@ -783,19 +825,23 @@ const Sidebar = ({
               </div>
             )}
 
-            <button
-              className={`flex items-center gap-3 w-full px-3 py-2 rounded-lg hover:bg-gray-200/60 dark:hover:bg-gray-800 transition-colors text-left
-              ${isProfileMenuOpen ? "bg-gray-100 dark:bg-gray-800" : ""}`}
-              onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
-            >
-              <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-medium flex-shrink-0 overflow-hidden">
-                {renderAvatar(localUserProfile?.avatar)}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-gray-900 dark:text-white truncate">{localUserProfile?.name}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{localUserProfile?.plan || "Free"}</div>
-              </div>
-            </button>
+            {isLoadingProfile ? (
+              <ProfileCardSkeleton />
+            ) : (
+              <button
+                className={`flex items-center gap-3 w-full px-3 py-2 rounded-lg hover:bg-gray-200/60 dark:hover:bg-gray-800 transition-colors text-left
+                ${isProfileMenuOpen ? "bg-gray-100 dark:bg-gray-800" : ""}`}
+                onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
+              >
+                <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-medium flex-shrink-0 overflow-hidden">
+                  {renderAvatar(localUserProfile?.avatar)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-gray-900 dark:text-white truncate">{localUserProfile?.name}</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{localUserProfile?.plan || "Free"}</div>
+                </div>
+              </button>
+            )}
           </div>
         </div>
 

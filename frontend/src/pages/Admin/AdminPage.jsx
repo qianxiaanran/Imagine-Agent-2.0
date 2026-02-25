@@ -12,6 +12,33 @@ const tabs = [
   { key: "logs", label: "审计日志" },
 ];
 
+const AdminTableSkeleton = ({ columns = 5, rows = 6 }) => (
+  <div className="space-y-3">
+    <div
+      className="grid gap-3"
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+    >
+      {Array.from({ length: columns }).map((_, idx) => (
+        <div key={`header-${idx}`} className="h-3 rounded bg-gray-200 animate-pulse" />
+      ))}
+    </div>
+    {Array.from({ length: rows }).map((_, rowIdx) => (
+      <div
+        key={`row-${rowIdx}`}
+        className="grid items-center gap-3 border-t border-gray-100 pt-3"
+        style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
+      >
+        {Array.from({ length: columns }).map((_, colIdx) => (
+          <div
+            key={`cell-${rowIdx}-${colIdx}`}
+            className={`h-3 rounded bg-gray-100 animate-pulse ${colIdx === 0 ? "w-4/5" : "w-3/4"}`}
+          />
+        ))}
+      </div>
+    ))}
+  </div>
+);
+
 const AdminPage = () => {
   const [profile, setProfile] = useState(null);
   const [activeTab, setActiveTab] = useState("users");
@@ -255,7 +282,7 @@ const UsersTab = ({ currentUserId }) => {
       </div>
       <div className="p-4 overflow-x-auto">
         {loading ? (
-          <div className="text-sm text-gray-500">加载中...</div>
+          <AdminTableSkeleton columns={5} rows={6} />
         ) : (
           <table className="min-w-full text-sm">
             <thead>
@@ -382,7 +409,7 @@ const AuditTab = () => {
       </div>
       <div className="p-4 overflow-x-auto">
         {loading ? (
-          <div className="text-sm text-gray-500">加载中...</div>
+          <AdminTableSkeleton columns={6} rows={6} />
         ) : (
           <table className="min-w-full text-sm">
             <thead>
@@ -532,7 +559,7 @@ const KbTab = () => {
       </div>
       <div className="p-4 overflow-x-auto">
         {loading ? (
-          <div className="text-sm text-gray-500">加载中...</div>
+          <AdminTableSkeleton columns={5} rows={6} />
         ) : (
           <table className="min-w-full text-sm">
             <thead>
@@ -615,7 +642,7 @@ const JobsTab = () => {
       </div>
       <div className="p-4 overflow-x-auto">
         {loading ? (
-          <div className="text-sm text-gray-500">加载中...</div>
+          <AdminTableSkeleton columns={5} rows={6} />
         ) : (
           <table className="min-w-full text-sm">
             <thead>
@@ -685,7 +712,7 @@ const LogsTab = () => {
       </div>
       <div className="p-4 overflow-x-auto">
         {loading ? (
-          <div className="text-sm text-gray-500">加载中...</div>
+          <AdminTableSkeleton columns={4} rows={6} />
         ) : (
           <table className="min-w-full text-sm">
             <thead>

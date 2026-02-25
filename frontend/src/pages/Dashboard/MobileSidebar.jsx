@@ -16,6 +16,27 @@ const ShareModal = lazy(() => import('./ShareModal'));
 const INITIAL_SESSION_RENDER_COUNT = 40;
 const SESSION_RENDER_STEP = 40;
 
+const SessionListSkeleton = ({ rows = 7 }) => (
+  <div className="space-y-2 px-1">
+    {Array.from({ length: rows }).map((_, idx) => (
+      <div key={`mobile-session-skeleton-${idx}`} className="flex items-center gap-3 rounded-lg px-2 py-2">
+        <div className="h-4 w-4 rounded-full bg-gray-200 dark:bg-gray-700 animate-pulse" />
+        <div className="h-3 w-full rounded bg-gray-200 dark:bg-gray-700 animate-pulse" />
+      </div>
+    ))}
+  </div>
+);
+
+const ProfileCardSkeleton = () => (
+  <div className="w-full flex items-center gap-3 p-2 rounded-lg border border-transparent">
+    <div className="h-9 w-9 rounded-full bg-gray-200 dark:bg-gray-700 animate-pulse flex-shrink-0" />
+    <div className="flex-1 min-w-0 space-y-1.5">
+      <div className="h-3 w-24 rounded bg-gray-200 dark:bg-gray-700 animate-pulse" />
+      <div className="h-2.5 w-16 rounded bg-gray-100 dark:bg-gray-800 animate-pulse" />
+    </div>
+  </div>
+);
+
 // 🚀 Memo 优化
 const MobileSidebar = memo(({
   isOpen,
@@ -43,6 +64,12 @@ const MobileSidebar = memo(({
   useEffect(() => {
     setLocalUserProfile(userProfile);
   }, [userProfile]);
+
+  useEffect(() => {
+    if (isLoading) {
+      setIsProfileExpanded(false);
+    }
+  }, [isLoading]);
 
   // 搜索
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -494,89 +521,95 @@ const MobileSidebar = memo(({
               <div className="flex-1 overflow-y-auto px-3 py-2 custom-scrollbar" onClick={() => setMenuOpenId(null)}>
                 <div className="">
                   <h3 className="px-3 text-xs font-medium text-gray-400 mb-3">最近聊天</h3>
-                  {sessionsToRender.map((session) => (
-                    <div
-                      key={session.id}
-                      className={`relative px-3 py-3 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200/60 dark:hover:bg-gray-800 rounded-lg cursor-pointer flex items-center gap-3 ${
-                        currentSessionId === session.id ? "bg-gray-200/80 dark:bg-gray-800 font-medium text-gray-900 dark:text-white" : ""
-                      } ${pinnedSessionIds.has(session.id) ? "border-l-2 border-blue-500 bg-blue-50/50 dark:bg-blue-900/10" : ""}`}
-                      onClick={() => onSessionClick(session.id)}
-                    >
-                      <div className="relative">
-                        <MessageSquare size={16} className="flex-shrink-0 opacity-50" />
+                  {isLoading && displaySessions.length === 0 ? (
+                    <SessionListSkeleton rows={8} />
+                  ) : displaySessions.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-gray-400">暂无历史记录</div>
+                  ) : (
+                    sessionsToRender.map((session) => (
+                      <div
+                        key={session.id}
+                        className={`relative px-3 py-3 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-200/60 dark:hover:bg-gray-800 rounded-lg cursor-pointer flex items-center gap-3 ${
+                          currentSessionId === session.id ? "bg-gray-200/80 dark:bg-gray-800 font-medium text-gray-900 dark:text-white" : ""
+                        } ${pinnedSessionIds.has(session.id) ? "border-l-2 border-blue-500 bg-blue-50/50 dark:bg-blue-900/10" : ""}`}
+                        onClick={() => onSessionClick(session.id)}
+                      >
+                        <div className="relative">
+                          <MessageSquare size={16} className="flex-shrink-0 opacity-50" />
+                          {pinnedSessionIds.has(session.id) && (
+                            <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full border border-white dark:border-gray-900"></div>
+                          )}
+                        </div>
+                        <span className="truncate flex-1">{optimisticRenames[session.id] || session.title}</span>
+
+                        {/* 置顶标识 */}
                         {pinnedSessionIds.has(session.id) && (
-                          <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full border border-white dark:border-gray-900"></div>
+                          <Pin size={12} className="text-blue-500 flex-shrink-0 mr-1 rotate-45" />
+                        )}
+
+                        <button
+                          className="p-1 rounded-md text-gray-400 hover:text-gray-800 hover:bg-gray-300/50 dark:hover:bg-gray-700"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMenuOpenId(menuOpenId === session.id ? null : session.id);
+                          }}
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+
+                         {menuOpenId === session.id && (
+                          <div
+                            className="absolute right-4 top-10 z-50 w-32 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                             {/* 置顶按钮 */}
+                             <button
+                               onClick={() => {
+                                 setMenuOpenId(null);
+                                 togglePinSession(session.id);
+                               }}
+                               className="w-full text-left px-3 py-3 text-xs text-gray-700 dark:text-gray-200 active:bg-gray-100 dark:active:bg-gray-700 flex items-center gap-2"
+                             >
+                               {pinnedSessionIds.has(session.id) ? <PinOff size={14} className="text-gray-500"/> : <Pin size={14} className="text-blue-500"/>}
+                               {pinnedSessionIds.has(session.id) ? "取消置顶" : "置顶会话"}
+                             </button>
+                             <div className="h-px bg-gray-100 dark:bg-gray-700 my-0.5"></div>
+                             <button
+                               onClick={() => {
+                                 setMenuOpenId(null);
+                                 setShareModal({ isOpen: true, sessionId: session.id, title: session.title });
+                               }}
+                               className="w-full text-left px-3 py-3 text-xs text-blue-600 dark:text-blue-400 active:bg-blue-50 dark:active:bg-blue-900/20 flex items-center gap-2"
+                             >
+                               <Share2 size={14} /> 分享
+                             </button>
+
+                             <button
+                              onClick={() => {
+                                setMenuOpenId(null);
+                                setNewTitleInput(optimisticRenames[session.id] || session.title);
+                                setRenameModal({ isOpen: true, sessionId: session.id, title: session.title });
+                              }}
+                              className="w-full text-left px-3 py-3 text-xs text-gray-700 dark:text-gray-200 active:bg-gray-100 dark:active:bg-gray-700 flex items-center gap-2"
+                            >
+                              <Pencil size={14} /> 重命名
+                            </button>
+                            <div className="h-px bg-gray-100 dark:bg-gray-700 my-0.5"></div>
+                            <button
+                              onClick={() => {
+                                setMenuOpenId(null);
+                                setDeleteModal({ isOpen: true, sessionId: session.id, title: session.title });
+                              }}
+                              className="w-full text-left px-3 py-3 text-xs text-red-600 active:bg-red-50 dark:active:bg-red-900/20 flex items-center gap-2"
+                            >
+                              <Trash2 size={14} /> 删除
+                            </button>
+                          </div>
                         )}
                       </div>
-                      <span className="truncate flex-1">{optimisticRenames[session.id] || session.title}</span>
-
-                      {/* 置顶标识 */}
-                      {pinnedSessionIds.has(session.id) && (
-                        <Pin size={12} className="text-blue-500 flex-shrink-0 mr-1 rotate-45" />
-                      )}
-
-                      <button
-                        className="p-1 rounded-md text-gray-400 hover:text-gray-800 hover:bg-gray-300/50 dark:hover:bg-gray-700"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setMenuOpenId(menuOpenId === session.id ? null : session.id);
-                        }}
-                      >
-                        <MoreHorizontal size={16} />
-                      </button>
-
-                       {menuOpenId === session.id && (
-                        <div
-                          className="absolute right-4 top-10 z-50 w-32 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                           {/* 置顶按钮 */}
-                           <button
-                             onClick={() => {
-                               setMenuOpenId(null);
-                               togglePinSession(session.id);
-                             }}
-                             className="w-full text-left px-3 py-3 text-xs text-gray-700 dark:text-gray-200 active:bg-gray-100 dark:active:bg-gray-700 flex items-center gap-2"
-                           >
-                             {pinnedSessionIds.has(session.id) ? <PinOff size={14} className="text-gray-500"/> : <Pin size={14} className="text-blue-500"/>}
-                             {pinnedSessionIds.has(session.id) ? "取消置顶" : "置顶会话"}
-                           </button>
-                           <div className="h-px bg-gray-100 dark:bg-gray-700 my-0.5"></div>
-                           <button
-                             onClick={() => {
-                               setMenuOpenId(null);
-                               setShareModal({ isOpen: true, sessionId: session.id, title: session.title });
-                             }}
-                             className="w-full text-left px-3 py-3 text-xs text-blue-600 dark:text-blue-400 active:bg-blue-50 dark:active:bg-blue-900/20 flex items-center gap-2"
-                           >
-                             <Share2 size={14} /> 分享
-                           </button>
-
-                           <button
-                            onClick={() => {
-                              setMenuOpenId(null);
-                              setNewTitleInput(optimisticRenames[session.id] || session.title);
-                              setRenameModal({ isOpen: true, sessionId: session.id, title: session.title });
-                            }}
-                            className="w-full text-left px-3 py-3 text-xs text-gray-700 dark:text-gray-200 active:bg-gray-100 dark:active:bg-gray-700 flex items-center gap-2"
-                          >
-                            <Pencil size={14} /> 重命名
-                          </button>
-                          <div className="h-px bg-gray-100 dark:bg-gray-700 my-0.5"></div>
-                          <button
-                            onClick={() => {
-                              setMenuOpenId(null);
-                              setDeleteModal({ isOpen: true, sessionId: session.id, title: session.title });
-                            }}
-                            className="w-full text-left px-3 py-3 text-xs text-red-600 active:bg-red-50 dark:active:bg-red-900/20 flex items-center gap-2"
-                          >
-                            <Trash2 size={14} /> 删除
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                  {hasMoreSessions && (
+                    ))
+                  )}
+                  {!isLoading && hasMoreSessions && (
                     <div className="px-3 pt-2 pb-3">
                       <button
                         type="button"
@@ -595,7 +628,7 @@ const MobileSidebar = memo(({
                 {/* Changed max-h-48 to max-h-72 to accommodate all items in the expanded menu.
                    Previous value was too short for (Profile + Appearance + Settings + Logout).
                 */}
-                <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isProfileExpanded ? "max-h-72 opacity-100 mb-3" : "max-h-0 opacity-0"}`}>
+                <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isProfileExpanded && !isLoading ? "max-h-72 opacity-100 mb-3" : "max-h-0 opacity-0"}`}>
                   <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 overflow-hidden py-1">
                     <div
                       className="px-4 py-3 border-b border-gray-100 dark:border-gray-700 flex items-center gap-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50"
@@ -669,27 +702,25 @@ const MobileSidebar = memo(({
                   </div>
                 </div>
 
-                <button
-                  onClick={() => setIsProfileExpanded(!isProfileExpanded)}
-                  className={`w-full flex items-center gap-3 p-2 rounded-lg transition-colors border ${
-                    isProfileExpanded ? "bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 shadow-sm" : "border-transparent hover:bg-gray-200 dark:hover:bg-gray-800"
-                  }`}
-                >
-                  <div className={`w-9 h-9 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm font-bold flex-shrink-0 overflow-hidden ${isLoading ? 'animate-pulse bg-gray-300' : ''}`}>
-                    {!isLoading && renderAvatar(localUserProfile?.avatar)}
-                  </div>
-                  <div className="flex-1 text-left min-w-0">
-                    {isLoading ? (
-                        <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded w-20 animate-pulse"></div>
-                    ) : (
-                        <>
-                            <div className="text-sm font-bold text-gray-900 dark:text-white truncate">{localUserProfile?.name || 'User'}</div>
-                            <div className="text-xs text-gray-500 dark:text-gray-400">{localUserProfile?.plan || "Enterprise"}</div>
-                        </>
-                    )}
-                  </div>
-                  <ChevronDown size={16} className={`text-gray-400 transition-transform ${isProfileExpanded ? "rotate-180" : ""}`} />
-                </button>
+                {isLoading ? (
+                  <ProfileCardSkeleton />
+                ) : (
+                  <button
+                    onClick={() => setIsProfileExpanded(!isProfileExpanded)}
+                    className={`w-full flex items-center gap-3 p-2 rounded-lg transition-colors border ${
+                      isProfileExpanded ? "bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 shadow-sm" : "border-transparent hover:bg-gray-200 dark:hover:bg-gray-800"
+                    }`}
+                  >
+                    <div className="w-9 h-9 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm font-bold flex-shrink-0 overflow-hidden">
+                      {renderAvatar(localUserProfile?.avatar)}
+                    </div>
+                    <div className="flex-1 text-left min-w-0">
+                      <div className="text-sm font-bold text-gray-900 dark:text-white truncate">{localUserProfile?.name || 'User'}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{localUserProfile?.plan || "Enterprise"}</div>
+                    </div>
+                    <ChevronDown size={16} className={`text-gray-400 transition-transform ${isProfileExpanded ? "rotate-180" : ""}`} />
+                  </button>
+                )}
               </div>
             </>
           )}
