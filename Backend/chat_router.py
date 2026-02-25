@@ -39,7 +39,7 @@ CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL
 
 from supabase_client import require_supabase
 from history_manager import get_history, get_history_limited, get_user_sessions, delete_session, rename_session
-from deepseek_llm import ask_llm_stream, ask_llm
+from deepseek_llm import ask_llm_stream_async, ask_llm
 
 # 引入我们新构建的模块（仅在 LangGraph 路径需要）
 from context_hub import ContextHub
@@ -1676,13 +1676,12 @@ async def chat(
                 user_message=message,
             )
 
-            llm_stream = ask_llm_stream(
+            async for chunk in ask_llm_stream_async(
                 prompt,
                 system_prompt=system_prompt,
                 model_type=model_backend,
                 stop_checker=_is_cancelled,
-            )
-            async for chunk in _iter_sync_stream(llm_stream):
+            ):
                 if chunk:
                     full_reply += chunk
                     out = push_chunk(chunk)
@@ -1807,12 +1806,11 @@ async def chat(
                     f"检索结果:\n{search_context}"
                 )
 
-                llm_stream = ask_llm_stream(
+                async for chunk in ask_llm_stream_async(
                     response_prompt,
                     model_type=model_backend,
                     stop_checker=_is_cancelled,
-                )
-                async for chunk in _iter_sync_stream(llm_stream):
+                ):
                     if chunk:
                         full_reply_clean += chunk
                         out = push_chunk(chunk)
@@ -2087,12 +2085,11 @@ async def chat(
                     user_message=message,
                 )
 
-                llm_stream = ask_llm_stream(
+                async for chunk in ask_llm_stream_async(
                     prompt,
                     model_type=model_backend,
                     stop_checker=_is_cancelled,
-                )
-                async for chunk in _iter_sync_stream(llm_stream):
+                ):
                     if chunk:
                         full_reply += chunk
                         out = push_chunk(chunk)
@@ -2230,13 +2227,12 @@ async def chat(
 
             # 使用用户选择的后端模型 (local / cloud)
             push_chunk, flush_chunk = _make_text_buffer()
-            llm_stream = ask_llm_stream(
+            async for chunk in ask_llm_stream_async(
                 final_prompt,
                 system_prompt=personalization_system_prompt,
                 model_type=model_backend,
                 stop_checker=_is_cancelled,
-            )
-            async for chunk in _iter_sync_stream(llm_stream):
+            ):
                 if chunk:
                     full_reply_display += chunk
                     full_reply_clean += chunk
@@ -2353,17 +2349,4 @@ def rename_session_api(session_id: str, user_id: str, req: RenameRequest):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to rename session")
     return {"status": "ok", "message": "Session renamed", "title": req.title}
-
-
-
-
-
-
-
-
-
-
-
-
-
 

@@ -1,10 +1,12 @@
 ﻿import os
 import sys
 import json
+import asyncio
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime
 from queue import Queue, Empty
-from typing import Generator, Optional, Any, Callable, List, Dict
+from typing import Generator, Optional, Any, Callable, List, Dict, AsyncGenerator
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="replace")
@@ -53,6 +55,13 @@ OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "1"))
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "1h")
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "8192"))
+LLM_LOCAL_MAX_CONCURRENT = max(1, int(os.getenv("LLM_LOCAL_MAX_CONCURRENT", "2")))
+LLM_CLOUD_MAX_CONCURRENT = max(1, int(os.getenv("LLM_CLOUD_MAX_CONCURRENT", "12")))
+LLM_STREAM_SLOT_TIMEOUT_SECONDS = float(os.getenv("LLM_STREAM_SLOT_TIMEOUT_SECONDS", "12"))
+OLLAMA_HTTP_CONNECT_TIMEOUT = float(os.getenv("OLLAMA_HTTP_CONNECT_TIMEOUT", "8"))
+OLLAMA_HTTP_READ_TIMEOUT = float(os.getenv("OLLAMA_HTTP_READ_TIMEOUT", "120"))
+OLLAMA_HTTP_WRITE_TIMEOUT = float(os.getenv("OLLAMA_HTTP_WRITE_TIMEOUT", "30"))
+OLLAMA_HTTP_POOL_TIMEOUT = float(os.getenv("OLLAMA_HTTP_POOL_TIMEOUT", "30"))
 # Local Router (small) model config
 ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "deepseek-r1:1.5b")
 ROUTER_NUM_CTX = int(os.getenv("ROUTER_NUM_CTX", "2048"))
@@ -66,6 +75,13 @@ DEEPSEEK_KEY = "***REMOVED_DEEPSEEK_KEY***"
 DEEPSEEK_MODEL_NAME = "deepseek-chat"  # V3
 
 print(f"🤖 [LLM Init] Local: {MODEL_NAME} @ {OLLAMA_BASE_URL} (ctx={OLLAMA_NUM_CTX})")
+print(
+    f"🚦 [LLM Limits] local={LLM_LOCAL_MAX_CONCURRENT}, "
+    f"cloud={LLM_CLOUD_MAX_CONCURRENT}, wait={LLM_STREAM_SLOT_TIMEOUT_SECONDS}s"
+)
+
+_LOCAL_STREAM_SEMAPHORE = threading.BoundedSemaphore(LLM_LOCAL_MAX_CONCURRENT)
+_CLOUD_STREAM_SEMAPHORE = threading.BoundedSemaphore(LLM_CLOUD_MAX_CONCURRENT)
 
 # 初始化 Local LLM (Ollama)
 try:
@@ -178,6 +194,40 @@ def _build_router_messages(prompt: str, system_prompt: Optional[str] = None):
 def _is_local_backend(model_type: str) -> bool:
     mt = (model_type or "").strip().lower()
     return mt in {"", "local", "ollama"}
+
+
+def _pick_stream_semaphore(model_type: str) -> threading.BoundedSemaphore:
+    if _is_local_backend(model_type):
+        return _LOCAL_STREAM_SEMAPHORE
+    return _CLOUD_STREAM_SEMAPHORE
+
+
+def _stream_busy_error(model_type: str) -> str:
+    backend_label = "local" if _is_local_backend(model_type) else "cloud"
+    return (
+        f"Model backend is busy ({backend_label}). "
+        f"Please retry in a few seconds."
+    )
+
+
+def _acquire_stream_slot_or_raise(model_type: str) -> threading.BoundedSemaphore:
+    sem = _pick_stream_semaphore(model_type)
+    acquired = sem.acquire(timeout=LLM_STREAM_SLOT_TIMEOUT_SECONDS)
+    if not acquired:
+        raise RuntimeError(_stream_busy_error(model_type))
+    return sem
+
+
+@asynccontextmanager
+async def _acquire_stream_slot_async(model_type: str):
+    sem = _pick_stream_semaphore(model_type)
+    acquired = await asyncio.to_thread(sem.acquire, True, LLM_STREAM_SLOT_TIMEOUT_SECONDS)
+    if not acquired:
+        raise RuntimeError(_stream_busy_error(model_type))
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 def _to_ollama_messages(messages: List[Any]) -> List[Dict[str, str]]:
@@ -319,53 +369,206 @@ def ask_llm_stream(
         yield "Input message is empty."
         return
 
-    messages = _build_messages(prompt, system_prompt)
-
-    if _is_local_backend(model_type):
-        try:
-            for piece in _stream_local_ollama_http(messages, stop_checker=stop_checker):
-                if stop_checker and stop_checker():
-                    break
-                if piece:
-                    yield piece
-            return
-        except Exception as e:
-            print(f"[LLM Stream] local HTTP stream failed, fallback to LangChain stream: {e}")
-
-    target_llm = None
     try:
-        temp = 1.3 if (model_type == "cloud" or model_type == "deepseek") else 0.3
-        target_llm = get_llm_instance(model_type, temperature=temp)
+        sem = _acquire_stream_slot_or_raise(model_type)
     except Exception as e:
-        print(f"[LLM Init Error] {model_type}: {e}")
-        yield f"Model init failed ({model_type}): {e}"
+        yield str(e)
         return
 
-    stream_iter = None
+    messages = _build_messages(prompt, system_prompt)
+
     try:
-        stream_iter = target_llm.stream(messages)
-        for chunk in stream_iter:
+        if _is_local_backend(model_type):
+            try:
+                for piece in _stream_local_ollama_http(messages, stop_checker=stop_checker):
+                    if stop_checker and stop_checker():
+                        break
+                    if piece:
+                        yield piece
+                return
+            except Exception as e:
+                print(f"[LLM Stream] local HTTP stream failed, fallback to LangChain stream: {e}")
+
+        target_llm = None
+        try:
+            temp = 1.3 if (model_type == "cloud" or model_type == "deepseek") else 0.3
+            target_llm = get_llm_instance(model_type, temperature=temp)
+        except Exception as e:
+            print(f"[LLM Init Error] {model_type}: {e}")
+            yield f"Model init failed ({model_type}): {e}"
+            return
+
+        stream_iter = None
+        try:
+            stream_iter = target_llm.stream(messages)
+            for chunk in stream_iter:
+                if stop_checker and stop_checker():
+                    break
+                if hasattr(chunk, "content"):
+                    content = chunk.content
+                elif isinstance(chunk, str):
+                    content = chunk
+                else:
+                    content = ""
+                if content:
+                    yield content
+        except Exception as e:
+            print(f"[LLM Stream Error] ({model_type}): {e}")
+            yield f"Model stream failed ({model_type}): {e}"
+        finally:
+            if stream_iter is not None:
+                close_fn = getattr(stream_iter, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception:
+                        pass
+    finally:
+        sem.release()
+
+
+async def _stream_local_ollama_http_async(
+    messages: List[Any],
+    stop_checker: Optional[Callable[[], bool]] = None,
+) -> AsyncGenerator[str, None]:
+    try:
+        import httpx
+    except Exception as e:
+        raise RuntimeError(f"httpx not available: {e}")
+
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+    payload = {
+        "model": MODEL_NAME,
+        "messages": _to_ollama_messages(messages),
+        "stream": True,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "num_gpu": OLLAMA_NUM_GPU,
+            "num_ctx": OLLAMA_NUM_CTX,
+            "num_predict": OLLAMA_NUM_PREDICT,
+            "repeat_penalty": 1.1,
+        },
+    }
+    timeout = httpx.Timeout(
+        connect=OLLAMA_HTTP_CONNECT_TIMEOUT,
+        read=OLLAMA_HTTP_READ_TIMEOUT,
+        write=OLLAMA_HTTP_WRITE_TIMEOUT,
+        pool=OLLAMA_HTTP_POOL_TIMEOUT,
+    )
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            async for raw_line in resp.aiter_lines():
+                if stop_checker and stop_checker():
+                    break
+                if not raw_line:
+                    continue
+                try:
+                    event = json.loads(raw_line)
+                except Exception:
+                    continue
+                if event.get("error"):
+                    raise RuntimeError(str(event.get("error")))
+                chunk = (event.get("message") or {}).get("content") or ""
+                if chunk:
+                    yield chunk
+                if event.get("done"):
+                    break
+
+
+async def _iter_sync_stream_async(
+    sync_iter: Any,
+    stop_checker: Optional[Callable[[], bool]] = None,
+) -> AsyncGenerator[Any, None]:
+    _iter_done = object()
+    iterator = iter(sync_iter)
+
+    def _next_or_done():
+        try:
+            return next(iterator)
+        except StopIteration:
+            return _iter_done
+
+    try:
+        while True:
             if stop_checker and stop_checker():
                 break
-            if hasattr(chunk, "content"):
-                content = chunk.content
-            elif isinstance(chunk, str):
-                content = chunk
-            else:
-                content = ""
-            if content:
-                yield content
-    except Exception as e:
-        print(f"[LLM Stream Error] ({model_type}): {e}")
-        yield f"Model stream failed ({model_type}): {e}"
+            item = await asyncio.to_thread(_next_or_done)
+            if item is _iter_done:
+                break
+            if stop_checker and stop_checker():
+                break
+            yield item
     finally:
-        if stream_iter is not None:
-            close_fn = getattr(stream_iter, "close", None)
-            if callable(close_fn):
+        close_fn = getattr(iterator, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
+
+
+async def ask_llm_stream_async(
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    model_type: str = "local",
+    stop_checker: Optional[Callable[[], bool]] = None,
+) -> AsyncGenerator[str, None]:
+    if not prompt or not prompt.strip():
+        yield "Input message is empty."
+        return
+
+    try:
+        async with _acquire_stream_slot_async(model_type):
+            messages = _build_messages(prompt, system_prompt)
+
+            if _is_local_backend(model_type):
                 try:
-                    close_fn()
-                except Exception:
-                    pass
+                    async for piece in _stream_local_ollama_http_async(messages, stop_checker=stop_checker):
+                        if stop_checker and stop_checker():
+                            break
+                        if piece:
+                            yield piece
+                    return
+                except Exception as e:
+                    print(f"[LLM Async Stream] local HTTP stream failed, fallback to LangChain stream: {e}")
+
+            try:
+                temp = 1.3 if (model_type == "cloud" or model_type == "deepseek") else 0.3
+                target_llm = get_llm_instance(model_type, temperature=temp)
+            except Exception as e:
+                print(f"[LLM Init Error] {model_type}: {e}")
+                yield f"Model init failed ({model_type}): {e}"
+                return
+
+            stream_iter = None
+            try:
+                stream_iter = target_llm.stream(messages)
+                async for chunk in _iter_sync_stream_async(stream_iter, stop_checker=stop_checker):
+                    if hasattr(chunk, "content"):
+                        content = chunk.content
+                    elif isinstance(chunk, str):
+                        content = chunk
+                    else:
+                        content = ""
+                    if content:
+                        yield content
+            except Exception as e:
+                print(f"[LLM Async Stream Error] ({model_type}): {e}")
+                yield f"Model stream failed ({model_type}): {e}"
+            finally:
+                if stream_iter is not None:
+                    close_fn = getattr(stream_iter, "close", None)
+                    if callable(close_fn):
+                        try:
+                            close_fn()
+                        except Exception:
+                            pass
+    except Exception as e:
+        yield str(e)
 
 
 def ask_llm(prompt: str, model_type: str = "local") -> str:

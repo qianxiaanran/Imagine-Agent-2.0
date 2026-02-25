@@ -38,22 +38,29 @@ if not exist "%ROOT%\frontend\dist\index.html" (
 )
 
 set "OLLAMA_BASE_URL="
+set "OLLAMA_NUM_PARALLEL="
+set "OLLAMA_MAX_QUEUE="
 if exist "%ROOT%\Backend\.env.local" (
   for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /i "OLLAMA_BASE_URL=" "%ROOT%\Backend\.env.local"`) do set "OLLAMA_BASE_URL=%%B"
+  for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /i "OLLAMA_NUM_PARALLEL=" "%ROOT%\Backend\.env.local"`) do set "OLLAMA_NUM_PARALLEL=%%B"
+  for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /i "OLLAMA_MAX_QUEUE=" "%ROOT%\Backend\.env.local"`) do set "OLLAMA_MAX_QUEUE=%%B"
 )
 if not defined OLLAMA_BASE_URL set "OLLAMA_BASE_URL=http://127.0.0.1:11500"
+if not defined OLLAMA_NUM_PARALLEL set "OLLAMA_NUM_PARALLEL=2"
+if not defined OLLAMA_MAX_QUEUE set "OLLAMA_MAX_QUEUE=128"
 
 set "OLLAMA_HOSTPORT=127.0.0.1:11500"
 for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$u=[uri]'%OLLAMA_BASE_URL%'; Write-Output ($u.Host + ':' + $u.Port)"`) do set "OLLAMA_HOSTPORT=%%A"
 
 echo [0/4] Ensuring local Ollama is running...
+echo [INFO] Ollama concurrency: parallel=%OLLAMA_NUM_PARALLEL%, max_queue=%OLLAMA_MAX_QUEUE%
 curl.exe -sS --max-time 2 "%OLLAMA_BASE_URL%/api/tags" >nul 2>&1
 if errorlevel 1 (
   where ollama >nul 2>&1
   if errorlevel 1 (
     echo [WARN] Ollama not found in PATH. Local model may be unavailable.
   ) else (
-    start "Enterprise Ollama (%OLLAMA_HOSTPORT%)" /min cmd /c "set OLLAMA_HOST=%OLLAMA_HOSTPORT%&& ollama serve"
+    start "Enterprise Ollama (%OLLAMA_HOSTPORT%)" /min cmd /c "set OLLAMA_HOST=%OLLAMA_HOSTPORT%&& set OLLAMA_NUM_PARALLEL=%OLLAMA_NUM_PARALLEL%&& set OLLAMA_MAX_QUEUE=%OLLAMA_MAX_QUEUE%&& ollama serve"
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
       "$ok=$false; for($i=0;$i -lt 20;$i++){ try { Invoke-RestMethod -Method Get -Uri '%OLLAMA_BASE_URL%/api/tags' -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
     if errorlevel 1 (
@@ -64,6 +71,7 @@ if errorlevel 1 (
   )
 ) else (
   echo [INFO] Ollama already running at %OLLAMA_BASE_URL%.
+  echo [INFO] If this instance was started without parallel settings, restart Ollama to apply new concurrency values.
 )
 
 if exist "%ROOT%\supabase\config.toml" (

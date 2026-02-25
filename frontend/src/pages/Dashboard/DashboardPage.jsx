@@ -466,6 +466,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [isMobileViewport, setIsMobileViewport] = useState(false);
   const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState('chat');
+  const [ocrMobileTab, setOcrMobileTab] = useState('preview');
   const fileInputRef = useRef(null);
   const messageInputRef = useRef(null);
   const auditPollRef = useRef(null);
@@ -1234,6 +1235,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     }
     setMobileWorkspaceTab('chat');
   }, [isMobileViewport, showContentPanel, isMeetingMode, isOCRMode, isAuditMode]);
+
+  useEffect(() => {
+    if (!isMobileViewport || !isOCRMode) return;
+    if (!activeOcrFile) {
+      setOcrMobileTab('preview');
+      return;
+    }
+    if (activeOcrFile.status === 'done' || activeOcrFile.status === 'error') {
+      setOcrMobileTab('result');
+    }
+  }, [isMobileViewport, isOCRMode, activeOcrFile?.id, activeOcrFile?.status]);
 
   // 监听语音播放结束，重置图标状态
   useEffect(() => {
@@ -3846,6 +3858,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     const canUpload = !isUploadingFile;
     const pageMeta = Array.isArray(activeFile?.pages) ? activeFile.pages[pageIndex] : null;
     const selectedLine = selectedOcrLine !== null ? ocrLines[selectedOcrLine] : null;
+    const previewPaneHiddenOnMobile = isMobileViewport && ocrMobileTab !== 'preview';
+    const resultPaneHiddenOnMobile = isMobileViewport && ocrMobileTab !== 'result';
 
     const renderBoxes = () => {
       if (!activeFile || !pageMeta || !ocrImageMetrics.width || !ocrImageMetrics.height) return null;
@@ -3854,7 +3868,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return (
         <div className="absolute inset-0 pointer-events-none">
           {ocrLines.map((line, idx) => {
-            if (!line.box || line.page !== undefined && line.page !== 0) return null;
+            const linePage = line.page === undefined || line.page === null ? 0 : line.page;
+            if (!line.box || linePage !== pageIndex) return null;
             const points = line.box || [];
             if (!Array.isArray(points) || points.length < 4) return null;
             const xs = points.map((p) => p[0]);
@@ -3889,7 +3904,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               return (
                 <div
                   className="relative w-full bg-white border border-gray-200 shadow-sm overflow-hidden"
-                  style={{ height: `${Math.max(renderHeight, 420)}px` }}
+                  style={{ height: `${Math.max(renderHeight, isMobileViewport ? 280 : 420)}px` }}
                   onMouseLeave={() => {
                     if (editingOcrLine === null) setSelectedOcrLine(null);
                   }}
@@ -4019,7 +4034,35 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             </div>
           </div>
         )}
-        <div className="w-full lg:w-1/2 border-r border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 flex flex-col">
+        {isMobileViewport && (
+          <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900">
+            <div className="grid grid-cols-2 gap-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/90 dark:bg-gray-900/70 p-1">
+              <button
+                type="button"
+                onClick={() => setOcrMobileTab('preview')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  ocrMobileTab === 'preview'
+                    ? 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm'
+                    : 'text-gray-500 dark:text-gray-400'
+                }`}
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                onClick={() => setOcrMobileTab('result')}
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  ocrMobileTab === 'result'
+                    ? 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm'
+                    : 'text-gray-500 dark:text-gray-400'
+                }`}
+              >
+                Result
+              </button>
+            </div>
+          </div>
+        )}
+        <div className={`${previewPaneHiddenOnMobile ? 'hidden lg:flex' : 'flex'} flex-1 w-full lg:w-1/2 lg:border-r border-b lg:border-b-0 border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 flex-col min-h-0`}>
           <div className="p-4 border-b border-gray-100 dark:border-gray-800 space-y-4">
             <div
               className={`max-w-[520px] mx-auto rounded-xl border-2 border-dashed px-3 py-3 text-center transition-colors cursor-pointer ${isDragActive ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-600'}`}
@@ -4045,7 +4088,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
           </div>
 
-          <div className="flex-1 overflow-auto p-4 pt-2">
+          <div className="flex-1 min-h-0 overflow-auto p-4 pt-2">
             <div className="mb-2 rounded-2xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
               <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-800 bg-gray-50/70 dark:bg-gray-800/40">
                 <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium text-blue-600 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/30">
@@ -4094,7 +4137,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             {activeFile && (
               <div
                 ref={ocrPreviewRef}
-                className="w-full h-full min-h-[420px] bg-gray-50 dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 flex items-start justify-start overflow-hidden relative"
+                className="w-full h-full min-h-[280px] sm:min-h-[420px] bg-gray-50 dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 flex items-start justify-start overflow-hidden relative"
               >
                 {!previewUrl && (
                   <div className="text-xs text-gray-400">历史记录不包含原图/原 PDF 预览</div>
@@ -4129,8 +4172,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           </div>
         </div>
 
-        <div className="w-full lg:w-1/2 flex flex-col bg-white dark:bg-gray-900 min-w-0">
-          <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
+        <div className={`${resultPaneHiddenOnMobile ? 'hidden lg:flex' : 'flex'} flex-1 w-full lg:w-1/2 flex-col bg-white dark:bg-gray-900 min-w-0 min-h-0`}>
+          <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="relative">
               <button
                 type="button"
@@ -4158,95 +4201,97 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                 </div>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800 p-1 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setOcrViewTab('match')}
-                  className={`px-2 py-1 rounded-md ${ocrViewTab === 'match' ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow' : 'text-gray-500 dark:text-gray-400'}`}
-                >
-                  OCR识别对应
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setOcrViewTab('json')}
-                  className={`px-2 py-1 rounded-md ${ocrViewTab === 'json' ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow' : 'text-gray-500 dark:text-gray-400'}`}
-                >
-                  JSON
-                </button>
-              </div>
-              <div className="flex items-center gap-2">
-                {ocrViewTab === 'json' && (
+            <div className="w-full sm:w-auto overflow-x-auto">
+              <div className="flex items-center gap-2 min-w-max pb-1 sm:pb-0">
+                <div className="flex items-center gap-1 rounded-lg bg-gray-100 dark:bg-gray-800 p-1 text-xs flex-shrink-0">
                   <button
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(jsonContent || '');
-                      showCopyToast();
-                    }}
-                    className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
-                    title="复制JSON"
+                    onClick={() => setOcrViewTab('match')}
+                    className={`px-2 py-1 rounded-md ${ocrViewTab === 'match' ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow' : 'text-gray-500 dark:text-gray-400'}`}
                   >
-                    <Copy size={16} />
+                    OCR识别对应
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={handleOcrStoreFromActive}
-                  className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
-                  title="录入数据库"
-                >
-                  <Database size={16} />
-                </button>
-                <button
-                  type="button"
-                  onClick={triggerOcrReparse}
-                  className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
-                  title="重新解析"
-                >
-                  <RefreshCw size={16} />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenOcrSummary}
-                  className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
-                  title="总结"
-                >
-                  <Sparkles size={16} />
-                </button>
-                <div className="relative">
                   <button
                     type="button"
-                    onClick={() => setIsOcrDownloadOpen((prev) => !prev)}
-                    className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
-                    title="下载"
+                    onClick={() => setOcrViewTab('json')}
+                    className={`px-2 py-1 rounded-md ${ocrViewTab === 'json' ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow' : 'text-gray-500 dark:text-gray-400'}`}
                   >
-                    <Download size={16} />
+                    JSON
                   </button>
-                  {isOcrDownloadOpen && (
-                    <div className="absolute right-0 top-full mt-2 w-44 rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg z-20 overflow-hidden">
-                      <button
-                        type="button"
-                        onClick={() => { setIsOcrDownloadOpen(false); downloadOcrFile('txt'); }}
-                        className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-300"
-                      >
-                        TXT
-                        <div className="text-[10px] text-gray-400 mt-0.5">仅包含纯文本</div>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => { setIsOcrDownloadOpen(false); downloadOcrFile('json'); }}
-                        className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-300"
-                      >
-                        JSON（文字识别）
-                        <div className="text-[10px] text-gray-400 mt-0.5">包含文字与坐标信息</div>
-                      </button>
-                    </div>
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {ocrViewTab === 'json' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(jsonContent || '');
+                        showCopyToast();
+                      }}
+                      className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
+                      title="复制JSON"
+                    >
+                      <Copy size={16} />
+                    </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={handleOcrStoreFromActive}
+                    className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
+                    title="录入数据库"
+                  >
+                    <Database size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={triggerOcrReparse}
+                    className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
+                    title="重新解析"
+                  >
+                    <RefreshCw size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleOpenOcrSummary}
+                    className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
+                    title="总结"
+                  >
+                    <Sparkles size={16} />
+                  </button>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setIsOcrDownloadOpen((prev) => !prev)}
+                      className="p-2 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800"
+                      title="下载"
+                    >
+                      <Download size={16} />
+                    </button>
+                    {isOcrDownloadOpen && (
+                      <div className="absolute right-0 top-full mt-2 w-44 rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg z-20 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => { setIsOcrDownloadOpen(false); downloadOcrFile('txt'); }}
+                          className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-300"
+                        >
+                          TXT
+                          <div className="text-[10px] text-gray-400 mt-0.5">仅包含纯文本</div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setIsOcrDownloadOpen(false); downloadOcrFile('json'); }}
+                          className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-300"
+                        >
+                          JSON（文字识别）
+                          <div className="text-[10px] text-gray-400 mt-0.5">包含文字与坐标信息</div>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
           </div>
-          <div className="flex-1 overflow-auto p-4 relative">
+          <div className="flex-1 min-h-0 overflow-auto p-4 relative">
             {!activeFile && (
               <div className="h-full flex items-center justify-center text-sm text-gray-400">暂无识别结果</div>
             )}
@@ -4277,7 +4322,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             {activeFile && ocrViewTab === 'match' && (
               <div className="space-y-3">
                 {totalPages > 1 && (
-                  <div className="flex items-center justify-between text-xs text-gray-500">
+                  <div className="flex items-center justify-between gap-2 flex-wrap text-xs text-gray-500">
                     <span>页码 {pageIndex + 1} / {totalPages}</span>
                     <div className="flex items-center gap-2">
                       <button
@@ -4311,12 +4356,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   <div className="text-xs text-gray-400">未检测到可识别文本</div>
                 )}
                 {editingOcrLine !== null && ocrLines[editingOcrLine] && (
-                  <div className="flex items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+                  <div className="flex flex-wrap items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
                     <span className="text-xs text-gray-400">纠正文本</span>
                     <input
                       value={editingOcrValue}
                       onChange={(e) => setEditingOcrValue(e.target.value)}
-                      className="flex-1 text-sm px-2 py-1 border border-gray-200 dark:border-gray-700 rounded-md bg-white dark:bg-gray-900"
+                      className="flex-1 min-w-[140px] text-sm px-2 py-1 border border-gray-200 dark:border-gray-700 rounded-md bg-white dark:bg-gray-900"
                     />
                     <button
                       type="button"
@@ -4362,7 +4407,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       setJsonEditError('JSON 格式错误，未保存到识别结果');
                     }
                   }}
-                  className="w-full min-h-[420px] text-[11px] leading-relaxed text-gray-600 dark:text-gray-300 whitespace-pre-wrap break-words bg-gray-50 dark:bg-gray-800/60 rounded-xl p-3 border border-gray-100 dark:border-gray-700 font-mono"
+                  className="w-full min-h-[320px] sm:min-h-[420px] text-[11px] leading-relaxed text-gray-600 dark:text-gray-300 whitespace-pre-wrap break-words bg-gray-50 dark:bg-gray-800/60 rounded-xl p-3 border border-gray-100 dark:border-gray-700 font-mono"
                   placeholder="暂无 JSON 数据"
                 />
                 {jsonEditError && (
