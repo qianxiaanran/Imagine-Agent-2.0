@@ -1574,7 +1574,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           });
           const result = await res.json();
           const text = typeof result?.text === 'string' ? result.text.trim() : '';
-          if (text.startsWith('❌')) {
+          if (text.startsWith('❌') || text.startsWith('[ERROR]')) {
               console.warn('Instant transcribe returned legacy failure text:', text);
               return null;
           }
@@ -2235,7 +2235,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const uploadDocumentWithProgress = (wrapper) => {
       const formData = new FormData();
       formData.append('files', wrapper.file);
+      if (userProfile?.id) {
       formData.append('user_id', userProfile.id);
+      }
 
       const token = localStorage.getItem(AUTH_TOKEN_KEY);
       const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
@@ -2275,6 +2277,25 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
   };
 
+  const parseUploadResult = (data) => {
+      const okCount = Number(data?.ok ?? 0);
+      const status = data?.status;
+      const isSuccess = (status === 'success' || status === 'partial') && okCount > 0;
+      let error = data?.error || '';
+
+      if (!error && Array.isArray(data?.errors) && data.errors.length > 0) {
+          error = data.errors
+              .map(item => item?.error || item?.file)
+              .filter(Boolean)
+              .join('; ');
+      }
+
+      if (!error && status === 'failed') {
+          error = 'Upload failed';
+      }
+
+      return { isSuccess, error };
+  };
   const uploadAndVectorizeFiles = async (wrappers) => {
       if (!wrappers.length) return;
       setIsUploadingFile(true);
@@ -2285,7 +2306,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           for (const wrapper of wrappers) {
               try {
                   const data = await uploadDocumentWithProgress(wrapper);
-                  if (data.status === 'success') {
+                  const { isSuccess, error } = parseUploadResult(data);
+                  if (isSuccess) {
                       updatePendingFile(wrapper.id, {
                           status: 'done',
                           progress: 100,
@@ -2297,7 +2319,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       updatePendingFile(wrapper.id, {
                           status: 'error',
                           uploaded: false,
-                          error: data.error || 'Upload failed'
+                          error: error || 'Upload failed'
                       });
                   }
               } catch (error) {
@@ -2521,7 +2543,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   try {
                       const formData = new FormData();
                       formData.append('files', file);
+                      if (userProfile?.id) {
                       formData.append('user_id', userProfile.id);
+                      }
 
                       const token = localStorage.getItem(AUTH_TOKEN_KEY);
                       const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
@@ -2532,8 +2556,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           body: formData
                       });
                       const data = await res.json();
+                      const { isSuccess, error } = parseUploadResult(data);
 
-                      if (data.status === 'success') {
+                      if (isSuccess) {
                           if (data.previews) {
                              combinedContext += `[新上传文档摘要]\n${data.previews}\n\n`;
                           }
@@ -2544,6 +2569,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           ragTriggered = true;
                       } else {
                           console.error(`RAG Upload failed`, data);
+                          alert(`文件 ${file.name} 上传失败: ${error || 'Upload failed'}`);
                           hasError = true;
                       }
 
@@ -2975,7 +3001,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
       const result = await res.json();
       const recognizedText = typeof result?.text === 'string' ? result.text.trim() : '';
-      const isLegacyFailText = recognizedText.startsWith('❌');
+      const isLegacyFailText = recognizedText.startsWith('❌') || recognizedText.startsWith('[ERROR]');
 
       if (!res.ok || result?.success === false || isLegacyFailText) {
           const msg = result?.error || (isLegacyFailText ? recognizedText : `语音识别失败（${result?.error_code ?? 'unknown'}）`);
@@ -4996,46 +5022,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                 onDragOver={handleDragOver}
                                 onDrop={handleDrop}
                               >
-                                {/* ✨ [NEW] Ollama-style Model Selector Inside Input */}
-                                <div className="px-4 pt-3 pb-0.5 flex items-center justify-between">
-                                     <div className="relative" ref={backendDropdownRef}>
-                                          <button
-                                            onClick={() => setIsBackendDropdownOpen(!isBackendDropdownOpen)}
-                                            className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 transition-colors select-none group"
-                                          >
-                                              {llmBackend === 'local' ? (
-                                                  <><Cpu size={14} className="text-purple-500 group-hover:text-purple-600"/> <span>Qwen 2.5-coder (本地)</span></>
-                                              ) : (
-                                                  <><Cloud size={14} className="text-blue-500 group-hover:text-blue-600"/> <span>DeepSeek V3.2 (云端)</span></>
-                                              )}
-                                              <ChevronDown size={12} className={`transition-transform duration-200 ${isBackendDropdownOpen ? 'rotate-180' : ''}`}/>
-                                          </button>
-
-                                          {isBackendDropdownOpen && (
-                                              <div className={`absolute bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-100 dark:border-gray-700 py-1 z-50 animate-in fade-in zoom-in-95 duration-200 ${
-                                                isMobileViewport
-                                                  ? 'bottom-full left-0 mb-2 w-56 origin-bottom-left'
-                                                  : 'top-full left-0 mt-1 w-48 origin-top-left'
-                                              }`}>
-                                                  <button
-                                                      onClick={() => { setLlmBackend('local'); setIsBackendDropdownOpen(false); }}
-                                                      className={`w-full text-left px-3 py-2 text-xs font-medium flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-gray-700/50 ${llmBackend === 'local' ? 'text-purple-600 bg-purple-50 dark:bg-purple-900/20' : 'text-gray-700 dark:text-gray-300'}`}
-                                                  >
-                                                      <Cpu size={14} /> 本地 (Qwen 2.5-coder)
-                                                      {llmBackend === 'local' && <Check size={12} className="ml-auto"/>}
-                                                  </button>
-                                                  <button
-                                                      onClick={() => { setLlmBackend('cloud'); setIsBackendDropdownOpen(false); }}
-                                                      className={`w-full text-left px-3 py-2 text-xs font-medium flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-gray-700/50 ${llmBackend === 'cloud' ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-gray-700 dark:text-gray-300'}`}
-                                                  >
-                                                      <Cloud size={14} /> 云端 (DeepSeek V3.2)
-                                                      {llmBackend === 'cloud' && <Check size={12} className="ml-auto"/>}
-                                                  </button>
-                                              </div>
-                                          )}
-                                     </div>
-                                </div>
-
                                 {/* ✨ File Preview Area */}
                                 {pendingFiles.length > 0 && (
                                     <div className="px-4 pt-1 pb-1 flex flex-wrap gap-2">
@@ -5090,7 +5076,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                             className={`p-2 rounded-full transition-all duration-200 ${isPlusMenuOpen ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-white rotate-45' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'}`}
                                             title="更多功能"
                                         >
-                                            <Plus size={24} />
+                                            <Plus size={18} strokeWidth={1.6} />
                                         </button>
 
                                         {/* ✨ Plus Menu Dropdown */}
@@ -5193,6 +5179,48 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                     />
 
                                     <div className="mb-2 flex items-center gap-1 flex-shrink-0">
+                                       <div className="relative" ref={backendDropdownRef}>
+                                          <button
+                                            type="button"
+                                            onClick={() => setIsBackendDropdownOpen((prev) => !prev)}
+                                            className="inline-flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-700 bg-white/90 dark:bg-gray-800 px-2.5 py-1.5 text-[11px] font-medium text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:border-gray-300 dark:hover:border-gray-600 transition-colors"
+                                            title="切换模型后端"
+                                          >
+                                            {llmBackend === 'local' ? (
+                                              <>
+                                                <Cpu size={13} className="text-purple-500" />
+                                                <span className="hidden sm:inline">本地</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Cloud size={13} className="text-blue-500" />
+                                                <span className="hidden sm:inline">云端</span>
+                                              </>
+                                            )}
+                                            <ChevronDown size={12} className={`transition-transform duration-200 ${isBackendDropdownOpen ? 'rotate-180' : ''}`} />
+                                          </button>
+
+                                          {isBackendDropdownOpen && (
+                                            <div className="absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                                              <button
+                                                type="button"
+                                                onClick={() => { setLlmBackend('local'); setIsBackendDropdownOpen(false); }}
+                                                className={`w-full text-left px-3 py-2 text-xs font-medium flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-gray-700/50 ${llmBackend === 'local' ? 'text-purple-600 bg-purple-50 dark:bg-purple-900/20' : 'text-gray-700 dark:text-gray-300'}`}
+                                              >
+                                                      <Cpu size={14} /> 本地 (Qwen 2.5-coder)
+                                                {llmBackend === 'local' && <Check size={12} className="ml-auto"/>}
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => { setLlmBackend('cloud'); setIsBackendDropdownOpen(false); }}
+                                                className={`w-full text-left px-3 py-2 text-xs font-medium flex items-center gap-2 hover:bg-gray-50 dark:hover:bg-gray-700/50 ${llmBackend === 'cloud' ? 'text-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-gray-700 dark:text-gray-300'}`}
+                                              >
+                                                      <Cloud size={14} /> 云端 (DeepSeek V3.2)
+                                                {llmBackend === 'cloud' && <Check size={12} className="ml-auto"/>}
+                                              </button>
+                                            </div>
+                                          )}
+                                       </div>
                                        {!inputValue && (
                                           <button className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full transition-colors" onClick={() => setIsRecordingMode(true)} disabled={isProcessing || isUploadingFile}><Mic size={20} /></button>
                                        )}
@@ -5259,5 +5287,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 };
 
 export default DashboardPage;
+
 
 

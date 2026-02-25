@@ -23,7 +23,7 @@ _env_dir = os.path.dirname(__file__)
 load_dotenv(dotenv_path=os.path.join(_env_dir, ".env"), override=False)
 load_dotenv(dotenv_path=os.path.join(_env_dir, ".env.local"), override=True)
 
-# 初始化变量
+# Initialize optional modules
 auth_router = None
 user_router = None
 chat_router = None
@@ -47,7 +47,7 @@ generate_email_draft = None
 parse_ocr_content = None
 save_ocr_record = None
 warmup_embeddings = None
-# ✨ 新增
+# Added optional sync ASR callable
 baidu_asr_from_bytes = None
 
 
@@ -96,26 +96,26 @@ try:
     from ocr_structured import parse_ocr_content, save_ocr_record
     import voice_ws_proxy
     from admin_utils import _bearer_token, _get_token_iat, _get_user_from_token, _fetch_profile
-    # ✨ 导入同步识别函数
+    # Import sync ASR helper
     from voice_manager import baidu_asr_from_bytes
     from deepseek_llm import warmup_models
 
-    print("✅ 模块加载成功")
+    print("[Init] Modules loaded")
 except Exception as e:
     warmup_models = None
-    print(f"❌ [ImportError] 无法导入模块（部分功能可能不可用）：{e}")
+    print(f"[ImportError] Failed to import optional modules: {e}")
     import traceback
     traceback.print_exc()
 
-# Share 模块独立加载
+# Load share module separately
 share_manager = None
 try:
     import share_manager as _share_manager
 
     share_manager = _share_manager
-    print("✅ [Share] share_manager 已启用")
+    print("[Share] share_manager loaded")
 except Exception as e:
-    print(f"⚠️ [Share] share_manager 未启用: {e}")
+    print(f"[Share] share_manager unavailable: {e}")
     import traceback
     traceback.print_exc()
 
@@ -140,23 +140,23 @@ def _warmup_models():
 if OCRManager:
     try:
         ocr_agent = get_shared_ocr_manager() if get_shared_ocr_manager else OCRManager()
-        print("✅ OCR 引擎挂载成功")
+        print("[OCR] Engine initialized")
     except Exception as e:
-        print(f"❌ OCR 引擎初始化失败: {e}")
+        print(f"[OCR] Engine init failed: {e}")
         import traceback
         traceback.print_exc()
 else:
-    print("⚠️ OCR 模块未加载，跳过初始化")
+    print("[OCR] module not loaded, skip init")
 
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     if "health" not in request.url.path and "result" not in request.url.path:
-        print(f"\n📨 [网络请求] {request.method} {request.url.path}")
+        print(f"\n[HTTP] {request.method} {request.url.path}")
     start = time.time()
     response = await call_next(request)
     if "health" not in request.url.path and "result" not in request.url.path:
-        print(f"📤 完成 | 状态码 {response.status_code} | 耗时 {time.time() - start:.2f}s")
+        print(f"[HTTP] done | status {response.status_code} | took {time.time() - start:.2f}s")
     return response
 
 
@@ -211,15 +211,15 @@ if user_router: app.include_router(user_router)
 if chat_router:
     app.include_router(chat_router)
 else:
-    print("❌ 警告: Chat Router 未加载，/api/chat 接口将不可用")
+    print("[Warn] Chat Router not loaded, /api/chat is unavailable")
 if audit_router:
     app.include_router(audit_router)
 else:
-    print("⚠️ Audit Router not loaded, /api/audit endpoints unavailable")
+    print("[Warn] Audit Router not loaded, /api/audit endpoints unavailable")
 if admin_router:
     app.include_router(admin_router)
 else:
-    print("⚠️ Admin Router not loaded, /api/admin endpoints unavailable")
+    print("[Warn] Admin Router not loaded, /api/admin endpoints unavailable")
 if voice_ws_proxy: app.include_router(voice_ws_proxy.router, prefix="/api/ws", tags=["Voice WebSocket"])
 
 
@@ -329,7 +329,8 @@ async def save_session_context(session_id: str, payload: ContextPayload, user_id
 
 @app.post("/api/ocr/recognize")
 async def ocr_recognize(file: UploadFile = File(...), engine: Optional[str] = Form(None)):
-    if not ocr_agent: return {"error": "OCR 服务未就绪"}
+    if not ocr_agent:
+        return {"error": "OCR service unavailable"}
     try:
         engine_value = (engine or "standard").strip().lower()
         if engine_value not in ("vl", "standard"):
@@ -342,11 +343,12 @@ async def ocr_recognize(file: UploadFile = File(...), engine: Optional[str] = Fo
         result["file_url"] = file_url
         result["file_name"] = file.filename
         result["file_type"] = file.content_type or ""
-        if result.get("text") and not result["text"].startswith("❌"):
-            ocr_agent.store(result["text"], file.filename)
+        text_value = str(result.get("text") or "")
+        if text_value and not (text_value.startswith("\u274c") or text_value.startswith("[ERROR]")):
+            ocr_agent.store(text_value, file.filename)
         return {"success": True, "data": result}
     except Exception as e:
-        print(f"❌ OCR 接口异常: {e}")
+        print(f"[OCR] API error: {e}")
         return {"error": str(e)}
 
 
@@ -416,7 +418,7 @@ async def ocr_submit(payload: OCRSubmitPayload):
 @app.post("/api/voice/transcribe")
 async def transcribe(file: UploadFile = File(...)):
     """
-    【文件模式】上传文件 -> 存储 -> 异步转写 (适合长录音)
+    [File mode] upload file -> store -> async transcription (for long recordings)
     """
     if not submit_file_task: return {"error": "Voice Service Unavailable"}
     try:
@@ -424,24 +426,24 @@ async def transcribe(file: UploadFile = File(...)):
         task_info = get_task_result(task_id)
         file_path = task_info.get('file_path')
 
-        if not task_id: return {"error": "文件保存失败"}
+        if not task_id: return {"error": "File save failed"}
         return {
             "task_id": task_id,
             "message": "Task submitted via direct upload",
             "file_path": file_path
         }
     except Exception as e:
-        print(f"❌ 接口异常: {e}")
+        print(f"[Voice] API error: {e}")
         import traceback
         traceback.print_exc()
         return {"error": str(e)}
 
 
-# ✨ [新增] 实时语音/短语音识别接口
+# Added: realtime voice / short audio endpoint
 @app.post("/api/voice/instant")
 async def transcribe_instant(file: UploadFile = File(...)):
     """
-    【实时模式】直接上传字节流 -> 同步返回文本 (适合 VoiceRecorder 录制的短语音)
+    [Realtime mode] upload bytes directly -> return text synchronously (for short recordings)
     """
     if not baidu_asr_from_bytes: return {"error": "Voice Manager Unavailable"}
     try:
@@ -453,11 +455,11 @@ async def transcribe_instant(file: UploadFile = File(...)):
                 file.filename,
                 file.content_type or "audio/wav"
             )
-        # 调用 voice_manager 中的同步接口
+        # Call sync ASR helper in voice_manager
         text = baidu_asr_from_bytes(content, file.filename)
         return {"success": True, "text": text, "file_path": stored_path}
     except Exception as e:
-        print(f"❌ 实时语音接口异常: {e}")
+        print(f"[Voice] realtime API error: {e}")
         return {"error": str(e)}
 
 
@@ -468,7 +470,7 @@ async def transcribe_via_supabase(req: TranscribeRequest):
         task_id = await submit_supabase_task(req.file_path, req.original_name)
         return {"task_id": task_id, "message": "Task submitted via Supabase"}
     except Exception as e:
-        print(f"❌ Supabase 接口异常: {e}")
+        print(f"[Voice] Supabase API error: {e}")
         return {"error": str(e)}
 
 
@@ -489,38 +491,58 @@ async def get_audio_playback_url(path: str = Query(..., description="Supabase st
         return {"error": str(e)}
 
 
-# ✨ [修改] RAG 上传接口：返回 preview (预览内容)
+# Updated: RAG upload endpoint returns previews
 @app.post("/api/documents/upload")
-async def upload_docs(user_id: str = Form(...), files: List[UploadFile] = File(...)):
-    try:
-        if delete_user_documents: delete_user_documents(user_id)
-    except:
-        pass
+async def upload_docs(
+    request: Request,
+    user_id: Optional[str] = Form(None),
+    replace_existing: bool = Form(False),
+    files: List[UploadFile] = File(...),
+):
+    if not upload_document_to_vector_store:
+        return {"error": "Document Service Unavailable"}
+
+    resolved_user_id = (user_id or "").strip()
+    token = _bearer_token(request.headers.get("authorization")) if "_bearer_token" in globals() else None
+    if token:
+        try:
+            token_user = _get_user_from_token(token)
+            resolved_user_id = token_user.id
+        except Exception:
+            return JSONResponse(status_code=401, content={"error": "Invalid session token"})
+
+    if not resolved_user_id:
+        return JSONResponse(status_code=400, content={"error": "Missing user_id"})
+
+    if replace_existing and delete_user_documents:
+        try:
+            delete_user_documents(resolved_user_id)
+        except Exception:
+            pass
+
     ok, fail = 0, []
-    previews = []  # 收集成功文档的预览
-    if not upload_document_to_vector_store: return {"error": "Document Service Unavailable"}
+    previews = []
     for f in files:
         try:
             content = await f.read()
-            # ✨ 接收 3 个返回值
-            success, msg, preview_text = upload_document_to_vector_store(content, f.filename, user_id)
+            success, msg, preview_text = upload_document_to_vector_store(content, f.filename, resolved_user_id)
             if success:
                 ok += 1
                 if preview_text:
-                    previews.append(f"--- 文档: {f.filename} ---\n{preview_text}")
+                    previews.append(f"--- Document: {f.filename} ---\n{preview_text}")
             else:
                 fail.append({"file": f.filename, "error": msg})
         except Exception as e:
             fail.append({"file": f.filename, "error": str(e)})
 
+    status = "success" if ok > 0 and not fail else ("partial" if ok > 0 else "failed")
     return {
-        "status": "success",
+        "status": status,
         "ok": ok,
         "failed": len(fail),
         "errors": fail,
-        "previews": "\n\n".join(previews)  # 返回拼接后的预览
+        "previews": "\n\n".join(previews),
     }
-
 
 @app.post("/api/generate/report")
 def api_gen_report(req: ReportRequest):
@@ -541,5 +563,6 @@ if __name__ == "__main__":
 
     host = os.getenv("BACKEND_HOST", "0.0.0.0")
     port = int(os.getenv("BACKEND_PORT", "18011"))
-    print(f"🚀 FastAPI 已启动，监听 {host}:{port}")
+    print(f"[Server] FastAPI listening on {host}:{port}")
     uvicorn.run(app, host=host, port=port, ws_ping_interval=20, ws_ping_timeout=20)
+

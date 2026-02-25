@@ -109,6 +109,13 @@ DB_RESULT_CACHE_SIZE = int(os.getenv("DB_RESULT_CACHE_SIZE", "128"))
 DB_RESULT_CACHE_TTL = int(os.getenv("DB_RESULT_CACHE_TTL", "120"))
 DB_SUMMARY_CACHE_SIZE = int(os.getenv("DB_SUMMARY_CACHE_SIZE", "128"))
 DB_SUMMARY_CACHE_TTL = int(os.getenv("DB_SUMMARY_CACHE_TTL", "300"))
+DB_STATUS_EVENTS_ENABLED = os.getenv("DB_STATUS_EVENTS_ENABLED", "true").lower() != "false"
+DB_LOCAL_HISTORY_CONTEXT_MAX_CHARS = int(os.getenv("DB_LOCAL_HISTORY_CONTEXT_MAX_CHARS", "700"))
+DB_LOCAL_SUMMARY_CONTEXT_MAX_CHARS = int(os.getenv("DB_LOCAL_SUMMARY_CONTEXT_MAX_CHARS", "700"))
+DB_LOCAL_SESSION_STATE_MAX_CHARS = int(os.getenv("DB_LOCAL_SESSION_STATE_MAX_CHARS", "600"))
+DB_LOCAL_ACTIVE_CONTEXT_MAX_CHARS = int(os.getenv("DB_LOCAL_ACTIVE_CONTEXT_MAX_CHARS", "500"))
+DB_LOCAL_RESULT_PROMPT_MAX_CHARS = int(os.getenv("DB_LOCAL_RESULT_PROMPT_MAX_CHARS", "1200"))
+DB_LOCAL_SUMMARY_INCLUDE_CONTEXT = os.getenv("DB_LOCAL_SUMMARY_INCLUDE_CONTEXT", "false").lower() == "true"
 
 # ============================================================
 # 🧭 DDL 与 规范定义 (已根据 SQL 脚本更新)
@@ -493,6 +500,13 @@ class DatabaseManager:
         - 不重试不二次查询
         - 支持 model_type (local/cloud)
         """
+        is_local_backend = (model_type or "local").strip().lower() in {"", "local", "ollama"}
+
+        def _status_event(message: str):
+            if not DB_STATUS_EVENTS_ENABLED or not message:
+                return None
+            return {"type": "status", "message": message}
+
         def _should_stop() -> bool:
             try:
                 return bool(stop_checker and stop_checker())
@@ -518,10 +532,14 @@ class DatabaseManager:
             return
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        history_context = _trim_prompt_text(history_context, 1200)
-        summary_context = _trim_prompt_text(summary_context, 1200)
-        session_state = _trim_prompt_text(session_state, 1200)
-        active_context_content = _trim_prompt_text(active_context_content, 1000)
+        history_cap = DB_LOCAL_HISTORY_CONTEXT_MAX_CHARS if is_local_backend else 1200
+        summary_cap = DB_LOCAL_SUMMARY_CONTEXT_MAX_CHARS if is_local_backend else 1200
+        session_cap = DB_LOCAL_SESSION_STATE_MAX_CHARS if is_local_backend else 1200
+        active_cap = DB_LOCAL_ACTIVE_CONTEXT_MAX_CHARS if is_local_backend else 1000
+        history_context = _trim_prompt_text(history_context, history_cap)
+        summary_context = _trim_prompt_text(summary_context, summary_cap)
+        session_state = _trim_prompt_text(session_state, session_cap)
+        active_context_content = _trim_prompt_text(active_context_content, active_cap)
 
         selected_tables = _select_tables_for_query(user_query)
         db_spec = _build_db_spec(selected_tables) if DB_PROMPT_TABLE_FILTER else ENTERPRISE_DB_SPEC
@@ -556,6 +574,9 @@ class DatabaseManager:
         cache_key = f"{db_name}::{model_type}::{(user_query or '').strip()}::{context_sig}"
         raw_sql = _SQL_CACHE.get(cache_key)
         if not raw_sql:
+            status = _status_event("正在生成 SQL...")
+            if status:
+                yield status
             if _should_stop():
                 return
             try:
@@ -568,6 +589,10 @@ class DatabaseManager:
                 yield f"Model generation error: {e}"
                 return
             raw_sql = _ensure_limit(raw_sql, user_query, DB_AUTO_LIMIT)
+        else:
+            status = _status_event("命中 SQL 缓存，准备执行查询...")
+            if status:
+                yield status
 
         # 2) 安全校验 (SELECT 限制)
         if not _is_safe_readonly_sql(raw_sql):
@@ -602,6 +627,9 @@ class DatabaseManager:
         result_cache_key = f"{db_name}::{raw_sql}"
         query_result = _SQL_RESULT_CACHE.get(result_cache_key)
         if query_result is None:
+            status = _status_event("正在执行数据库查询...")
+            if status:
+                yield status
             if _should_stop():
                 return
             print(f"🔍 [DB] 执行 SQL (via {model_type}): {raw_sql}")
@@ -626,18 +654,21 @@ class DatabaseManager:
         # 5) 成功后进行总结（只总结一次，带缓存）
         if _should_stop():
             return
-        data_text, truncated = _truncate_result_text(query_result, DB_RESULT_PROMPT_MAX_CHARS)
+        data_limit = min(DB_RESULT_PROMPT_MAX_CHARS, DB_LOCAL_RESULT_PROMPT_MAX_CHARS) if is_local_backend else DB_RESULT_PROMPT_MAX_CHARS
+        data_text, truncated = _truncate_result_text(query_result, data_limit)
         truncate_note = "（数据已截断，仅供总结）" if truncated else ""
         response_pref = (response_instruction or "").strip()
         summary_context_parts = []
-        if session_state:
-            summary_context_parts.append(f"会话状态:\n{session_state}")
-        if summary_context:
-            summary_context_parts.append(f"摘要上下文:\n{summary_context}")
-        if history_context:
-            summary_context_parts.append(f"近期对话:\n{history_context}")
-        if active_context_content:
-            summary_context_parts.append(f"当前附加上下文:\n{active_context_content}")
+        include_summary_context = (not is_local_backend) or DB_LOCAL_SUMMARY_INCLUDE_CONTEXT
+        if include_summary_context:
+            if session_state:
+                summary_context_parts.append(f"会话状态:\n{session_state}")
+            if summary_context:
+                summary_context_parts.append(f"摘要上下文:\n{summary_context}")
+            if history_context:
+                summary_context_parts.append(f"近期对话:\n{history_context}")
+            if active_context_content:
+                summary_context_parts.append(f"当前附加上下文:\n{active_context_content}")
         summary_context_text = "\n\n".join(summary_context_parts).strip()
         context_prefix = f"上下文:\n{summary_context_text}\n" if summary_context_text else ""
         summary_prompt = (
@@ -662,10 +693,16 @@ class DatabaseManager:
         summary_cache_key = f"{db_name}::{summary_hash}"
         cached_summary = _SUMMARY_CACHE.get(summary_cache_key)
         if cached_summary:
+            status = _status_event("命中总结缓存。")
+            if status:
+                yield status
             yield cached_summary
             return
 
         # Use streaming for summary as well
+        status = _status_event("正在整理查询结果...")
+        if status:
+            yield status
         summary_chunks = []
         stream_iter = None
         try:

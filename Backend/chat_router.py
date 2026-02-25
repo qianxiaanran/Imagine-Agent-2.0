@@ -34,6 +34,8 @@ CONTEXT_EVENT_SCAN_LIMIT = int(os.getenv("CONTEXT_EVENT_SCAN_LIMIT", "30"))
 CONTEXT_COMPACTION_SCAN_LIMIT = int(os.getenv("CONTEXT_COMPACTION_SCAN_LIMIT", "80"))
 CONTEXT_COMPACTION_TRIGGER_CHARS = int(os.getenv("CONTEXT_COMPACTION_TRIGGER_CHARS", "8000"))
 CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL", "8"))
+DB_LOCAL_FAST_CONTEXT = os.getenv("DB_LOCAL_FAST_CONTEXT", "true").lower() != "false"
+DB_LOCAL_HISTORY_LIMIT = int(os.getenv("DB_LOCAL_HISTORY_LIMIT", "4"))
 
 # -----------------------------------------------------------------------------
 
@@ -1094,7 +1096,7 @@ def tool_get_stock(query: str) -> List[dict]:
                 stock_name = data[0]
 
         if stock_code:
-            # 2. 閼惧嘲褰囩€圭偞妞傜悰灞惧剰
+            # 2. 根据代码获取实时行情数据
             hq_url = f"http://hq.sinajs.cn/list={stock_code}"
             headers = {"Referer": "https://finance.sina.com.cn/"}
             hq_resp = requests.get(hq_url, headers=headers, timeout=5)
@@ -1502,7 +1504,7 @@ async def chat(
         previous_event.set()
         print(f"[Chat] Cancel previous in-flight stream for {stream_key}")
 
-    # 閼惧嘲褰囧Ο鈥崇€烽崥搴ｇ拋鍓х枂
+    # 模型后端选择（local / cloud）
     model_backend = req.model_backend or "local"
     model_id = (req.modelId or "").strip()
 
@@ -1563,6 +1565,11 @@ async def chat(
         cached = shared_context_cache.get(cache_key)
         if cached is not None:
             return cached
+        is_db_local_fast = (
+            DB_LOCAL_FAST_CONTEXT
+            and normalized_mode == "database"
+            and (model_backend or "local").strip().lower() in {"", "local", "ollama"}
+        )
 
         history_text = _get_plain_history(
             user_id,
@@ -1582,7 +1589,7 @@ async def chat(
                 active_context_content=active_context,
                 ui_mode=normalized_mode
             )
-            if memory_summary:
+            if memory_summary and not is_db_local_fast:
                 history_msgs = _get_langchain_history(
                     user_id,
                     session_id,
@@ -1600,7 +1607,7 @@ async def chat(
                     )
             if not hub.history_summary and history_text:
                 hub.history_summary = history_text[:800]
-            summary_context = hub.get_combined_context(max_len=2000)
+            summary_context = hub.get_combined_context(max_len=(900 if is_db_local_fast else 2000))
             if summary_context and not _is_context_related(message, summary_context, min_hits=1):
                 # Drop stale summary context when the topic has shifted.
                 summary_context = ""
@@ -1608,16 +1615,17 @@ async def chat(
             summary_context = ""
 
         session_state = ""
-        try:
-            compaction_payload = _maybe_compact_context(
-                user_id=user_id,
-                session_id=session_id,
-                mode=normalized_mode,
-                model_backend=model_backend,
-            )
-            session_state = _build_compaction_context_block(compaction_payload)
-        except Exception:
-            session_state = ""
+        if not is_db_local_fast:
+            try:
+                compaction_payload = _maybe_compact_context(
+                    user_id=user_id,
+                    session_id=session_id,
+                    mode=normalized_mode,
+                    model_backend=model_backend,
+                )
+                session_state = _build_compaction_context_block(compaction_payload)
+            except Exception:
+                session_state = ""
 
         bundle = {
             "history_text": history_text or "",
@@ -1864,7 +1872,10 @@ async def chat(
 
         full_reply = ""
         try:
-            shared_ctx = _get_shared_context("database", history_limit=6)
+            db_history_limit = 6
+            if DB_LOCAL_FAST_CONTEXT and (model_backend or "local").strip().lower() in {"", "local", "ollama"}:
+                db_history_limit = max(1, DB_LOCAL_HISTORY_LIMIT)
+            shared_ctx = _get_shared_context("database", history_limit=db_history_limit)
             # 来源：先发数据库信息，后续收到 SQL 事件后会追加
             db_sources: List[Dict[str, Any]] = [{
                 "type": "database",

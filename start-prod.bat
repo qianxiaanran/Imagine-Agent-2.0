@@ -45,11 +45,11 @@ if exist "%ROOT%\Backend\.env.local" (
   for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /i "OLLAMA_NUM_PARALLEL=" "%ROOT%\Backend\.env.local"`) do set "OLLAMA_NUM_PARALLEL=%%B"
   for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /i "OLLAMA_MAX_QUEUE=" "%ROOT%\Backend\.env.local"`) do set "OLLAMA_MAX_QUEUE=%%B"
 )
-if not defined OLLAMA_BASE_URL set "OLLAMA_BASE_URL=http://127.0.0.1:11500"
+if not defined OLLAMA_BASE_URL set "OLLAMA_BASE_URL=http://127.0.0.1:11434"
 if not defined OLLAMA_NUM_PARALLEL set "OLLAMA_NUM_PARALLEL=2"
 if not defined OLLAMA_MAX_QUEUE set "OLLAMA_MAX_QUEUE=128"
 
-set "OLLAMA_HOSTPORT=127.0.0.1:11500"
+set "OLLAMA_HOSTPORT=127.0.0.1:11434"
 for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$u=[uri]'%OLLAMA_BASE_URL%'; Write-Output ($u.Host + ':' + $u.Port)"`) do set "OLLAMA_HOSTPORT=%%A"
 
 echo [0/4] Ensuring local Ollama is running...
