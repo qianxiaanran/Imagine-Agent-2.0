@@ -3109,8 +3109,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       handleSendMessage(editingMessageText, true);
   };
 
+  const getRenderedMessageText = (idx) => {
+      if (typeof document === 'undefined') return '';
+      const target = document.querySelector(`[data-message-content-id="${idx}"]`);
+      if (!target) return '';
+      return String(target.innerText || target.textContent || '')
+          .replace(/\u00A0/g, ' ')
+          .trim();
+  };
+
   const handleCopy = (content, idx) => {
-      navigator.clipboard.writeText(content).then(() => {
+      const renderedText = getRenderedMessageText(idx);
+      const textToCopy = renderedText || String(content || '');
+      navigator.clipboard.writeText(textToCopy).then(() => {
           setCopiedIdx(idx);
           setTimeout(() => setCopiedIdx(null), 2000);
       });
@@ -4782,7 +4793,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                                 </div>
                                               </div>
                                             ) : (
-                                              <StructuredContent content={isStreamingMessage ? (streamingAssistantText || msg.content || "") : msg.content} role={msg.role} enableMarkdown={allowMarkdown} streaming={isStreamingMessage} />
+                                              <div data-message-content-id={messageIndex}>
+                                                <StructuredContent content={isStreamingMessage ? (streamingAssistantText || msg.content || "") : msg.content} role={msg.role} enableMarkdown={allowMarkdown} streaming={isStreamingMessage} />
+                                              </div>
                                             )}
                                             {msg.role === 'assistant' && msg.sources && msg.sources.length > 0 && (
                                               <div className="mt-1">
