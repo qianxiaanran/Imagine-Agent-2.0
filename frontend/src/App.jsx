@@ -1,22 +1,18 @@
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import ThemeProvider from './context/ThemeContext';
 import GlobalStyles from './components/GlobalStyles';
 import LoadingScreen from './components/LoadingScreen';
 import ErrorBoundary from './components/ErrorBoundary';
-import LoginModal from './pages/Login/LoginModal';
-import RegisterModal from './pages/Login/RegisterModal';
 import { AUTH_TOKEN_KEY } from './api/apiClient';
-import { supabase } from './api/supabaseClient';
-// 引入 userApi 用于验证 token 有效性
-import userApi from './api/user';
 
-// 预加载函数
 const loadLandingPage = () => import('./pages/LandingPage');
 const loadCapabilitiesPage = () => import('./pages/CapabilitiesPage');
 const loadQuickStartPage = () => import('./pages/QuickStartPage');
 const loadDashboardPage = () => import('./pages/Dashboard/DashboardPage');
 const loadSharedPage = () => import('./pages/Dashboard/SharedChatPage');
 const loadAdminPage = () => import('./pages/Admin/AdminPage');
+const loadLoginModal = () => import('./pages/Login/LoginModal');
+const loadRegisterModal = () => import('./pages/Login/RegisterModal');
 
 const LandingPage = React.lazy(loadLandingPage);
 const CapabilitiesPage = React.lazy(loadCapabilitiesPage);
@@ -24,53 +20,78 @@ const QuickStartPage = React.lazy(loadQuickStartPage);
 const DashboardPage = React.lazy(loadDashboardPage);
 const SharedChatPage = React.lazy(loadSharedPage);
 const AdminPage = React.lazy(loadAdminPage);
+const LoginModal = React.lazy(loadLoginModal);
+const RegisterModal = React.lazy(loadRegisterModal);
+
+let supabaseClientPromise;
+const getSupabaseClient = async () => {
+  if (!supabaseClientPromise) {
+    supabaseClientPromise = import('./api/supabaseClient').then((module) => module.supabase);
+  }
+  return supabaseClientPromise;
+};
+
+let userApiPromise;
+const getUserApi = async () => {
+  if (!userApiPromise) {
+    userApiPromise = import('./api/user').then((module) => module.default);
+  }
+  return userApiPromise;
+};
 
 export default function App() {
   const [authModalView, setAuthModalView] = useState('closed');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [currentMode, setCurrentMode] = useState('general');
-  const REMEMBER_UNTIL_KEY = 'app_auth_remember_until';
-
-  // 🔒 资源锁状态
   const [isAuthReady, setIsAuthReady] = useState(false);
 
-  // ✨ 路由检测
+  const REMEMBER_UNTIL_KEY = 'app_auth_remember_until';
+
   const normalizedPath = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
   const isShareRoute = normalizedPath.startsWith('/share/');
   const isAdminRoute = normalizedPath.startsWith('/admin');
   const isCapabilitiesRoute = normalizedPath === '/capabilities';
   const isQuickStartRoute = normalizedPath === '/quickstart';
-
-  // 只有当所有锁都打开时，才移除 Loading 遮罩
   const shouldShowLoading = !isAuthReady;
 
-  // 1. Auth check
-
   useEffect(() => {
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
-      if (!rememberUntil) return;
-      if (rememberUntil <= Date.now()) {
-        supabase.auth.signOut();
-        localStorage.removeItem(REMEMBER_UNTIL_KEY);
-        localStorage.removeItem(AUTH_TOKEN_KEY);
-        setIsAuthenticated(false);
-        return;
-      }
-      if (session?.access_token) {
-        localStorage.setItem(AUTH_TOKEN_KEY, session.access_token);
-      } else {
-        localStorage.removeItem(AUTH_TOKEN_KEY);
-        localStorage.removeItem(REMEMBER_UNTIL_KEY);
-      }
-    });
+    let unsubscribe = null;
+    let isDisposed = false;
 
-    return () => data?.subscription?.unsubscribe();
+    (async () => {
+      const supabase = await getSupabaseClient();
+      if (isDisposed) return;
+
+      const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+        const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
+        if (!rememberUntil) return;
+
+        if (rememberUntil <= Date.now()) {
+          void supabase.auth.signOut();
+          localStorage.removeItem(REMEMBER_UNTIL_KEY);
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+          setIsAuthenticated(false);
+          return;
+        }
+
+        if (session?.access_token) {
+          localStorage.setItem(AUTH_TOKEN_KEY, session.access_token);
+        } else {
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+          localStorage.removeItem(REMEMBER_UNTIL_KEY);
+        }
+      });
+
+      unsubscribe = () => data?.subscription?.unsubscribe();
+    })();
+
+    return () => {
+      isDisposed = true;
+      unsubscribe?.();
+    };
   }, []);
 
-  // Auth validation & preload
   useEffect(() => {
-    // Share route skips auth check
     if (isShareRoute) {
       setIsAuthReady(true);
       loadSharedPage();
@@ -97,12 +118,15 @@ export default function App() {
         const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
         const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY);
         const hasAuthHint = rememberUntil > 0 || hasStoredToken;
+
         if (!hasAuthHint) {
           preloadPublicPage();
           settleAuth();
           return;
         }
+
         if (rememberUntil) {
+          const supabase = await getSupabaseClient();
           if (rememberUntil <= Date.now()) {
             await supabase.auth.signOut();
             localStorage.removeItem(REMEMBER_UNTIL_KEY);
@@ -120,6 +144,7 @@ export default function App() {
         const token = localStorage.getItem(AUTH_TOKEN_KEY);
         if (token) {
           try {
+            const userApi = await getUserApi();
             const profile = await userApi.getProfile();
             if (profile && profile.id && profile.id !== 'anonymous') {
               isValidSession = true;
@@ -133,33 +158,34 @@ export default function App() {
               localStorage.removeItem(AUTH_TOKEN_KEY);
             }
           } catch (err) {
-            console.warn("Token validation failed:", err);
+            console.warn('Token validation failed:', err);
             localStorage.removeItem(AUTH_TOKEN_KEY);
           }
         }
-      } catch (e) {
-        console.error("Auth check logic error", e);
+      } catch (error) {
+        console.error('Auth check logic error', error);
       } finally {
         if (!isValidSession) preloadPublicPage();
         settleAuth();
       }
     };
-    checkAuth();
+
+    void checkAuth();
   }, [isShareRoute, isAdminRoute, isCapabilitiesRoute, isQuickStartRoute]);
 
-  // 4. 修复滚动锁定：确保 loading 结束后 body 可以滚动
   useEffect(() => {
     if (shouldShowLoading) {
       document.body.style.overflow = 'hidden';
-    } else {
-      // 延迟一点点释放，配合淡出动画
-      const timer = setTimeout(() => {
+      return () => {
         document.body.style.overflow = 'unset';
-      }, 100);
-      return () => clearTimeout(timer);
+      };
     }
-    // 清理函数
-    return () => { document.body.style.overflow = 'unset'; };
+
+    const timer = setTimeout(() => {
+      document.body.style.overflow = 'unset';
+    }, 100);
+
+    return () => clearTimeout(timer);
   }, [shouldShowLoading]);
 
   useEffect(() => {
@@ -167,21 +193,43 @@ export default function App() {
       const height = window.innerHeight || document.documentElement.clientHeight;
       document.documentElement.style.setProperty('--app-height', `${height}px`);
     };
+
     updateAppHeight();
     window.addEventListener('resize', updateAppHeight);
     window.addEventListener('orientationchange', updateAppHeight);
+
     return () => {
       window.removeEventListener('resize', updateAppHeight);
       window.removeEventListener('orientationchange', updateAppHeight);
     };
   }, []);
 
-  const handleLoginSuccess = () => { setAuthModalView('closed'); setIsAuthenticated(true); loadDashboardPage(); };
-  const handleRegisterSuccess = () => { setAuthModalView('closed'); setIsAuthenticated(true); loadDashboardPage(); };
+  const openLoginModal = () => {
+    loadLoginModal();
+    setAuthModalView('login');
+  };
+
+  const openRegisterModal = () => {
+    loadRegisterModal();
+    setAuthModalView('register');
+  };
+
+  const handleLoginSuccess = () => {
+    setAuthModalView('closed');
+    setIsAuthenticated(true);
+    loadDashboardPage();
+  };
+
+  const handleRegisterSuccess = () => {
+    setAuthModalView('closed');
+    setIsAuthenticated(true);
+    loadDashboardPage();
+  };
+
   const handleLogout = () => {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(REMEMBER_UNTIL_KEY);
-    supabase.auth.signOut();
+    void getSupabaseClient().then((supabase) => supabase.auth.signOut());
     setIsAuthenticated(false);
     setCurrentMode('general');
     loadLandingPage();
@@ -193,62 +241,65 @@ export default function App() {
         <GlobalStyles />
 
         <div className={`min-h-screen transition-opacity duration-700 ease-in-out ${shouldShowLoading ? 'opacity-0' : 'opacity-100'}`}>
-           <Suspense
-             fallback={shouldShowLoading ? (
-               <div className="min-h-screen bg-white dark:bg-gray-950"></div>
-             ) : (
-               <LoadingScreen text="正在加载页面..." isVisible />
-             )}
-           >
-             {/* ✨ 路由逻辑分支 */}
-             {isShareRoute ? (
-               <SharedChatPage />
-             ) : (
-                 isAuthenticated ? (
-                   isAdminRoute ? (
-                     <AdminPage />
-                   ) : (
-                     <DashboardPage
-                       onLogout={handleLogout}
-                       currentMode={currentMode}
-                       onModeChange={setCurrentMode}
-                     />
-                   )
-                 ) : (
-                   isCapabilitiesRoute ? (
-                     <CapabilitiesPage onOpenLogin={() => setAuthModalView('login')} />
-                   ) : (
-                     isQuickStartRoute ? (
-                       <QuickStartPage onOpenLogin={() => setAuthModalView('login')} />
-                     ) : (
-                       <LandingPage onOpenLogin={() => setAuthModalView('login')} />
-                     )
-                   )
-                 )
-             )}
-           </Suspense>
+          <Suspense
+            fallback={
+              shouldShowLoading ? (
+                <div className="min-h-screen bg-white dark:bg-gray-950"></div>
+              ) : (
+                <LoadingScreen text="正在加载页面..." isVisible />
+              )
+            }
+          >
+            {isShareRoute ? (
+              <SharedChatPage />
+            ) : isAuthenticated ? (
+              isAdminRoute ? (
+                <AdminPage />
+              ) : (
+                <DashboardPage onLogout={handleLogout} currentMode={currentMode} onModeChange={setCurrentMode} />
+              )
+            ) : isCapabilitiesRoute ? (
+              <CapabilitiesPage onOpenLogin={openLoginModal} />
+            ) : isQuickStartRoute ? (
+              <QuickStartPage onOpenLogin={openLoginModal} />
+            ) : (
+              <LandingPage onOpenLogin={openLoginModal} />
+            )}
+          </Suspense>
         </div>
 
-        {/* Loading 遮罩：增加 pointer-events-none 防止在不可见时阻挡鼠标事件 */}
         <div className={`fixed inset-0 z-[9999] transition-opacity duration-500 ${shouldShowLoading ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
           <LoadingScreen
-              text={isAuthenticated ? "正在加载工作台..." : (isShareRoute ? "正在解析分享内容..." : "正在启动智能引擎...")}
-              isVisible={shouldShowLoading}
+            text={
+              isAuthenticated
+                ? '正在加载工作台...'
+                : isShareRoute
+                  ? '正在解析分享内容...'
+                  : '正在启动智能引擎...'
+            }
+            isVisible={shouldShowLoading}
           />
         </div>
 
-        <LoginModal
-          isOpen={authModalView === 'login'}
-          onClose={() => setAuthModalView('closed')}
-          onSwitchToRegister={() => setAuthModalView('register')}
-          onLoginSuccess={handleLoginSuccess}
-        />
-        <RegisterModal
-          isOpen={authModalView === 'register'}
-          onClose={() => setAuthModalView('closed')}
-          onSwitchToLogin={() => setAuthModalView('login')}
-          onRegisterSuccess={handleRegisterSuccess}
-        />
+        <Suspense fallback={null}>
+          {authModalView === 'login' && (
+            <LoginModal
+              isOpen
+              onClose={() => setAuthModalView('closed')}
+              onSwitchToRegister={openRegisterModal}
+              onLoginSuccess={handleLoginSuccess}
+            />
+          )}
+
+          {authModalView === 'register' && (
+            <RegisterModal
+              isOpen
+              onClose={() => setAuthModalView('closed')}
+              onSwitchToLogin={openLoginModal}
+              onRegisterSuccess={handleRegisterSuccess}
+            />
+          )}
+        </Suspense>
       </ThemeProvider>
     </ErrorBoundary>
   );
