@@ -5,38 +5,38 @@ import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import List, Tuple, Optional, Iterable
+from typing import List, Tuple, Optional, Iterable, Set
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from supabase_client import require_supabase
 
-# ✅ [修复] 兼容 Document 类的导入路径
+# Compatibility import for Document across LangChain versions.
 try:
     from langchain_core.documents import Document
 except ImportError:
     try:
         from langchain.schema import Document
     except ImportError:
-        print("❌ [Documents] 无法导入 Document 类")
+        print("[Documents] failed to import Document")
         Document = None
 
-# ✅ [修复] 兼容 TextSplitter 类的导入路径
+# Compatibility import for text splitter across LangChain versions.
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
     try:
         from langchain.text_splitter import RecursiveCharacterTextSplitter
     except ImportError:
-        print("❌ [Documents] 无法导入 RecursiveCharacterTextSplitter")
+        print("[Documents] failed to import RecursiveCharacterTextSplitter")
         RecursiveCharacterTextSplitter = None
 
-# 1. 文本切分器配置（保留默认，实际切分使用自适应构建）
+# Default splitter config; adaptive split logic is used later.
 if RecursiveCharacterTextSplitter:
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 else:
     text_splitter = None
 
-# 2. Embedding 模型 (单例模式)
+# Embedding model singleton
 _embeddings = None
 
 
@@ -130,7 +130,7 @@ def _adaptive_split_documents(docs: Iterable, filename: str) -> list:
             if len(split_sections) >= 2:
                 sections = split_sections
         elif is_table:
-            # 表格类：优先按空行切分，避免条目被打散
+            # For table-like text, split by empty lines first to preserve rows.
             sections = [s for s in re.split(r"\n{2,}", content) if s.strip()]
 
         for section in sections:
@@ -138,7 +138,7 @@ def _adaptive_split_documents(docs: Iterable, filename: str) -> list:
             if not section:
                 continue
             if splitter and len(section) > chunk_size * 1.4:
-                # 使用 splitter 二次拆分，保留 page 元数据
+                # Second pass split while preserving page metadata.
                 temp_doc = _make_document(section, metadata)
                 for piece in splitter.split_documents([temp_doc]):
                     all_chunks.append(piece)
@@ -181,9 +181,89 @@ def _normalize_source_name(value: Optional[str]) -> str:
     return text.strip()
 
 
+def _extract_source_candidates(metadata: Optional[dict]) -> Set[str]:
+    if not isinstance(metadata, dict):
+        return set()
+    return {
+        _normalize_source_name(metadata.get("source")).lower(),
+        _normalize_source_name(metadata.get("file_name")).lower(),
+        _normalize_source_name(metadata.get("title")).lower(),
+    } - {""}
+
+
+def _is_generic_summary_query(query: str) -> bool:
+    if not query:
+        return False
+    q = " ".join(str(query).lower().split())
+    if not q:
+        return False
+
+    summary_keywords = (
+        "\u603b\u7ed3", "\u6982\u62ec", "\u6458\u8981", "\u63d0\u70bc",
+        "\u68b3\u7406", "\u6982\u8ff0", "\u603b\u89c8",
+        "summary", "summarize", "overview", "tldr", "recap",
+    )
+    trigger = any(k in q for k in summary_keywords)
+    if not trigger:
+        return False
+
+    broad_keywords = (
+        "\u6587\u6863", "\u6587\u4ef6", "\u5168\u6587", "\u5185\u5bb9",
+        "\u8fd9\u4e2a", "\u8fd9\u4efd", "\u9644\u4ef6",
+        "document", "file", "full text", "full-text", "all",
+    )
+    # Keep this conservative: mostly short broad prompts like "总结文档".
+    return len(q) <= 48 or any(k in q for k in broad_keywords)
+
+
+def _get_recent_source_names(sb, user_id: str, max_sources: int = 2, scan_rows: int = 240) -> List[str]:
+    rows = []
+    try:
+        rows = (
+            sb.table("documents")
+            .select("metadata, created_at")
+            .eq("metadata->>user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(scan_rows)
+            .execute()
+        ).data or []
+    except Exception:
+        try:
+            rows = (
+                sb.table("documents")
+                .select("metadata, id")
+                .eq("metadata->>user_id", user_id)
+                .order("id", desc=True)
+                .limit(scan_rows)
+                .execute()
+            ).data or []
+        except Exception:
+            rows = []
+
+    ordered_sources: List[str] = []
+    seen = set()
+    for row in rows:
+        metadata = dict(row.get("metadata") or {})
+        source = (
+            _normalize_source_name(metadata.get("source"))
+            or _normalize_source_name(metadata.get("file_name"))
+            or _normalize_source_name(metadata.get("title"))
+        )
+        if not source:
+            continue
+        key = source.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered_sources.append(source)
+        if len(ordered_sources) >= max_sources:
+            break
+    return ordered_sources
+
+
 def _get_torch_device() -> str:
     """
-    优先使用 GPU（CUDA），不可用时回退 CPU。
+    Prefer GPU (CUDA); fallback to CPU when unavailable.
     """
     try:
         import torch
@@ -196,8 +276,7 @@ def _get_torch_device() -> str:
 
 def _ensure_torch_pytree_compat():
     """
-    兼容旧版 torch：transformers 期望 torch.utils._pytree.register_pytree_node
-    但旧版仅有 _register_pytree_node，做一次别名补齐即可。
+    Compatibility shim for older torch versions used by transformers.
     """
     try:
         import torch  # noqa: F401
@@ -207,7 +286,7 @@ def _ensure_torch_pytree_compat():
             base_fn = _pytree._register_pytree_node  # type: ignore[attr-defined]
 
             def _register_wrapper(*args, **kwargs):
-                # 兼容 transformers 传入的新参数
+                # Drop newer kwargs that old torch versions do not support.
                 for key in (
                     "serialized_type_name",
                     "to_dumpable_context",
@@ -218,54 +297,54 @@ def _ensure_torch_pytree_compat():
                 try:
                     return base_fn(*args, **kwargs)
                 except TypeError:
-                    # 某些老版本签名只接受 (typ, flatten_fn, unflatten_fn)
+                    # Some old versions only accept (typ, flatten_fn, unflatten_fn).
                     if len(args) >= 3:
                         return base_fn(args[0], args[1], args[2])
                     raise
 
-            # 无论是否已存在，都用 wrapper 覆盖，防止参数不匹配
+            # Always wrap to avoid signature mismatch.
             _pytree.register_pytree_node = _register_wrapper  # type: ignore[attr-defined]
     except Exception:
-        # 不阻断主流程，后续由实际报错提示
+        # Do not block main flow.
         pass
 
 
 def get_embeddings():
     global _embeddings
     if _embeddings is None:
-        # ✅ 本地模型路径
+        # Local embedding model path.
         local_model_path = r"F:\Enterprise-Intelligent-Office-Agent-2.0\bge-small-zh-v1.5"
 
-        print(f"📥 [Model] 正在加载本地 Embedding 模型: {local_model_path} ...", flush=True)
+        print(f"[Model] loading local embedding model: {local_model_path} ...", flush=True)
 
         if not os.path.exists(local_model_path):
-            print(f"❌ [Model] 警告：找不到路径 {local_model_path}", flush=True)
+            print(f"[Model] warning: path not found {local_model_path}", flush=True)
 
         _ensure_torch_pytree_compat()
         device = _get_torch_device()
         if device == "cuda":
-            print("✅ [Model] Embedding 使用 GPU (CUDA)", flush=True)
+            print("[Model] embedding on GPU (CUDA)", flush=True)
         else:
-            print("⚠️ [Model] Embedding 未检测到 GPU，回退 CPU", flush=True)
+            print("[Model] embedding fallback to CPU", flush=True)
 
         _embeddings = HuggingFaceEmbeddings(
             model_name=local_model_path,
             model_kwargs={"device": device}
         )
-        print("✅ [Model] BGE-Small (512维) 加载完成", flush=True)
+        print("[Model] BGE-Small (512d) loaded", flush=True)
     return _embeddings
 
 
 def warmup_embeddings():
     """
-    预热 Embedding 模型，降低首轮请求延迟。
+    Warm up embedding model to reduce first-request latency.
     """
     try:
         model = get_embeddings()
         _ = model.embed_query("warmup")
-        print("✅ [Warmup] Embedding warmup completed", flush=True)
+        print("[Warmup] embedding warmup completed", flush=True)
     except Exception as e:
-        print(f"⚠️ [Warmup] Embedding warmup failed: {e}", flush=True)
+        print(f"[Warmup] embedding warmup failed: {e}", flush=True)
 
 
 def _build_single_doc(text: str, filename: str):
@@ -340,7 +419,7 @@ def _load_word_documents(path: str, filename: str, ext: str):
         if text:
             return _build_single_doc(text, filename)
         print(
-            f"⚠️ [Loader] .doc parsing tool missing for {filename}; "
+            f"[Loader] .doc parsing tool missing for {filename}; "
             f"install antiword/catdoc or convert to .docx.",
             flush=True,
         )
@@ -364,7 +443,7 @@ def load_documents(file_bytes: bytes, filename: str):
         else:
             docs = TextLoader(tmp_path).load()
     except Exception as e:
-        print(f"❌ [Loader] 文件加载失败 {filename}: {e}", flush=True)
+        print(f"[Loader] failed to load file {filename}: {e}", flush=True)
     finally:
         if os.path.exists(tmp_path):
             try:
@@ -376,29 +455,27 @@ def load_documents(file_bytes: bytes, filename: str):
 
 def delete_user_documents(user_id: str):
     """
-    🧹 清空该用户的所有文档数据
+    Clear all document chunks for a user.
     """
     try:
-        print(f"🧹 [Delete] 正在清空用户 {user_id} 的旧文档...", flush=True)
+        print(f"[Delete] clearing documents for user {user_id} ...", flush=True)
         sb = require_supabase()
-        # 使用 metadata 字段中的 user_id 进行过滤删除
-        # 注意：这里假设 Supabase 支持 ->> 语法，如果报错可能需要改用 RPC
+        # Filter by user_id kept in metadata.
         sb.table("documents").delete().eq("metadata->>user_id", user_id).execute()
-        print(f"✅ [Delete] 旧文档清理完毕", flush=True)
+        print("[Delete] old documents cleared", flush=True)
         return True
     except Exception as e:
-        print(f"⚠️ [Delete] 清理失败 (可能是首次上传): {e}", flush=True)
+        print(f"[Delete] failed: {e}", flush=True)
         return False
 
 
 def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: str) -> Tuple[bool, str, Optional[str]]:
     """
-    手动向量化并写入 Supabase。
-    返回: (Success, Message, PreviewText)
-    PreviewText 用于首次上传时直接给 LLM 提供上下文，解决"总结全文"类问题检索不到的尴尬。
+    Vectorize and persist a document into Supabase.
+    Returns (success, message, preview_text).
     """
     try:
-        print(f"📂 [Logic] 开始处理文件: {filename}", flush=True)
+        print(f"[Logic] processing file: {filename}", flush=True)
         docs = load_documents(file_bytes, filename)
         if not docs:
             ext = os.path.splitext(filename)[1].lower()
@@ -406,24 +483,25 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
                 return False, "Legacy .doc parsing unavailable. Convert to .docx or install antiword/catdoc.", None
             return False, "Empty or unreadable document", None
         chunks = _adaptive_split_documents(docs, filename)
-        print(f"✂️  [Logic] 已切分为 {len(chunks)} 个片段", flush=True)
+        print(f"[Logic] split into {len(chunks)} chunks", flush=True)
 
-        if not chunks: return False, "无法切分", None
+        if not chunks:
+            return False, "Unable to split document", None
 
-        # ✨ 提取前 N 个字符作为预览 (热数据)
-        # 通常取前 2000-3000 字符足够做摘要
+        # Use the first few chunks as preview text for immediate context.
         full_text_preview = "\n".join([c.page_content for c in chunks[:5]])
         if len(full_text_preview) > 3000:
-            full_text_preview = full_text_preview[:3000] + "...(剩余内容在知识库中)"
+            full_text_preview = full_text_preview[:3000] + "...(remaining content in knowledge base)"
 
-        print("🧠 [Logic] 正在生成向量...", flush=True)
+        print("[Logic] generating embeddings...", flush=True)
         embeddings_model = get_embeddings()
         texts = [c.page_content for c in chunks]
 
-        # 批量生成向量
+        # Batch embedding generation.
         vectors = embeddings_model.embed_documents(texts)
 
         display_name = _normalize_source_name(filename) or filename
+        upload_timestamp = datetime.utcnow().isoformat() + "Z"
         records = []
         for i, (text, vector, chunk) in enumerate(zip(texts, vectors, chunks)):
             meta = dict(chunk.metadata or {}) if hasattr(chunk, "metadata") else {}
@@ -453,6 +531,7 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
                 "page_index": page_index,
                 "chunk_index": i,
                 "snippet": _make_snippet(text),
+                "uploaded_at": upload_timestamp,
             })
             records.append({
                 "content": text,
@@ -463,22 +542,22 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
                 "embedding": vector
             })
 
-        print(f"🚀 [Logic] 正在写入 Supabase...", flush=True)
+        print("[Logic] writing chunks to Supabase...", flush=True)
         sb = require_supabase()
         try:
             # Remove older chunks of the same file to avoid mixing old/new versions.
             sb.table("documents").delete().eq("metadata->>user_id", user_id).eq("metadata->>source", display_name).execute()
         except Exception as cleanup_err:
-            print(f"⚠️ [Logic] pre-clean same-source chunks failed: {cleanup_err}", flush=True)
+            print(f"[Logic] pre-clean same-source chunks failed: {cleanup_err}", flush=True)
         response = sb.table("documents").insert(records).execute()
 
         inserted_count = len(response.data) if response.data else 0
-        print(f"✅ [Logic] 写入成功! 行数: {inserted_count}", flush=True)
+        print(f"[Logic] write success, rows={inserted_count}", flush=True)
 
-        return True, f"成功存入 {inserted_count} 个片段", full_text_preview
+        return True, f"Stored {inserted_count} chunks", full_text_preview
 
     except Exception as e:
-        print(f"❌ [Logic] 上传错误: {e}", flush=True)
+        print(f"[Logic] upload failed: {e}", flush=True)
         import traceback
         traceback.print_exc()
         return False, str(e), None
@@ -492,7 +571,7 @@ def store_text_to_vector_store(
     session_id: Optional[str] = None,
 ) -> Tuple[bool, str, int]:
     """
-    直接写入 OCR 文本到 Supabase documents（含向量）
+    Write OCR text directly into Supabase documents (with embeddings).
     """
     if not text or not text.strip():
         return False, "empty", 0
@@ -534,7 +613,7 @@ def store_text_to_vector_store(
         inserted = len(response.data) if response.data else 0
         return True, "ok", inserted
     except Exception as e:
-        print(f"⚠️ [Logic] OCR 写入失败: {e}", flush=True)
+        print(f"[Logic] OCR write failed: {e}", flush=True)
         return False, str(e), 0
 
 
@@ -542,7 +621,7 @@ def _extract_tags_from_query(query: str) -> List[str]:
     if not query:
         return []
     tags = []
-    for match in re.findall(r"(?:#|标签[:：=]|tag[:：=])([\\w\\u4e00-\\u9fff_-]+)", query):
+    for match in re.findall(r"(?:#|(?:\u6807\u7b7e)[:：=]|tag[:：=])([\w\u4e00-\u9fff_-]+)", query):
         if match and match not in tags:
             tags.append(match)
     return tags
@@ -552,7 +631,7 @@ def _normalize_tags(raw_tags) -> List[str]:
     if not raw_tags:
         return []
     if isinstance(raw_tags, str):
-        parts = re.split(r"[，,;；\s]+", raw_tags)
+        parts = re.split(r"[,，;；\s]+", raw_tags)
         return [p.strip() for p in parts if p.strip()]
     if isinstance(raw_tags, list):
         return [str(t).strip() for t in raw_tags if str(t).strip()]
@@ -646,31 +725,34 @@ def search_user_documents(
     tags: Optional[List[str]] = None,
     source_files: Optional[List[str]] = None,
 ):
-    """
-    使用原生 RPC 调用检索（增强：标题/文件名加权 + 显式标签过滤）
-    """
+    """Search user documents from vector store with optional source and tag filters."""
     try:
-        print(f"🔍 [Search] 正在为用户 {user_id} 检索: {query}", flush=True)
+        print(f"[Search] user={user_id} query={query}", flush=True)
 
         embeddings_model = get_embeddings()
         query_vector = embeddings_model.embed_query(query)
 
-        # 拉更多候选，便于加权与过滤
         source_filter_names = []
         for name in (source_files or []):
             normalized = _normalize_source_name(str(name).strip())
             if normalized and normalized not in source_filter_names:
                 source_filter_names.append(normalized)
         source_filter_set = {name.lower() for name in source_filter_names}
-        fetch_k = max(k * (8 if source_filter_set else 3), k)
+
+        sb = require_supabase()
+        summary_focus = (not source_filter_set) and _is_generic_summary_query(query)
+        recent_source_names = _get_recent_source_names(sb, user_id, max_sources=2) if summary_focus else []
+        recent_source_set = {name.lower() for name in recent_source_names}
+
+        fetch_multiplier = 8 if source_filter_set else (10 if summary_focus else 3)
+        fetch_k = max(k * fetch_multiplier, k)
         rpc_params = {
             "query_embedding": query_vector,
             "match_threshold": float(match_threshold),
             "match_count": fetch_k,
-            "filter": {"user_id": user_id}
+            "filter": {"user_id": user_id},
         }
 
-        sb = require_supabase()
         response = sb.rpc("match_documents", rpc_params).execute()
 
         result_items = response.data or []
@@ -680,7 +762,12 @@ def search_user_documents(
                 if fallback_docs:
                     print(f"[Search] fallback by source hit {len(fallback_docs)} chunks", flush=True)
                     return fallback_docs
-            print("⚠️ [Search] 未找到匹配的文档片段", flush=True)
+            if summary_focus and recent_source_names:
+                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k)
+                if fallback_docs:
+                    print(f"[Search] fallback by recent source hit {len(fallback_docs)} chunks", flush=True)
+                    return fallback_docs
+            print("[Search] no matched chunks", flush=True)
             return []
 
         explicit_tags = tags or _extract_tags_from_query(query)
@@ -695,7 +782,7 @@ def search_user_documents(
                 _normalize_source_name(metadata.get("file_name"))
                 or _normalize_source_name(metadata.get("source"))
                 or _normalize_source_name(metadata.get("title"))
-                or "文档"
+                or "document"
             )
             title = _normalize_source_name(metadata.get("title")) or file_name
             page = metadata.get("page", metadata.get("page_number", 0))
@@ -704,19 +791,13 @@ def search_user_documents(
             metadata.setdefault("page", page)
             metadata.setdefault("snippet", _make_snippet(content))
 
-            if source_filter_set:
-                source_candidates = {
-                    _normalize_source_name(metadata.get("source")).lower(),
-                    _normalize_source_name(metadata.get("file_name")).lower(),
-                    _normalize_source_name(metadata.get("title")).lower(),
-                }
-                if not (source_candidates & source_filter_set):
-                    continue
+            source_candidates = _extract_source_candidates(metadata)
+            if source_filter_set and not (source_candidates & source_filter_set):
+                continue
 
             meta_tags = _normalize_tags(metadata.get("tags"))
-            if explicit_tags:
-                if not meta_tags or not any(t in meta_tags for t in explicit_tags):
-                    continue
+            if explicit_tags and (not meta_tags or not any(t in meta_tags for t in explicit_tags)):
+                continue
 
             base = item.get("similarity")
             if base is None:
@@ -734,6 +815,11 @@ def search_user_documents(
             boost += _content_boost(query, content)
             if explicit_tags:
                 boost += 0.08
+            if summary_focus and recent_source_set:
+                if source_candidates & recent_source_set:
+                    boost += 0.22
+                else:
+                    boost -= 0.08
 
             score = base + boost
             doc = _make_document(content, metadata)
@@ -745,15 +831,34 @@ def search_user_documents(
                 if fallback_docs:
                     print(f"[Search] fallback after filter hit {len(fallback_docs)} chunks", flush=True)
                     return fallback_docs
-            print("⚠️ [Search] 标签过滤后无结果", flush=True)
+            if summary_focus and recent_source_names:
+                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k)
+                if fallback_docs:
+                    print(f"[Search] fallback after summary filter hit {len(fallback_docs)} chunks", flush=True)
+                    return fallback_docs
+            print("[Search] no results after filters", flush=True)
             return []
+
+        if summary_focus and recent_source_set:
+            recent_scored = []
+            for score, doc in scored_docs:
+                doc_meta = getattr(doc, "metadata", {}) or {}
+                if _extract_source_candidates(doc_meta) & recent_source_set:
+                    recent_scored.append((score, doc))
+            if recent_scored:
+                scored_docs = recent_scored
+            elif recent_source_names:
+                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k)
+                if fallback_docs:
+                    print(f"[Search] summary fallback to recent source returned {len(fallback_docs)} chunks", flush=True)
+                    return fallback_docs
 
         scored_docs.sort(key=lambda x: x[0], reverse=True)
         documents = [doc for _, doc in scored_docs[:k]]
 
-        print(f"✅ [Search] 检索完成，找到 {len(documents)} 条相关片段", flush=True)
+        print(f"[Search] returned {len(documents)} chunks", flush=True)
         return documents
 
     except Exception as e:
-        print(f"❌ [Search] 检索发生严重错误: {e}", flush=True)
+        print(f"[Search] failed: {e}", flush=True)
         return []

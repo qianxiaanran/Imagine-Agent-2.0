@@ -2351,6 +2351,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       autoProcessModeRef.current = null;
 
       const run = async () => {
+          if (mode === 'ocr') {
+              const entries = pending.map(buildOcrEntry);
+              if (entries.length) {
+                  setCurrentSessionId(null);
+                  setPanelContent('');
+                  setSelectedOcrLine(null);
+                  setEditingOcrLine(null);
+                  setEditingOcrValue('');
+                  setOcrFiles(entries);
+                  setActiveOcrId(entries[0].id);
+                  setOcrPageIndex(0);
+              }
+          }
           const { context, sessionId, audioPath } = await processFiles(pending);
           if (mode === 'ocr') {
               applyOcrContext(context, sessionId);
