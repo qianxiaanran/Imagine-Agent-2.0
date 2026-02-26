@@ -22,23 +22,24 @@ BING_SUBSCRIPTION_KEY = os.environ.get("BING_SEARCH_V7_KEY", "")
 
 # 2. SerpAPI (备选): https://serpapi.com/
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "")
-MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "2000"))
-RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "1200"))
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
+RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "2600"))
 RAG_MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHUNK_CHARS", "700"))
 RAG_MAX_CHUNKS = int(os.getenv("RAG_MAX_CHUNKS", "6"))
 RAG_MAX_KB_TEXT_CHARS = int(os.getenv("RAG_MAX_KB_TEXT_CHARS", "4200"))
 FAST_CHAT_DIRECT = os.getenv("FAST_CHAT_DIRECT", "true").lower() != "false"
-FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "6"))
+FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "14"))
 PROMPT_USER_MAX_CHARS = int(os.getenv("PROMPT_USER_MAX_CHARS", "2600"))
-PROMPT_SESSION_STATE_MAX_CHARS = int(os.getenv("PROMPT_SESSION_STATE_MAX_CHARS", "900"))
-PROMPT_SUMMARY_MAX_CHARS = int(os.getenv("PROMPT_SUMMARY_MAX_CHARS", "1500"))
-PROMPT_HISTORY_MAX_CHARS = int(os.getenv("PROMPT_HISTORY_MAX_CHARS", "2200"))
-CONTEXT_COMPACTION_SOURCE_MAX_CHARS = int(os.getenv("CONTEXT_COMPACTION_SOURCE_MAX_CHARS", "9000"))
+PROMPT_SESSION_STATE_MAX_CHARS = int(os.getenv("PROMPT_SESSION_STATE_MAX_CHARS", "1800"))
+PROMPT_SUMMARY_MAX_CHARS = int(os.getenv("PROMPT_SUMMARY_MAX_CHARS", "3200"))
+PROMPT_HISTORY_MAX_CHARS = int(os.getenv("PROMPT_HISTORY_MAX_CHARS", "5200"))
+CONTEXT_COMPACTION_SOURCE_MAX_CHARS = int(os.getenv("CONTEXT_COMPACTION_SOURCE_MAX_CHARS", "12000"))
 PROMPT_LAYOUT_VERSION = "v1"
-CONTEXT_EVENT_SCAN_LIMIT = int(os.getenv("CONTEXT_EVENT_SCAN_LIMIT", "30"))
-CONTEXT_COMPACTION_SCAN_LIMIT = int(os.getenv("CONTEXT_COMPACTION_SCAN_LIMIT", "80"))
-CONTEXT_COMPACTION_TRIGGER_CHARS = int(os.getenv("CONTEXT_COMPACTION_TRIGGER_CHARS", "8000"))
-CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL", "8"))
+CONTEXT_EVENT_SCAN_LIMIT = int(os.getenv("CONTEXT_EVENT_SCAN_LIMIT", "60"))
+CONTEXT_COMPACTION_SCAN_LIMIT = int(os.getenv("CONTEXT_COMPACTION_SCAN_LIMIT", "160"))
+CONTEXT_COMPACTION_TRIGGER_CHARS = int(os.getenv("CONTEXT_COMPACTION_TRIGGER_CHARS", "2500"))
+CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL", "4"))
+HISTORY_TAIL_MIN_RECORDS = int(os.getenv("HISTORY_TAIL_MIN_RECORDS", "10"))
 DB_LOCAL_FAST_CONTEXT = os.getenv("DB_LOCAL_FAST_CONTEXT", "true").lower() != "false"
 DB_LOCAL_HISTORY_LIMIT = int(os.getenv("DB_LOCAL_HISTORY_LIMIT", "4"))
 
@@ -71,18 +72,22 @@ except Exception as e:
 # ✨ [修改] 增加安全导入，防止因为缺少 langgraph 导致整个后端无法启动
 app_graph = None
 memory_summary = None
+memory_vector = None
 try:
     from langgraph_agent import app_graph, _is_db_question_by_tables
     try:
-        from langgraph_agent import memory_summary
+        from langgraph_agent import memory_summary, memory_vector
     except Exception:
         memory_summary = None
+        memory_vector = None
 except ImportError as e:
     _is_db_question_by_tables = None
+    memory_vector = None
     print(
         f"⚠️ [ChatRouter] 警告: 无法导入 langgraph_agent ({e})。请确保安装了 langgraph: `pip install langgraph langchain-core`")
 except Exception as e:
     _is_db_question_by_tables = None
+    memory_vector = None
     print(f"⚠️ [ChatRouter] langgraph_agent 加载失败: {e}")
 
 router = APIRouter(prefix="/api", tags=["Chat"])
@@ -520,7 +525,7 @@ def _pick_relevant_history_records(
     query_has_signal = bool(query_terms)
     is_followup_turn = _looks_like_followup_turn(query)
     min_hits = 2 if len(query_terms) >= 5 else 1
-    keep_tail_count = 3 if is_followup_turn else 2
+    keep_tail_count = max(HISTORY_TAIL_MIN_RECORDS, 8 if is_followup_turn else 6)
 
     selected_rev: List[Dict[str, Any]] = []
     for idx, r in enumerate(reversed(candidate_records)):
@@ -640,6 +645,22 @@ def _maybe_append_context_event(
     if latest and latest.get("sig") == payload.get("sig"):
         return
     _append_meta_history_event(user_id, session_id, "context_event", payload)
+
+
+def _maybe_store_long_term_hint(user_id: str, text: str):
+    if user_id == "anonymous" or not memory_vector:
+        return
+    clean = _sanitize_history_content(text)
+    if not clean:
+        return
+    triggers = ["从现在起", "以后", "记住", "不要", "必须", "我的项目", "我想", "我叫"]
+    if not any(k in clean for k in triggers):
+        return
+    importance = 5 if any(k in clean for k in ["从现在起", "以后", "必须", "不要", "记住"]) else 3
+    try:
+        memory_vector.store(user_id=user_id, text=clean, importance=importance)
+    except Exception:
+        pass
 
 
 def _collect_compaction_source_lines(records: List[Dict[str, Any]], mode: Optional[str]) -> List[str]:
@@ -1615,6 +1636,7 @@ async def chat(
         context_content=context_content,
         personalization=personalization,
     )
+    _maybe_store_long_term_hint(user_id, message)
 
     print(
         f"🚀 [Chat] New Request: User={user_id}, Session={session_id}, Mode={mode}, Backend={model_backend}, Files={len(requested_source_files)}"
@@ -1643,6 +1665,21 @@ async def chat(
         )
         active_context = (context_content or "").strip()
 
+        compaction_payload: Optional[Dict[str, Any]] = None
+        session_state = ""
+        if not is_db_local_fast:
+            try:
+                compaction_payload = _maybe_compact_context(
+                    user_id=user_id,
+                    session_id=session_id,
+                    mode=normalized_mode,
+                    model_backend=model_backend,
+                )
+                session_state = _build_compaction_context_block(compaction_payload)
+            except Exception:
+                compaction_payload = None
+                session_state = ""
+
         summary_context = ""
         try:
             hub = ContextHub(
@@ -1652,11 +1689,43 @@ async def chat(
                 active_context_content=active_context,
                 ui_mode=normalized_mode
             )
+
+            # Inject compacted mid-term state into structured hub memory.
+            if isinstance(compaction_payload, dict):
+                facts = _normalize_text_list(compaction_payload.get("facts"), max_items=10, max_len=180)
+                preferences = _normalize_text_list(compaction_payload.get("preferences"), max_items=8, max_len=140)
+                constraints = _normalize_text_list(compaction_payload.get("constraints"), max_items=8, max_len=180)
+                open_items = _normalize_text_list(compaction_payload.get("open_items"), max_items=8, max_len=180)
+                if preferences or constraints:
+                    hub.add_memory_tokens(preferences + constraints, source="会话压缩")
+                if facts or open_items:
+                    hub.add_compressed_facts(facts + open_items, source="会话压缩")
+
+            # Pull long-term memory snippets even in FAST path when possible.
+            if memory_vector and not active_context and normalized_mode in {"general", "chat", "rag"}:
+                try:
+                    docs = memory_vector.retrieve(user_id, message, top_k=4) or []
+                    long_mem_snippets: List[str] = []
+                    for d in docs:
+                        snippet = _sanitize_history_content(getattr(d, "page_content", "") or "")
+                        if not snippet:
+                            continue
+                        snippet = _truncate_context(snippet, max_len=420)
+                        if snippet in long_mem_snippets:
+                            continue
+                        long_mem_snippets.append(snippet)
+                        if len(long_mem_snippets) >= 4:
+                            break
+                    if long_mem_snippets:
+                        hub.add_long_term_memory(long_mem_snippets, source="长期记忆检索")
+                except Exception:
+                    pass
+
             if memory_summary and not is_db_local_fast:
                 history_msgs = _get_langchain_history(
                     user_id,
                     session_id,
-                    limit=max(6, history_limit),
+                    limit=max(8, history_limit),
                     mode=normalized_mode,
                     query=message,
                 )
@@ -1669,26 +1738,14 @@ async def chat(
                         model_type=model_backend,
                     )
             if not hub.history_summary and history_text:
-                hub.history_summary = history_text[:800]
-            summary_context = hub.get_combined_context(max_len=(900 if is_db_local_fast else 2000))
+                hub.history_summary = history_text[:1200]
+
+            summary_context = hub.get_combined_context(max_len=(1600 if is_db_local_fast else 3600))
             if summary_context and not _is_context_related(message, summary_context, min_hits=1):
                 # Drop stale summary context when the topic has shifted.
                 summary_context = ""
         except Exception:
             summary_context = ""
-
-        session_state = ""
-        if not is_db_local_fast:
-            try:
-                compaction_payload = _maybe_compact_context(
-                    user_id=user_id,
-                    session_id=session_id,
-                    mode=normalized_mode,
-                    model_backend=model_backend,
-                )
-                session_state = _build_compaction_context_block(compaction_payload)
-            except Exception:
-                session_state = ""
 
         bundle = {
             "history_text": _truncate_context(history_text or "", max_len=max(PROMPT_HISTORY_MAX_CHARS, 1600)),

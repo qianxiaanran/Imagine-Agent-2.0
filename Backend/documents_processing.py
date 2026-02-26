@@ -1,6 +1,9 @@
 import tempfile
 import os
 import re
+import subprocess
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Tuple, Optional, Iterable
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
@@ -265,6 +268,87 @@ def warmup_embeddings():
         print(f"⚠️ [Warmup] Embedding warmup failed: {e}", flush=True)
 
 
+def _build_single_doc(text: str, filename: str):
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    return [
+        _make_document(
+            cleaned,
+            {
+                "source": filename,
+                "file_name": filename,
+                "title": filename,
+                "page": 0,
+                "page_index": 0,
+            },
+        )
+    ]
+
+
+def _extract_docx_xml_text(path: str) -> str:
+    """
+    Fallback parser for .docx without external dependencies:
+    read `word/document.xml` and flatten text nodes.
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            xml_bytes = zf.read("word/document.xml")
+        root = ET.fromstring(xml_bytes)
+        texts = [node.text for node in root.iter() if node.tag.endswith("}t") and node.text]
+        return "\n".join(texts).strip()
+    except Exception:
+        return ""
+
+
+def _extract_doc_text_via_cli(path: str) -> str:
+    """
+    Best-effort parser for legacy .doc using optional system tools.
+    """
+    for cmd in (["antiword", path], ["catdoc", path]):
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=20,
+                check=False,
+            )
+            out = (proc.stdout or "").strip()
+            if proc.returncode == 0 and out:
+                return out
+        except Exception:
+            continue
+    return ""
+
+
+def _load_word_documents(path: str, filename: str, ext: str):
+    if ext == ".docx":
+        try:
+            docs = Docx2txtLoader(path).load()
+            if docs and any((getattr(d, "page_content", "") or "").strip() for d in docs):
+                return docs
+        except Exception:
+            pass
+        text = _extract_docx_xml_text(path)
+        return _build_single_doc(text, filename)
+
+    if ext == ".doc":
+        text = _extract_doc_text_via_cli(path)
+        if text:
+            return _build_single_doc(text, filename)
+        print(
+            f"⚠️ [Loader] .doc parsing tool missing for {filename}; "
+            f"install antiword/catdoc or convert to .docx.",
+            flush=True,
+        )
+        return []
+
+    return []
+
+
 def load_documents(file_bytes: bytes, filename: str):
     ext = os.path.splitext(filename)[1].lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
@@ -275,8 +359,8 @@ def load_documents(file_bytes: bytes, filename: str):
     try:
         if ext == ".pdf":
             docs = PyPDFLoader(tmp_path).load()
-        elif ext == ".docx":
-            docs = Docx2txtLoader(tmp_path).load()
+        elif ext in {".doc", ".docx"}:
+            docs = _load_word_documents(tmp_path, filename, ext)
         else:
             docs = TextLoader(tmp_path).load()
     except Exception as e:
@@ -316,8 +400,11 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
     try:
         print(f"📂 [Logic] 开始处理文件: {filename}", flush=True)
         docs = load_documents(file_bytes, filename)
-        if not docs: return False, "空文件", None
-
+        if not docs:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext == ".doc":
+                return False, "Legacy .doc parsing unavailable. Convert to .docx or install antiword/catdoc.", None
+            return False, "Empty or unreadable document", None
         chunks = _adaptive_split_documents(docs, filename)
         print(f"✂️  [Logic] 已切分为 {len(chunks)} 个片段", flush=True)
 
