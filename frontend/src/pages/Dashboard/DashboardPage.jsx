@@ -569,7 +569,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           observer.observe(element);
           return () => observer.disconnect();
       }
-  }, [activeOcrFile?.id, ocrViewTab]);
+  }, [activeOcrFile?.id, activeOcrFile?.status, ocrViewTab]);
 
   useEffect(() => {
       if (!ocrCanvasRef.current || !activeOcrFile || !Array.isArray(activeOcrFile.pages) || !activeOcrFile.pages[ocrPageIndex]) return;
@@ -651,6 +651,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       ctx.restore();
   }, [
       activeOcrFile?.id,
+      activeOcrFile?.status,
       activeOcrFile?.ocrText,
       activeOcrFile?.lines,
       ocrRenderSize.width,
@@ -3929,7 +3930,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return (
         <div ref={ocrRenderRef} className="w-full">
           {!activeFile && (
-            <div className="text-xs text-gray-400">暂无渲染内容</div>
+            <div className="text-xs text-gray-400 dark:text-gray-500">暂无渲染内容</div>
           )}
           {activeFile && pageMeta && ocrRenderSize.width > 0 && (
             (() => {
@@ -3937,7 +3938,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               const renderHeight = pageMeta.height * scale;
               return (
                 <div
-                  className="relative w-full bg-white border border-gray-200 shadow-sm overflow-hidden"
+                  className="relative w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden"
                   style={{ height: `${Math.max(renderHeight, isMobileViewport ? 280 : 420)}px` }}
                   onMouseLeave={() => {
                     if (editingOcrLine === null) setSelectedOcrLine(null);
@@ -4009,12 +4010,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       const width = (Math.max(...xs) - Math.min(...xs)) * scale;
                       return (
                         <div
-                          className="absolute flex items-center gap-2 bg-white border border-gray-200 rounded-full shadow-md px-2 py-1 text-xs"
+                          className="absolute flex items-center gap-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full shadow-md px-2 py-1 text-xs text-gray-700 dark:text-gray-200"
                           style={{ left: left + width + 8, top: Math.max(0, top - 4) }}
                         >
                           <button
                             type="button"
-                            className="px-2 py-0.5 rounded-full hover:bg-gray-100"
+                            className="px-2 py-0.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700/70"
                             onClick={() => {
                               navigator.clipboard.writeText(selectedLine.text || '');
                               showCopyToast();
@@ -4024,7 +4025,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           </button>
                           <button
                             type="button"
-                            className="px-2 py-0.5 rounded-full hover:bg-gray-100"
+                            className="px-2 py-0.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700/70"
                             onClick={() => {
                               setEditingOcrLine(selectedOcrLine);
                               setEditingOcrValue(selectedLine.text || '');
@@ -4062,7 +4063,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         `}</style>
         {copyToast && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30">
-            <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white shadow-lg border border-gray-100 text-sm text-gray-700">
+            <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white dark:bg-gray-800 shadow-lg border border-gray-100 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-200">
               <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-emerald-100 text-emerald-600 text-xs">✓</span>
               {copyToast}
             </div>
@@ -4110,11 +4111,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                 <FileUp size={16} />
               </div>
               <div className="text-sm font-medium text-gray-800 dark:text-gray-100">点击或拖拽上传文件</div>
-              <div className="text-xs text-gray-400 mt-1">支持图片、PDF</div>
+              <div className="text-xs text-gray-400 dark:text-gray-500 mt-1">支持图片、PDF</div>
               <button
                 type="button"
                 disabled={!canUpload}
-                className="mt-2 px-3 py-1.5 rounded-lg text-[11px] font-medium bg-black text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                className="mt-2 px-3 py-1.5 rounded-lg text-[11px] font-medium bg-black text-white dark:bg-white dark:text-black disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 选择文件
               </button>
@@ -4139,11 +4140,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       {activeFile?.name || '暂无文件'}
                     </div>
                     {activeFile?.sizeLabel && (
-                      <div className="text-[10px] text-gray-400">{activeFile.sizeLabel}</div>
+                      <div className="text-[10px] text-gray-400 dark:text-gray-500">{activeFile.sizeLabel}</div>
                     )}
                   </div>
                 </div>
-                <div className="flex items-center gap-2 text-gray-400">
+                <div className="flex items-center gap-2 text-gray-400 dark:text-gray-500">
                   <button
                     type="button"
                     disabled={!activeFile}
@@ -4166,18 +4167,18 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               </div>
             </div>
             {!activeFile && (
-              <div className="h-full flex items-center justify-center text-sm text-gray-400">暂无预览</div>
+              <div className="h-full flex items-center justify-center text-sm text-gray-400 dark:text-gray-500">暂无预览</div>
             )}
             {activeFile && (
               <div
                 ref={ocrPreviewRef}
-                className="w-full h-full min-h-[280px] sm:min-h-[420px] bg-gray-50 dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 flex items-start justify-start overflow-hidden relative"
+                className="w-full h-full min-h-[280px] sm:min-h-[420px] bg-gray-50 dark:bg-gray-900/70 rounded-2xl border border-gray-100 dark:border-gray-800 flex items-start justify-start overflow-hidden relative"
               >
                 {!previewUrl && (
-                  <div className="text-xs text-gray-400">历史记录不包含原图/原 PDF 预览</div>
+                  <div className="text-xs text-gray-400 dark:text-gray-500">历史记录不包含原图/原 PDF 预览</div>
                 )}
                 {previewUrl && isPdf ? (
-                  <iframe key={pdfPreviewUrl} title={activeFile.name} src={pdfPreviewUrl} className="w-full h-full" />
+                  <iframe key={pdfPreviewUrl} title={activeFile.name} src={pdfPreviewUrl} className="w-full h-full bg-white" />
                 ) : previewUrl ? (
                   <>
                     <img
@@ -4308,7 +4309,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-300"
                         >
                           TXT
-                          <div className="text-[10px] text-gray-400 mt-0.5">仅包含纯文本</div>
+                          <div className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">仅包含纯文本</div>
                         </button>
                         <button
                           type="button"
@@ -4316,7 +4317,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-300"
                         >
                           JSON（文字识别）
-                          <div className="text-[10px] text-gray-400 mt-0.5">包含文字与坐标信息</div>
+                          <div className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">包含文字与坐标信息</div>
                         </button>
                       </div>
                     )}
@@ -4327,10 +4328,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           </div>
           <div className="flex-1 min-h-0 overflow-auto p-4 relative">
             {!activeFile && (
-              <div className="h-full flex items-center justify-center text-sm text-gray-400">暂无识别结果</div>
+              <div className="h-full flex items-center justify-center text-sm text-gray-400 dark:text-gray-500">暂无识别结果</div>
             )}
             {showOcrProcessing && (
-              <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/85 dark:bg-gray-900/70 backdrop-blur-[1px]">
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-white dark:bg-gray-900">
                 <div className="flex flex-col items-center gap-3">
                   <div className="relative w-40 h-40">
                     <span className="absolute -top-1 -left-1 w-5 h-5 border-t-2 border-l-2 border-gray-900 dark:border-gray-200"></span>
@@ -4387,11 +4388,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   <div className="text-xs text-red-500">{activeFile.error || '识别失败'}</div>
                 )}
                 {ocrLines.length === 0 && activeFile.status === 'done' && (
-                  <div className="text-xs text-gray-400">未检测到可识别文本</div>
+                  <div className="text-xs text-gray-400 dark:text-gray-500">未检测到可识别文本</div>
                 )}
                 {editingOcrLine !== null && ocrLines[editingOcrLine] && (
                   <div className="flex flex-wrap items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
-                    <span className="text-xs text-gray-400">纠正文本</span>
+                    <span className="text-xs text-gray-400 dark:text-gray-500">纠正文本</span>
                     <input
                       value={editingOcrValue}
                       onChange={(e) => setEditingOcrValue(e.target.value)}
@@ -4417,7 +4418,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                     </button>
                   </div>
                 )}
-                {renderOcrPage()}
+                {!showOcrProcessing && renderOcrPage()}
               </div>
             )}
             {activeFile && ocrViewTab === 'json' && (
