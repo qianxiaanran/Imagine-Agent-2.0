@@ -49,6 +49,7 @@ save_ocr_record = None
 warmup_embeddings = None
 # Added optional sync ASR callable
 baidu_asr_from_bytes = None
+get_cached_sms_session = None
 
 
 def _save_ocr_upload(content: bytes, filename: str) -> str:
@@ -96,6 +97,7 @@ try:
     from ocr_structured import parse_ocr_content, save_ocr_record
     import voice_ws_proxy
     from admin_utils import _bearer_token, _get_token_iat, _get_user_from_token, _fetch_profile
+    from auth_router import _get_session_from_token as get_cached_sms_session
     # Import sync ASR helper
     from voice_manager import baidu_asr_from_bytes
     from deepseek_llm import warmup_models
@@ -502,12 +504,29 @@ async def upload_docs(
     if not upload_document_to_vector_store:
         return {"error": "Document Service Unavailable"}
 
-    resolved_user_id = (user_id or "").strip()
+    provided_user_id = (user_id or "").strip()
+    resolved_user_id = provided_user_id
     token = _bearer_token(request.headers.get("authorization")) if "_bearer_token" in globals() else None
     if token:
         try:
-            token_user = _get_user_from_token(token)
-            resolved_user_id = token_user.id
+            token_user_id = None
+            # Supabase JWT
+            if len(token) > 100 and "_get_user_from_token" in globals():
+                token_user = _get_user_from_token(token)
+                token_user_id = getattr(token_user, "id", None)
+            # SMS login temporary token
+            elif token.startswith("sms-token-") and get_cached_sms_session:
+                sms_session = get_cached_sms_session(token)
+                if sms_session:
+                    token_user_id = sms_session.get("user_id")
+
+            if token_user_id:
+                token_user_id = str(token_user_id).strip()
+                if provided_user_id and provided_user_id != token_user_id:
+                    return JSONResponse(status_code=403, content={"error": "user_id does not match session token"})
+                resolved_user_id = token_user_id
+            elif not provided_user_id:
+                return JSONResponse(status_code=401, content={"error": "Invalid session token"})
         except Exception:
             return JSONResponse(status_code=401, content={"error": "Invalid session token"})
 

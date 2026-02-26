@@ -27,6 +27,22 @@ const isProbablyUrl = (value) => {
   return /^(https?:\/\/|\/\/|www\.)/i.test(trimmed);
 };
 
+const toFileName = (value) => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || isProbablyUrl(trimmed)) return null;
+  const normalized = trimmed.replace(/\\/g, '/');
+  const last = normalized.includes('/') ? normalized.split('/').pop() : normalized;
+  const decoded = (() => {
+    try {
+      return decodeURIComponent(last);
+    } catch {
+      return last;
+    }
+  })();
+  return decoded || null;
+};
+
 const SourcePanel = ({ sources }) => {
   if (!sources || !Array.isArray(sources) || sources.length === 0) return null;
 
@@ -44,14 +60,21 @@ const SourcePanel = ({ sources }) => {
               ? (sourceObj.link || sourceObj.url || sourceObj.href || sourceObj.uri)
               : (isProbablyUrl(src) ? src : null);
             const href = normalizeLink(linkValue);
-            const label = sourceObj
+            const baseLabel = sourceObj
               ? (sourceObj.title || sourceObj.name || sourceObj.domain || sourceObj.link || sourceObj.url || sourceObj.href || sourceObj.uri || JSON.stringify(sourceObj))
               : (typeof src === 'string' ? src : JSON.stringify(src));
+            const sourceType = String(sourceObj?.type || '').toLowerCase();
+            const pageNumber = Number(sourceObj?.page);
+            const fileLabel = sourceObj
+              ? toFileName(sourceObj.file_name || sourceObj.source || sourceObj.title || sourceObj.name)
+              : null;
+            const label = fileLabel
+              ? ((Number.isFinite(pageNumber) && pageNumber > 0 && sourceType !== 'ocr') ? `${fileLabel} · 第${pageNumber}页` : fileLabel)
+              : baseLabel;
             const snippet = sourceObj
               ? (sourceObj.snippet || sourceObj.excerpt || sourceObj.summary || '')
               : '';
 
-            const sourceType = String(sourceObj?.type || '').toLowerCase();
             const sqlText = String(sourceObj?.sql || sourceObj?.query || sourceObj?.statement || '').trim();
             const sqlMarkdown = String(sourceObj?.markdown || '').trim() || (sqlText ? `\`\`\`sql\n${sqlText}\n\`\`\`` : '');
             const lowerSrc = String(label || '').toLowerCase();

@@ -2705,6 +2705,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     }
 
     const filesToDisplay = [...pendingFiles];
+    const attachedFileNames = Array.from(
+      new Set(
+        filesToDisplay
+          .map((item) => item?.file?.name)
+          .filter((name) => typeof name === 'string' && name.trim().length > 0)
+      )
+    );
     const filesToProcess = pendingFiles.filter(pf => !pf.uploaded);
     const uploadedContext = pendingFiles
         .filter(pf => pf.uploaded && pf.previewText)
@@ -2818,6 +2825,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             user_id: userProfile.id,
             mode: effectiveMode,
             context_content: contextToSend,
+            files: attachedFileNames,
             // ✨ 传递用户选择的后端 (local / cloud)
             model_backend: effectiveBackend,
             personalization: buildChatPersonalizationPayload(appSettings)
@@ -5028,11 +5036,15 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                         {pendingFiles.map((pf) => (
                                             <div key={pf.id} className="relative group inline-flex flex-col items-start gap-2 bg-white dark:bg-gray-700/50 border border-gray-200 dark:border-gray-600 rounded-xl p-2 pr-3 shadow-sm select-none animate-in fade-in zoom-in-95 duration-200 min-w-[200px]">
                                                 <div className="flex items-center gap-2 w-full">
-                                                    {pf.previewUrl ? (
+                                                    {pf.previewUrl && pf.file?.type?.startsWith('image/') ? (
                                                         <img src={pf.previewUrl} alt="preview" className="w-10 h-10 object-cover rounded-lg bg-gray-100" />
                                                     ) : (
                                                         <div className="w-10 h-10 rounded-lg bg-gray-100 dark:bg-gray-600 flex items-center justify-center">
-                                                            <FileIcon size={20} className="text-gray-500 dark:text-gray-300" />
+                                                            {((pf.file?.type || '') === 'application/pdf' || (pf.file?.name || '').toLowerCase().endsWith('.pdf')) ? (
+                                                                <FileText size={20} className="text-red-500 dark:text-red-400" />
+                                                            ) : (
+                                                                <FileIcon size={20} className="text-gray-500 dark:text-gray-300" />
+                                                            )}
                                                         </div>
                                                     )}
                                                     <div className="flex flex-col max-w-[120px]">

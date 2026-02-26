@@ -166,6 +166,18 @@ def _make_snippet(text: str, limit: int = 90) -> str:
     return cleaned[:limit] + "..."
 
 
+def _normalize_source_name(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = text.replace("\\", "/")
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text.strip()
+
+
 def _get_torch_device() -> str:
     """
     优先使用 GPU（CUDA），不可用时回退 CPU。
@@ -324,6 +336,7 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
         # 批量生成向量
         vectors = embeddings_model.embed_documents(texts)
 
+        display_name = _normalize_source_name(filename) or filename
         records = []
         for i, (text, vector, chunk) in enumerate(zip(texts, vectors, chunks)):
             meta = dict(chunk.metadata or {}) if hasattr(chunk, "metadata") else {}
@@ -339,10 +352,14 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
             else:
                 page_display = page_index
 
-            file_name = meta.get("file_name") or meta.get("source") or filename
-            title = meta.get("title") or filename
+            file_name = (
+                _normalize_source_name(meta.get("file_name"))
+                or _normalize_source_name(meta.get("source"))
+                or display_name
+            )
+            title = _normalize_source_name(meta.get("title")) or display_name
             meta.update({
-                "source": filename,
+                "source": display_name,
                 "file_name": file_name,
                 "title": title,
                 "page": page_display,
@@ -361,6 +378,11 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
 
         print(f"🚀 [Logic] 正在写入 Supabase...", flush=True)
         sb = require_supabase()
+        try:
+            # Remove older chunks of the same file to avoid mixing old/new versions.
+            sb.table("documents").delete().eq("metadata->>user_id", user_id).eq("metadata->>source", display_name).execute()
+        except Exception as cleanup_err:
+            print(f"⚠️ [Logic] pre-clean same-source chunks failed: {cleanup_err}", flush=True)
         response = sb.table("documents").insert(records).execute()
 
         inserted_count = len(response.data) if response.data else 0
@@ -475,12 +497,67 @@ def _content_boost(query: str, content: str) -> float:
     return 0.0
 
 
+def _fallback_documents_by_source(sb, user_id: str, source_names: List[str], k: int) -> List:
+    if not source_names:
+        return []
+
+    max_items = max(1, int(k))
+    docs = []
+    seen = set()
+    per_source_limit = max(6, max_items * 2)
+
+    for source_name in source_names:
+        try:
+            response = (
+                sb.table("documents")
+                .select("content, metadata")
+                .eq("metadata->>user_id", user_id)
+                .eq("metadata->>source", source_name)
+                .limit(per_source_limit)
+                .execute()
+            )
+        except Exception:
+            continue
+
+        for row in (response.data or []):
+            content = str(row.get("content") or "").strip()
+            if not content:
+                continue
+            metadata = dict(row.get("metadata") or {})
+            source = _normalize_source_name(metadata.get("source")) or source_name
+            file_name = _normalize_source_name(metadata.get("file_name")) or source
+            title = _normalize_source_name(metadata.get("title")) or file_name
+            page = metadata.get("page", metadata.get("page_number", 0))
+            metadata["source"] = source
+            metadata["file_name"] = file_name
+            metadata["title"] = title
+            metadata.setdefault("page", page)
+            metadata.setdefault("snippet", _make_snippet(content))
+
+            dedup_key = (
+                metadata.get("source"),
+                metadata.get("page_index", metadata.get("page")),
+                metadata.get("chunk_index"),
+                content[:64],
+            )
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            docs.append(_make_document(content, metadata))
+            if len(docs) >= max_items:
+                return docs
+
+    return docs
+
+
 def search_user_documents(
     user_id: str,
     query: str,
     k: int = 4,
     match_threshold: float = 0.3,
-    tags: Optional[List[str]] = None
+    tags: Optional[List[str]] = None,
+    source_files: Optional[List[str]] = None,
 ):
     """
     使用原生 RPC 调用检索（增强：标题/文件名加权 + 显式标签过滤）
@@ -492,7 +569,13 @@ def search_user_documents(
         query_vector = embeddings_model.embed_query(query)
 
         # 拉更多候选，便于加权与过滤
-        fetch_k = max(k * 3, k)
+        source_filter_names = []
+        for name in (source_files or []):
+            normalized = _normalize_source_name(str(name).strip())
+            if normalized and normalized not in source_filter_names:
+                source_filter_names.append(normalized)
+        source_filter_set = {name.lower() for name in source_filter_names}
+        fetch_k = max(k * (8 if source_filter_set else 3), k)
         rpc_params = {
             "query_embedding": query_vector,
             "match_threshold": float(match_threshold),
@@ -505,6 +588,11 @@ def search_user_documents(
 
         result_items = response.data or []
         if not result_items:
+            if source_filter_names:
+                fallback_docs = _fallback_documents_by_source(sb, user_id, source_filter_names, k)
+                if fallback_docs:
+                    print(f"[Search] fallback by source hit {len(fallback_docs)} chunks", flush=True)
+                    return fallback_docs
             print("⚠️ [Search] 未找到匹配的文档片段", flush=True)
             return []
 
@@ -516,13 +604,27 @@ def search_user_documents(
             content = item.get("content", "") or ""
             metadata = dict(item.get("metadata") or {})
 
-            file_name = metadata.get("file_name") or metadata.get("source") or metadata.get("title") or "文档"
-            title = metadata.get("title") or file_name
+            file_name = (
+                _normalize_source_name(metadata.get("file_name"))
+                or _normalize_source_name(metadata.get("source"))
+                or _normalize_source_name(metadata.get("title"))
+                or "文档"
+            )
+            title = _normalize_source_name(metadata.get("title")) or file_name
             page = metadata.get("page", metadata.get("page_number", 0))
             metadata.setdefault("file_name", file_name)
             metadata.setdefault("title", title)
             metadata.setdefault("page", page)
             metadata.setdefault("snippet", _make_snippet(content))
+
+            if source_filter_set:
+                source_candidates = {
+                    _normalize_source_name(metadata.get("source")).lower(),
+                    _normalize_source_name(metadata.get("file_name")).lower(),
+                    _normalize_source_name(metadata.get("title")).lower(),
+                }
+                if not (source_candidates & source_filter_set):
+                    continue
 
             meta_tags = _normalize_tags(metadata.get("tags"))
             if explicit_tags:
@@ -551,6 +653,11 @@ def search_user_documents(
             scored_docs.append((score, doc))
 
         if not scored_docs:
+            if source_filter_names:
+                fallback_docs = _fallback_documents_by_source(sb, user_id, source_filter_names, k)
+                if fallback_docs:
+                    print(f"[Search] fallback after filter hit {len(fallback_docs)} chunks", flush=True)
+                    return fallback_docs
             print("⚠️ [Search] 标签过滤后无结果", flush=True)
             return []
 

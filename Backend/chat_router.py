@@ -28,11 +28,11 @@ RAG_MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHUNK_CHARS", "700"))
 RAG_MAX_CHUNKS = int(os.getenv("RAG_MAX_CHUNKS", "6"))
 RAG_MAX_KB_TEXT_CHARS = int(os.getenv("RAG_MAX_KB_TEXT_CHARS", "4200"))
 FAST_CHAT_DIRECT = os.getenv("FAST_CHAT_DIRECT", "true").lower() != "false"
-FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "3"))
+FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "6"))
 PROMPT_USER_MAX_CHARS = int(os.getenv("PROMPT_USER_MAX_CHARS", "2600"))
 PROMPT_SESSION_STATE_MAX_CHARS = int(os.getenv("PROMPT_SESSION_STATE_MAX_CHARS", "900"))
 PROMPT_SUMMARY_MAX_CHARS = int(os.getenv("PROMPT_SUMMARY_MAX_CHARS", "1500"))
-PROMPT_HISTORY_MAX_CHARS = int(os.getenv("PROMPT_HISTORY_MAX_CHARS", "1200"))
+PROMPT_HISTORY_MAX_CHARS = int(os.getenv("PROMPT_HISTORY_MAX_CHARS", "2200"))
 CONTEXT_COMPACTION_SOURCE_MAX_CHARS = int(os.getenv("CONTEXT_COMPACTION_SOURCE_MAX_CHARS", "9000"))
 PROMPT_LAYOUT_VERSION = "v1"
 CONTEXT_EVENT_SCAN_LIMIT = int(os.getenv("CONTEXT_EVENT_SCAN_LIMIT", "30"))
@@ -126,18 +126,14 @@ def _sanitize_history_content(text: str) -> str:
     s = s.replace("<|im_start|>", "").replace("<|im_end|>", "")
     # 移除前端/中间层注入的 meta 行
     s = re.sub(r'^\s*Assistant:\s*\{.*?\}\s*$', '', s, flags=re.MULTILINE)
-    # 移除 Explainable AI/工具思考日志
-    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*??.*$', '', s, flags=re.MULTILINE)
-
-    # [New] remove search-process logs to avoid prompt contamination
-    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*??.*$', '', s, flags=re.MULTILINE)
-    s = re.sub(r'^\s*>\s*WEATHER.*$', '', s, flags=re.MULTILINE)  # weather status
-    s = re.sub(r'^\s*>\s*STOCK.*$', '', s, flags=re.MULTILINE)  # stock status
-    s = re.sub(r'^\s*>\s*RETRY.*$', '', s, flags=re.MULTILINE)  # retry status
+    # 移除工具/调试日志，保留正常对话内容。
+    noisy_line_patterns = [
+        r'^\s*>\s*(THOUGHT|ACTION|OBSERVATION|TOOL|SEARCH|WEATHER|STOCK|RETRY)\b.*$',
+        r'^\s*(Thought|Action|Observation)\s*:.*$',
+        r'^\s*工具调用\s*:.*$',
+    ]
+    for pattern in noisy_line_patterns:
+        s = re.sub(pattern, '', s, flags=re.MULTILINE | re.IGNORECASE)
 
     # 移除 ReAct 过程日志
     s = re.sub(r'^\s*ReAct\s*(思考|行动|观察).*$', '', s, flags=re.MULTILINE)
@@ -495,7 +491,7 @@ def _looks_like_followup_turn(text: Optional[str]) -> bool:
         return False
     if len(q) <= 18 and any(k in q for k in _FOLLOWUP_HINTS):
         return True
-    return bool(re.search(r"(??|??|??|??|??|??|??|??|??|??)", q))
+    return bool(re.search(r"(这个|那个|继续|然后|按这个|照这个|就这|同上|上一条|上面)", q))
 
 
 def _should_force_direct_draft(user_text: Optional[str], history_text: Optional[str]) -> bool:
@@ -876,12 +872,25 @@ def _make_snippet(text: Optional[str], limit: int = 90) -> str:
     return cleaned[:limit] + "..."
 
 
+def _normalize_source_name(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = urllib.parse.unquote(text)
+    text = text.replace("\\", "/")
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text.strip()
+
+
 def _build_doc_source(metadata: Dict[str, Any], content: Optional[str]) -> Dict[str, Any]:
     file_name = (
-        metadata.get("file_name")
-        or metadata.get("source")
-        or metadata.get("filename")
-        or metadata.get("title")
+        _normalize_source_name(metadata.get("source"))
+        or _normalize_source_name(metadata.get("file_name"))
+        or _normalize_source_name(metadata.get("filename"))
+        or _normalize_source_name(metadata.get("title"))
         or "unknown_source"
     )
     src_type = metadata.get("type")
@@ -907,7 +916,8 @@ def _build_doc_source(metadata: Dict[str, Any], content: Optional[str]) -> Dict[
     if page_display:
         title = f"{file_name} · 第{page_display}页"
 
-    snippet = metadata.get("snippet") or _make_snippet(content)
+    # Prefer live chunk text snippet to keep displayed source aligned with the actual evidence.
+    snippet = _make_snippet(content) if content else (metadata.get("snippet") or "")
     source = {
         "title": title,
         "file_name": file_name,
@@ -915,7 +925,7 @@ def _build_doc_source(metadata: Dict[str, Any], content: Optional[str]) -> Dict[
         "snippet": snippet,
     }
     if metadata.get("source"):
-        source["source"] = metadata.get("source")
+        source["source"] = _normalize_source_name(metadata.get("source")) or file_name
     if src_type:
         source["type"] = src_type
     return source
@@ -957,6 +967,42 @@ def _to_text_and_sources(items) -> tuple[list[str], list[Dict[str, Any]]]:
                 srcs.append(src)
 
     return texts, srcs
+
+
+def _build_rag_chunk_entries(items, max_chunks: int = RAG_MAX_CHUNKS) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    if not items:
+        return entries
+
+    for it in items:
+        if len(entries) >= max_chunks:
+            break
+        if it is None:
+            continue
+
+        if isinstance(it, str):
+            text = it.strip()
+            if not text:
+                continue
+            source = {
+                "title": "检索片段",
+                "file_name": "retrieved_text",
+                "page": None,
+                "snippet": _make_snippet(text),
+                "type": "text",
+            }
+            entries.append({"text": text, "source": source})
+            continue
+
+        page_content = getattr(it, "page_content", None)
+        metadata = getattr(it, "metadata", None)
+        text = (page_content or "").strip() if isinstance(page_content, str) else ""
+        if not text:
+            continue
+        source = _build_doc_source(metadata if isinstance(metadata, dict) else {}, text)
+        entries.append({"text": text, "source": source})
+
+    return entries
 
 
 # ------------------------------------------------------------
@@ -1553,6 +1599,11 @@ async def chat(
         return _stream(fixed_identity_response_generator())
 
     context_content = _truncate_context(req.context_content)
+    requested_source_files = [
+        str(name).strip()
+        for name in (req.files or [])
+        if isinstance(name, str) and str(name).strip()
+    ]
     personalization = _normalize_personalization(req.personalization)
     personalization_system_prompt = _build_personalization_system_prompt(personalization)
     _maybe_append_context_event(
@@ -1565,7 +1616,9 @@ async def chat(
         personalization=personalization,
     )
 
-    print(f"🚀 [Chat] New Request: User={user_id}, Session={session_id}, Mode={mode}, Backend={model_backend}")
+    print(
+        f"🚀 [Chat] New Request: User={user_id}, Session={session_id}, Mode={mode}, Backend={model_backend}, Files={len(requested_source_files)}"
+    )
 
     shared_context_cache: Dict[str, Dict[str, str]] = {}
 
@@ -2072,8 +2125,18 @@ async def chat(
 
         try:
             shared_ctx = await _get_shared_context_async("rag", history_limit=6)
-            docs = await asyncio.to_thread(search_user_documents, user_id, message, 6, 0.25)
-            chunks, srcs = _to_text_and_sources(docs)
+            docs = await asyncio.to_thread(
+                lambda: search_user_documents(
+                    user_id=user_id,
+                    query=message,
+                    k=6,
+                    match_threshold=0.25,
+                    source_files=requested_source_files,
+                )
+            )
+            rag_entries = _build_rag_chunk_entries(docs, max_chunks=RAG_MAX_CHUNKS)
+            source_count = len(rag_entries)
+            srcs: List[Dict[str, Any]] = [dict(e.get("source") or {}) for e in rag_entries if isinstance(e.get("source"), dict)]
 
             if srcs:
                 yield json.dumps({"t": "m", "sid": session_id, "src": srcs}, ensure_ascii=False) + "\n"
@@ -2083,18 +2146,19 @@ async def chat(
 
             active_context = (shared_ctx.get("active_context", "") or "").strip()[:RAG_MAX_ACTIVE_CONTEXT_CHARS]
 
-            if not chunks and not active_context:
+            if source_count == 0 and not active_context:
                 no_doc = "未检索到可用文档内容，请先上传文档后再试。"
                 full_reply = no_doc
                 yield json.dumps({"t": "c", "v": no_doc}, ensure_ascii=False) + "\n"
             else:
                 kb_sections = []
-                if active_context:
+                if active_context and source_count == 0:
                     kb_sections.append(f"[附件上下文]\n{active_context}")
-                if chunks:
-                    for i, c in enumerate(chunks[:RAG_MAX_CHUNKS], start=1):
-                        trimmed = (c or "")[:RAG_MAX_CHUNK_CHARS]
-                        kb_sections.append(f"[片段{i}]\n{trimmed}")
+                if rag_entries:
+                    for entry in rag_entries:
+                        src_title = (entry.get("source") or {}).get("title") or "文档片段"
+                        chunk_text = (entry.get("text") or "")[:RAG_MAX_CHUNK_CHARS]
+                        kb_sections.append(f"[片段] {src_title}\n{chunk_text}")
 
                 kb_text = "\n\n".join(kb_sections)
                 if len(kb_text) > RAG_MAX_KB_TEXT_CHARS:
@@ -2102,9 +2166,9 @@ async def chat(
 
                 prompt = (
                     "你是企业知识库助手。请仅基于给定资料回答，不能编造。"
-                    "若资料不足，请明确指出并给出下一步建议。\n\n"
+                    "若资料不足，请明确说明资料不足并给出下一步建议。\n\n"
                     f"用户问题:\n{message}\n\n"
-                    f"知识资料:\n{kb_text}"
+                    f"知识片段:\n{kb_text}"
                 )
                 prompt = _wrap_prompt_with_shared_context(
                     prompt,
