@@ -28,7 +28,12 @@ RAG_MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHUNK_CHARS", "700"))
 RAG_MAX_CHUNKS = int(os.getenv("RAG_MAX_CHUNKS", "6"))
 RAG_MAX_KB_TEXT_CHARS = int(os.getenv("RAG_MAX_KB_TEXT_CHARS", "4200"))
 FAST_CHAT_DIRECT = os.getenv("FAST_CHAT_DIRECT", "true").lower() != "false"
-FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "4"))
+FAST_CHAT_HISTORY_LIMIT = int(os.getenv("FAST_CHAT_HISTORY_LIMIT", "3"))
+PROMPT_USER_MAX_CHARS = int(os.getenv("PROMPT_USER_MAX_CHARS", "2600"))
+PROMPT_SESSION_STATE_MAX_CHARS = int(os.getenv("PROMPT_SESSION_STATE_MAX_CHARS", "900"))
+PROMPT_SUMMARY_MAX_CHARS = int(os.getenv("PROMPT_SUMMARY_MAX_CHARS", "1500"))
+PROMPT_HISTORY_MAX_CHARS = int(os.getenv("PROMPT_HISTORY_MAX_CHARS", "1200"))
+CONTEXT_COMPACTION_SOURCE_MAX_CHARS = int(os.getenv("CONTEXT_COMPACTION_SOURCE_MAX_CHARS", "9000"))
 PROMPT_LAYOUT_VERSION = "v1"
 CONTEXT_EVENT_SCAN_LIMIT = int(os.getenv("CONTEXT_EVENT_SCAN_LIMIT", "30"))
 CONTEXT_COMPACTION_SCAN_LIMIT = int(os.getenv("CONTEXT_COMPACTION_SCAN_LIMIT", "80"))
@@ -383,6 +388,11 @@ def _build_cache_friendly_prompt(
         summary_context: str = "",
         recent_history: str = "",
 ) -> str:
+    safe_user_message = _truncate_context(user_message, max_len=PROMPT_USER_MAX_CHARS)
+    safe_session_state = _truncate_context(session_state, max_len=PROMPT_SESSION_STATE_MAX_CHARS)
+    safe_summary_context = _truncate_context(summary_context, max_len=PROMPT_SUMMARY_MAX_CHARS)
+    safe_recent_history = _truncate_context(recent_history, max_len=PROMPT_HISTORY_MAX_CHARS)
+
     def section(name: str, content: str, allow_empty: bool = False) -> str:
         body = (content or "").strip()
         if not body and not allow_empty:
@@ -391,10 +401,10 @@ def _build_cache_friendly_prompt(
 
     blocks = [
         section("PromptLayout", f"version={PROMPT_LAYOUT_VERSION}"),
-        section("SessionState", session_state),
-        section("SummaryContext", summary_context),
-        section("RecentHistory", recent_history),
-        section("User", user_message),
+        section("SessionState", safe_session_state),
+        section("SummaryContext", safe_summary_context),
+        section("RecentHistory", safe_recent_history),
+        section("User", safe_user_message),
         section("Assistant", "", allow_empty=True),
     ]
     return "\n\n".join(blocks)
@@ -707,7 +717,7 @@ def _maybe_compact_context(
         "- Keep user preferences and hard constraints explicit.\n"
         "- Do not include tool logs, status lines, or transient debug text.\n"
         "- Use Chinese output in JSON values.\n\n"
-        f"Conversation:\n{source_text[:12000]}\n\n"
+        f"Conversation:\n{source_text[:CONTEXT_COMPACTION_SOURCE_MAX_CHARS]}\n\n"
         "Return JSON only."
     )
 
@@ -1628,13 +1638,19 @@ async def chat(
                 session_state = ""
 
         bundle = {
-            "history_text": history_text or "",
-            "summary_context": summary_context or "",
-            "session_state": session_state or "",
-            "active_context": active_context or "",
+            "history_text": _truncate_context(history_text or "", max_len=max(PROMPT_HISTORY_MAX_CHARS, 1600)),
+            "summary_context": _truncate_context(summary_context or "", max_len=max(PROMPT_SUMMARY_MAX_CHARS, 1800)),
+            "session_state": _truncate_context(session_state or "", max_len=max(PROMPT_SESSION_STATE_MAX_CHARS, 1200)),
+            "active_context": _truncate_context(active_context or "", max_len=RAG_MAX_ACTIVE_CONTEXT_CHARS),
         }
         shared_context_cache[cache_key] = bundle
         return bundle
+
+    async def _get_shared_context_async(
+            target_mode: Optional[str] = None,
+            history_limit: int = FAST_CHAT_HISTORY_LIMIT,
+    ) -> Dict[str, str]:
+        return await asyncio.to_thread(_get_shared_context, target_mode, history_limit)
 
     def _wrap_prompt_with_shared_context(
             base_prompt: str,
@@ -1663,7 +1679,7 @@ async def chat(
         push_chunk, flush_chunk = _make_text_buffer(immediate=True)
         try:
             active_mode = (return_mode or func_type or mode or "chat")
-            shared_ctx = _get_shared_context(active_mode, history_limit=FAST_CHAT_HISTORY_LIMIT)
+            shared_ctx = await _get_shared_context_async(active_mode, history_limit=FAST_CHAT_HISTORY_LIMIT)
             execution_guard_prompt = (
                 "You are an enterprise office assistant. Execute tasks directly when intent is clear.\n"
                 "1) If the user asks for direct drafting, produce output immediately without repeated clarification.\n"
@@ -1772,7 +1788,7 @@ async def chat(
         push_chunk, flush_chunk = _make_text_buffer(immediate=True)
 
         try:
-            shared_ctx = _get_shared_context("search", history_limit=4)
+            shared_ctx = await _get_shared_context_async("search", history_limit=4)
             history_text = shared_ctx.get("history_text", "")
 
             is_weather_intent = _is_weather_query(message)
@@ -1788,7 +1804,7 @@ async def chat(
 
             yield json.dumps({"t": "c", "v": f"> 正在搜索：{search_query}\n\n"}, ensure_ascii=False) + "\n"
 
-            raw_results = perform_web_search(search_query)
+            raw_results = await asyncio.to_thread(perform_web_search, search_query)
             search_results = [r for r in raw_results if r.get("link") != "#"][:6]
 
             if _is_cancelled():
@@ -1875,7 +1891,7 @@ async def chat(
             db_history_limit = 6
             if DB_LOCAL_FAST_CONTEXT and (model_backend or "local").strip().lower() in {"", "local", "ollama"}:
                 db_history_limit = max(1, DB_LOCAL_HISTORY_LIMIT)
-            shared_ctx = _get_shared_context("database", history_limit=db_history_limit)
+            shared_ctx = await _get_shared_context_async("database", history_limit=db_history_limit)
             # 来源：先发数据库信息，后续收到 SQL 事件后会追加
             db_sources: List[Dict[str, Any]] = [{
                 "type": "database",
@@ -1979,7 +1995,7 @@ async def chat(
         # Normalize message before passing to Audit Service
         # 这里直接传 raw message 即可
         try:
-            shared_ctx = _get_shared_context("audit", history_limit=6)
+            shared_ctx = await _get_shared_context_async("audit", history_limit=6)
             audit_message = message
             ctx_parts: List[str] = []
             if shared_ctx.get("session_state"):
@@ -2055,8 +2071,8 @@ async def chat(
         push_chunk, flush_chunk = _make_text_buffer(immediate=True)
 
         try:
-            shared_ctx = _get_shared_context("rag", history_limit=6)
-            docs = search_user_documents(user_id, message, k=6, match_threshold=0.25)
+            shared_ctx = await _get_shared_context_async("rag", history_limit=6)
+            docs = await asyncio.to_thread(search_user_documents, user_id, message, 6, 0.25)
             chunks, srcs = _to_text_and_sources(docs)
 
             if srcs:
@@ -2169,7 +2185,9 @@ async def chat(
         )
 
         # 3. 准备 Graph 状态输入
-        history_msgs = _get_langchain_history(user_id, session_id, mode=mode, query=message)
+        history_msgs = await asyncio.to_thread(
+            lambda: _get_langchain_history(user_id, session_id, mode=mode, query=message)
+        )
 
         initial_state = {
             "hub": hub,
@@ -2195,25 +2213,29 @@ async def chat(
             print("⚙️ [Graph] Invoking 4-Layer Architecture...")
 
             # 同步调用 Graph，等待 Synthesizer 准备好最终 Prompt
-            final_state = app_graph.invoke(initial_state)
+            final_state = await asyncio.to_thread(app_graph.invoke, initial_state)
 
             final_prompt = final_state.get("final_response", message)
             final_intent = final_state.get("intent", "general")
             explain_steps = final_state.get("explain_steps", [])
             sources = final_state.get("sources", [])
-            compaction_payload = _maybe_compact_context(
-                user_id=user_id,
-                session_id=session_id,
-                mode=mode,
-                model_backend=model_backend,
+            compaction_payload = await asyncio.to_thread(
+                lambda: _maybe_compact_context(
+                    user_id=user_id,
+                    session_id=session_id,
+                    mode=mode,
+                    model_backend=model_backend,
+                )
             )
             session_state_text = _build_compaction_context_block(compaction_payload)
-            recent_history_for_layout = _get_plain_history(
-                user_id=user_id,
-                session_id=session_id,
-                limit=FAST_CHAT_HISTORY_LIMIT,
-                mode=mode,
-                query=message,
+            recent_history_for_layout = await asyncio.to_thread(
+                lambda: _get_plain_history(
+                    user_id=user_id,
+                    session_id=session_id,
+                    limit=FAST_CHAT_HISTORY_LIMIT,
+                    mode=mode,
+                    query=message,
+                )
             )
             final_prompt = _build_cache_friendly_prompt(
                 user_message=message,

@@ -789,7 +789,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const resizeMessageInput = (element) => {
     if (!element) return;
     element.style.height = 'auto';
-    const nextHeight = Math.min(Math.max(element.scrollHeight, 48), 200);
+    const nextHeight = Math.min(Math.max(element.scrollHeight, 44), 200);
     element.style.height = `${nextHeight}px`;
   };
 
@@ -5016,7 +5016,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                             ) : (
                                 // ✨ Updated Input Bar Container with Drag & Drop
                               <div
-                                className={`relative flex flex-col w-full bg-[#f4f4f4] dark:bg-gray-800 rounded-[26px] focus-within:ring-1 focus-within:ring-gray-300 dark:focus-within:ring-gray-600 focus-within:bg-white dark:focus-within:bg-gray-800 focus-within:shadow-md border transition-all duration-200 ${isDragActive ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-900/20' : (isRAGMode ? 'border-blue-200 dark:border-blue-800 ring-1 ring-blue-100 dark:ring-blue-900' : (currentMode === 'database' ? 'border-green-200 dark:border-green-800 ring-1 ring-green-100 dark:ring-green-900' : (isSearchMode ? 'border-sky-200 dark:border-sky-800 ring-1 ring-sky-100 dark:ring-sky-900' : 'border-transparent dark:border-gray-700')))}`}
+                                className={`relative flex flex-col w-full bg-white dark:bg-gray-800 rounded-[30px] border shadow-sm transition-all duration-200 focus-within:shadow-md focus-within:border-gray-300 dark:focus-within:border-gray-500 ${isDragActive ? 'border-blue-400 ring-2 ring-blue-200/70 dark:ring-blue-500/40 bg-blue-50/60 dark:bg-blue-900/20' : (isRAGMode ? 'border-blue-200 dark:border-blue-800' : (currentMode === 'database' ? 'border-green-200 dark:border-green-800' : (isSearchMode ? 'border-sky-200 dark:border-sky-800' : 'border-gray-200 dark:border-gray-700')))}`}
                                 onDragEnter={handleDragEnter}
                                 onDragLeave={handleDragLeave}
                                 onDragOver={handleDragOver}
@@ -5068,12 +5068,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                 )}
 
                                 {/* ✨ Input & Actions Area */}
-                                <div className="flex items-end w-full pl-0 pr-2 py-2 relative">
+                                <div className="flex items-center w-full px-2.5 py-1.5 relative gap-1.5">
                                     {/* ✨ Plus Menu Button */}
-                                    <div className="absolute left-2 bottom-3 z-20 plus-menu-container">
+                                    <div className="relative z-20 plus-menu-container flex items-center">
                                         <button
                                             onClick={() => setIsPlusMenuOpen(!isPlusMenuOpen)}
-                                            className={`p-2 rounded-full transition-all duration-200 ${isPlusMenuOpen ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-white rotate-45' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'}`}
+                                            className={`h-9 w-9 inline-flex items-center justify-center rounded-full transition-all duration-200 ${isPlusMenuOpen ? 'bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-white rotate-45' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white'}`}
                                             title="更多功能"
                                         >
                                             <Plus size={18} strokeWidth={1.6} />
@@ -5141,7 +5141,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                     </div>
 
                                     <textarea
-                                      className="w-full max-h-[200px] py-3 pl-12 pr-2 bg-transparent border-0 focus:ring-0 resize-none outline-none text-gray-800 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400 leading-6 text-[15px] custom-scrollbar"
+                                      className="flex-1 w-full max-h-[200px] min-h-[44px] py-[10px] px-2 bg-transparent border-0 focus:ring-0 resize-none outline-none text-gray-800 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400 leading-6 text-[15px] custom-scrollbar"
                                       ref={messageInputRef}
                                       placeholder={
                                           isUploadingFile ? "正在上传处理中，请稍候..." :
@@ -5172,13 +5172,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                           handleSendMessage();
                                         }
                                       }}
-                                      style={{ minHeight: '48px' }}
+                                      style={{ minHeight: '44px' }}
 
                                       onInput={(e) => resizeMessageInput(e.target)}
                                       disabled={isUploadingFile}
                                     />
 
-                                    <div className="mb-2 flex items-center gap-1 flex-shrink-0">
+                                    <div className="flex items-center gap-1 flex-shrink-0">
                                        <div className="relative" ref={backendDropdownRef}>
                                           <button
                                             type="button"

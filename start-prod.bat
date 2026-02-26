@@ -80,17 +80,23 @@ if exist "%ROOT%\supabase\config.toml" (
     echo [ERROR] Docker daemon is not running. Start Docker Desktop and retry.
     exit /b 1
   )
+  where npx >nul 2>&1
+  if errorlevel 1 (
+    echo [ERROR] npx not found in PATH.
+    exit /b 1
+  )
 
   echo [0/3] Ensuring local Supabase is running...
   pushd "%ROOT%" >nul
   curl.exe -sS --max-time 2 "http://127.0.0.1:54321/rest/v1/" >nul 2>&1
   if errorlevel 1 (
-    call npx supabase start
+    call npx --yes supabase --version >nul 2>&1
+    call npx --yes supabase start
     if errorlevel 1 (
       echo [WARN] supabase start failed. Retrying after cleanup...
-      call npx supabase stop >nul 2>&1
+      call npx --yes supabase stop
       timeout /t 1 /nobreak >nul
-      call npx supabase start
+      call npx --yes supabase start
       if errorlevel 1 (
         echo [ERROR] Failed to start local Supabase.
         popd >nul

@@ -55,7 +55,7 @@ OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "1"))
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "1h")
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "8192"))
-LLM_LOCAL_MAX_CONCURRENT = max(1, int(os.getenv("LLM_LOCAL_MAX_CONCURRENT", "2")))
+LLM_LOCAL_MAX_CONCURRENT = max(1, int(os.getenv("LLM_LOCAL_MAX_CONCURRENT", "3")))
 LLM_CLOUD_MAX_CONCURRENT = max(1, int(os.getenv("LLM_CLOUD_MAX_CONCURRENT", "12")))
 LLM_STREAM_SLOT_TIMEOUT_SECONDS = float(os.getenv("LLM_STREAM_SLOT_TIMEOUT_SECONDS", "12"))
 OLLAMA_HTTP_CONNECT_TIMEOUT = float(os.getenv("OLLAMA_HTTP_CONNECT_TIMEOUT", "8"))
@@ -576,18 +576,26 @@ def ask_llm(prompt: str, model_type: str = "local") -> str:
     Synchronous invoke helper.
     """
     try:
-        # Get model instance via get_llm_instance
-        target_llm = get_llm_instance(model_type)
+        sem = _acquire_stream_slot_or_raise(model_type)
     except Exception as e:
-        return f"❌ 系统错误：LLM 模型未初始化 ({e})"
+        return str(e)
 
-    messages = _build_messages(prompt)
     try:
-        # invoke 会等待完整生成
-        response = target_llm.invoke(messages)
-        return response.content
-    except Exception as e:
-        return f"Model invoke failed: {str(e)}"
+        try:
+            # Get model instance via get_llm_instance
+            target_llm = get_llm_instance(model_type)
+        except Exception as e:
+            return f"❌ 系统错误：LLM 模型未初始化 ({e})"
+
+        messages = _build_messages(prompt)
+        try:
+            # invoke 会等待完整生成
+            response = target_llm.invoke(messages)
+            return response.content
+        except Exception as e:
+            return f"Model invoke failed: {str(e)}"
+    finally:
+        sem.release()
 
 
 # Export default instance for legacy callers (prefer get_llm_instance)

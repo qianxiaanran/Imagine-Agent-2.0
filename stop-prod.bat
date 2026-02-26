@@ -3,6 +3,8 @@ setlocal
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+set "KEEP_SUPABASE=0"
+if /i "%~1"=="--keep-supabase" set "KEEP_SUPABASE=1"
 
 if not defined NPM_CONFIG_CACHE (
   if exist "F:\" (
@@ -20,10 +22,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$targets=Get-CimInstance Win32_Process | Where-Object {($_.Name -eq 'python.exe' -and $_.CommandLine -like '*main.py*') -or ($_.Name -eq 'node.exe' -and $_.CommandLine -like '*tools\prod-server.mjs*')}; foreach($p in $targets){try{Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; Write-Host ('Stopped extra PID '+$p.ProcessId)}catch{}}"
 
 if exist "%ROOT%\supabase\config.toml" (
-  echo Stopping local Supabase...
-  pushd "%ROOT%" >nul
-  call npx supabase stop >nul 2>&1
-  popd >nul
+  if "%KEEP_SUPABASE%"=="1" (
+    echo [INFO] Keeping local Supabase running.
+  ) else (
+    echo Stopping local Supabase...
+    pushd "%ROOT%" >nul
+    where npx >nul 2>&1
+    if errorlevel 1 (
+      echo [WARN] npx not found, skip supabase stop.
+    ) else (
+      call npx --yes supabase stop
+      if errorlevel 1 (
+        echo [WARN] supabase stop failed.
+      )
+    )
+    popd >nul
+  )
 )
 
 echo Done.
