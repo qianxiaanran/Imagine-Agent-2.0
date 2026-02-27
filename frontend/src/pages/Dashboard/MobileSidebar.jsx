@@ -442,12 +442,12 @@ const MobileSidebar = memo(({
             </div>
           ) : (
             <>
-              {/* Mobile Header: New Chat Title */}
+              {/* Mobile Header: 新聊天标题 */}
               <div
                 className="px-4 pb-4 flex items-center justify-between border-b border-gray-100 dark:border-gray-800 bg-[#f9f9f9] dark:bg-gray-900 flex-shrink-0"
                 style={{ paddingTop: 'calc(env(safe-area-inset-top) + 16px)' }}
               >
-                <div className="font-bold text-gray-900 dark:text-white text-lg">New Chat</div>
+                <div className="font-bold text-gray-900 dark:text-white text-lg">新聊天</div>
                 <button onClick={onClose} className="p-2 text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-800 rounded-lg">
                   <X size={20} />
                 </button>

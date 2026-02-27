@@ -115,7 +115,6 @@ DB_LOCAL_SUMMARY_CONTEXT_MAX_CHARS = int(os.getenv("DB_LOCAL_SUMMARY_CONTEXT_MAX
 DB_LOCAL_SESSION_STATE_MAX_CHARS = int(os.getenv("DB_LOCAL_SESSION_STATE_MAX_CHARS", "600"))
 DB_LOCAL_ACTIVE_CONTEXT_MAX_CHARS = int(os.getenv("DB_LOCAL_ACTIVE_CONTEXT_MAX_CHARS", "500"))
 DB_LOCAL_RESULT_PROMPT_MAX_CHARS = int(os.getenv("DB_LOCAL_RESULT_PROMPT_MAX_CHARS", "1200"))
-DB_LOCAL_SUMMARY_INCLUDE_CONTEXT = os.getenv("DB_LOCAL_SUMMARY_INCLUDE_CONTEXT", "false").lower() == "true"
 
 # ============================================================
 # 🧭 DDL 与 规范定义 (已根据 SQL 脚本更新)
@@ -659,16 +658,14 @@ class DatabaseManager:
         truncate_note = "（数据已截断，仅供总结）" if truncated else ""
         response_pref = (response_instruction or "").strip()
         summary_context_parts = []
-        include_summary_context = (not is_local_backend) or DB_LOCAL_SUMMARY_INCLUDE_CONTEXT
-        if include_summary_context:
-            if session_state:
-                summary_context_parts.append(f"会话状态:\n{session_state}")
-            if summary_context:
-                summary_context_parts.append(f"摘要上下文:\n{summary_context}")
-            if history_context:
-                summary_context_parts.append(f"近期对话:\n{history_context}")
-            if active_context_content:
-                summary_context_parts.append(f"当前附加上下文:\n{active_context_content}")
+        if session_state:
+            summary_context_parts.append(f"会话状态:\n{session_state}")
+        if summary_context:
+            summary_context_parts.append(f"摘要上下文:\n{summary_context}")
+        if history_context:
+            summary_context_parts.append(f"近期对话:\n{history_context}")
+        if active_context_content:
+            summary_context_parts.append(f"当前附加上下文:\n{active_context_content}")
         summary_context_text = "\n\n".join(summary_context_parts).strip()
         context_prefix = f"上下文:\n{summary_context_text}\n" if summary_context_text else ""
         summary_prompt = (

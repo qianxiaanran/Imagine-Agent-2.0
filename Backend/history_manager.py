@@ -128,11 +128,11 @@ def save_context(user_id, session_id, content, func_type="context_save"):
 
         if role == "context":
             titles = {
-                "voice_context": "Meeting Transcript",
-                "ocr_context": "OCR Result",
-                "audit_context": "Audit Log",
+                "voice_context": "会议记录",
+                "ocr_context": "OCR 结果",
+                "audit_context": "审计日志",
             }
-            default_title = titles.get(func_type, "New Chat")
+            default_title = titles.get(func_type, "新聊天")
             rename_session(user_id, session_id, default_title)
         return True
     except Exception as e:
@@ -327,5 +327,4 @@ def rename_session(user_id, session_id, new_title):
     except Exception as e:
         print(f"Error renaming session: {e}")
         return False
-
 

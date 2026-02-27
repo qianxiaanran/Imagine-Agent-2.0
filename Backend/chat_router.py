@@ -40,9 +40,6 @@ CONTEXT_COMPACTION_SCAN_LIMIT = int(os.getenv("CONTEXT_COMPACTION_SCAN_LIMIT", "
 CONTEXT_COMPACTION_TRIGGER_CHARS = int(os.getenv("CONTEXT_COMPACTION_TRIGGER_CHARS", "2500"))
 CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL", "4"))
 HISTORY_TAIL_MIN_RECORDS = int(os.getenv("HISTORY_TAIL_MIN_RECORDS", "10"))
-DB_LOCAL_FAST_CONTEXT = os.getenv("DB_LOCAL_FAST_CONTEXT", "true").lower() != "false"
-DB_LOCAL_HISTORY_LIMIT = int(os.getenv("DB_LOCAL_HISTORY_LIMIT", "4"))
-
 # -----------------------------------------------------------------------------
 
 from supabase_client import require_supabase
@@ -1650,11 +1647,6 @@ async def chat(
         cached = shared_context_cache.get(cache_key)
         if cached is not None:
             return cached
-        is_db_local_fast = (
-            DB_LOCAL_FAST_CONTEXT
-            and normalized_mode == "database"
-            and (model_backend or "local").strip().lower() in {"", "local", "ollama"}
-        )
 
         history_text = _get_plain_history(
             user_id,
@@ -1667,18 +1659,17 @@ async def chat(
 
         compaction_payload: Optional[Dict[str, Any]] = None
         session_state = ""
-        if not is_db_local_fast:
-            try:
-                compaction_payload = _maybe_compact_context(
-                    user_id=user_id,
-                    session_id=session_id,
-                    mode=normalized_mode,
-                    model_backend=model_backend,
-                )
-                session_state = _build_compaction_context_block(compaction_payload)
-            except Exception:
-                compaction_payload = None
-                session_state = ""
+        try:
+            compaction_payload = _maybe_compact_context(
+                user_id=user_id,
+                session_id=session_id,
+                mode=normalized_mode,
+                model_backend=model_backend,
+            )
+            session_state = _build_compaction_context_block(compaction_payload)
+        except Exception:
+            compaction_payload = None
+            session_state = ""
 
         summary_context = ""
         try:
@@ -1702,7 +1693,7 @@ async def chat(
                     hub.add_compressed_facts(facts + open_items, source="会话压缩")
 
             # Pull long-term memory snippets even in FAST path when possible.
-            if memory_vector and not active_context and normalized_mode in {"general", "chat", "rag"}:
+            if memory_vector and not active_context and normalized_mode in {"general", "chat", "rag", "database"}:
                 try:
                     docs = memory_vector.retrieve(user_id, message, top_k=4) or []
                     long_mem_snippets: List[str] = []
@@ -1721,7 +1712,7 @@ async def chat(
                 except Exception:
                     pass
 
-            if memory_summary and not is_db_local_fast:
+            if memory_summary:
                 history_msgs = _get_langchain_history(
                     user_id,
                     session_id,
@@ -1740,7 +1731,7 @@ async def chat(
             if not hub.history_summary and history_text:
                 hub.history_summary = history_text[:1200]
 
-            summary_context = hub.get_combined_context(max_len=(1600 if is_db_local_fast else 3600))
+            summary_context = hub.get_combined_context(max_len=3600)
             if summary_context and not _is_context_related(message, summary_context, min_hits=1):
                 # Drop stale summary context when the topic has shifted.
                 summary_context = ""
@@ -1898,7 +1889,7 @@ async def chat(
         push_chunk, flush_chunk = _make_text_buffer(immediate=True)
 
         try:
-            shared_ctx = await _get_shared_context_async("search", history_limit=4)
+            shared_ctx = await _get_shared_context_async("search", history_limit=FAST_CHAT_HISTORY_LIMIT)
             history_text = shared_ctx.get("history_text", "")
 
             is_weather_intent = _is_weather_query(message)
@@ -1938,6 +1929,11 @@ async def chat(
                     "如果结果不足，请明确说明不确定性，不要编造。\n\n"
                     f"用户问题:\n{message}\n\n"
                     f"检索结果:\n{search_context}"
+                )
+                response_prompt = _wrap_prompt_with_shared_context(
+                    response_prompt,
+                    shared_ctx,
+                    user_message=message,
                 )
 
                 async for chunk in ask_llm_stream_async(
@@ -1998,10 +1994,7 @@ async def chat(
 
         full_reply = ""
         try:
-            db_history_limit = 6
-            if DB_LOCAL_FAST_CONTEXT and (model_backend or "local").strip().lower() in {"", "local", "ollama"}:
-                db_history_limit = max(1, DB_LOCAL_HISTORY_LIMIT)
-            shared_ctx = await _get_shared_context_async("database", history_limit=db_history_limit)
+            shared_ctx = await _get_shared_context_async("database", history_limit=FAST_CHAT_HISTORY_LIMIT)
             # 来源：先发数据库信息，后续收到 SQL 事件后会追加
             db_sources: List[Dict[str, Any]] = [{
                 "type": "database",
@@ -2105,7 +2098,7 @@ async def chat(
         # Normalize message before passing to Audit Service
         # 这里直接传 raw message 即可
         try:
-            shared_ctx = await _get_shared_context_async("audit", history_limit=6)
+            shared_ctx = await _get_shared_context_async("audit", history_limit=FAST_CHAT_HISTORY_LIMIT)
             audit_message = message
             ctx_parts: List[str] = []
             if shared_ctx.get("session_state"):
@@ -2181,7 +2174,7 @@ async def chat(
         push_chunk, flush_chunk = _make_text_buffer(immediate=True)
 
         try:
-            shared_ctx = await _get_shared_context_async("rag", history_limit=6)
+            shared_ctx = await _get_shared_context_async("rag", history_limit=FAST_CHAT_HISTORY_LIMIT)
             docs = await asyncio.to_thread(
                 lambda: search_user_documents(
                     user_id=user_id,
@@ -2340,29 +2333,14 @@ async def chat(
             final_intent = final_state.get("intent", "general")
             explain_steps = final_state.get("explain_steps", [])
             sources = final_state.get("sources", [])
-            compaction_payload = await asyncio.to_thread(
-                lambda: _maybe_compact_context(
-                    user_id=user_id,
-                    session_id=session_id,
-                    mode=mode,
-                    model_backend=model_backend,
-                )
+            shared_ctx = await _get_shared_context_async(
+                mode,
+                history_limit=FAST_CHAT_HISTORY_LIMIT,
             )
-            session_state_text = _build_compaction_context_block(compaction_payload)
-            recent_history_for_layout = await asyncio.to_thread(
-                lambda: _get_plain_history(
-                    user_id=user_id,
-                    session_id=session_id,
-                    limit=FAST_CHAT_HISTORY_LIMIT,
-                    mode=mode,
-                    query=message,
-                )
-            )
-            final_prompt = _build_cache_friendly_prompt(
+            final_prompt = _wrap_prompt_with_shared_context(
+                final_prompt,
+                shared_ctx,
                 user_message=message,
-                session_state=session_state_text,
-                summary_context=final_prompt,
-                recent_history=recent_history_for_layout,
             )
 
             # ✨ [新特性] 展示 Agent 思考过程 (Explainable AI)

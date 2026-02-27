@@ -3116,7 +3116,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleShareClick = () => {
     if (!currentSessionId) return;
     const session = sessionList.find(s => s.id === currentSessionId);
-    setShareModal({ isOpen: true, sessionId: currentSessionId, title: session ? session.title : 'New Chat' });
+    setShareModal({ isOpen: true, sessionId: currentSessionId, title: session ? session.title : '新聊天' });
   };
 
   // --- Actions Handler ---

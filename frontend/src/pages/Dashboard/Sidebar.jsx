@@ -557,7 +557,7 @@ const Sidebar = ({
                   <div className="w-6 h-6 rounded-full border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 flex items-center justify-center">
                     <Plus size={14} />
                   </div>
-                  New Chat
+                  新聊天
                 </button>
 
                 <button

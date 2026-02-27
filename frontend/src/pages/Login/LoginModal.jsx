@@ -19,6 +19,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
   const [countdown, setCountdown] = useState(0);
   const [rememberLogin, setRememberLogin] = useState(false);
   const [isWeChatTipOpen, setIsWeChatTipOpen] = useState(false);
+  const [isLegalTipOpen, setIsLegalTipOpen] = useState(false);
   const modalRef = useRef(null);
 
   const extractReason = (err, fallback) => {
@@ -54,6 +55,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
       setRememberLogin(false);
       setCountdown(0);
       setIsWeChatTipOpen(false);
+      setIsLegalTipOpen(false);
     }
 
     return () => {
@@ -223,6 +225,11 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
     }
   };
 
+  const handleOpenLegalTip = (event) => {
+    event.preventDefault();
+    setIsLegalTipOpen(true);
+  };
+
   const commonFooter = (
     <>
       <div className="mt-10 mb-6 relative flex items-center justify-center">
@@ -240,7 +247,12 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
         </button>
       </div>
       <div className="text-center">
-        <p className="text-[10px] text-gray-400">点击继续 代表你同意 <a href="#" className="underline hover:text-gray-600">用户协议</a> 和 <a href="#" className="underline hover:text-gray-600">隐私政策</a></p>
+        <p className="text-[10px] text-gray-400">
+          点击继续 代表你同意
+          <button type="button" onClick={handleOpenLegalTip} className="underline hover:text-gray-600 ml-1">用户协议</button>
+          和
+          <button type="button" onClick={handleOpenLegalTip} className="underline hover:text-gray-600 ml-1">隐私政策</button>
+        </p>
       </div>
     </>
   );
@@ -434,6 +446,33 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
               </p>
               <div className="mt-4 flex justify-end">
                 <Button variant="loginBlack" className="!py-2 !px-4 !text-sm" onClick={() => setIsWeChatTipOpen(false)}>
+                  我知道了
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isLegalTipOpen && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
+            <div className="absolute inset-0 rounded-xl bg-black/35 backdrop-blur-[1px]" onClick={() => setIsLegalTipOpen(false)}></div>
+            <div className="relative w-full max-w-sm rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-2xl p-5">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <h3 className="text-base font-semibold text-gray-900 dark:text-white">协议占位提示</h3>
+                <button
+                  type="button"
+                  onClick={() => setIsLegalTipOpen(false)}
+                  className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors text-lg leading-none"
+                  aria-label="关闭"
+                >
+                  ×
+                </button>
+              </div>
+              <p className="text-sm leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+                暂时还没想好，只是占个位嘿嘿
+              </p>
+              <div className="mt-4 flex justify-end">
+                <Button variant="loginBlack" className="!py-2 !px-4 !text-sm" onClick={() => setIsLegalTipOpen(false)}>
                   我知道了
                 </Button>
               </div>
