@@ -19,19 +19,19 @@ const AdminTableSkeleton = ({ columns = 5, rows = 6 }) => (
       style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
     >
       {Array.from({ length: columns }).map((_, idx) => (
-        <div key={`header-${idx}`} className="h-3 rounded bg-gray-200 animate-pulse" />
+        <div key={`header-${idx}`} className="h-3 rounded bg-gray-200 dark:bg-gray-700 animate-pulse" />
       ))}
     </div>
     {Array.from({ length: rows }).map((_, rowIdx) => (
       <div
         key={`row-${rowIdx}`}
-        className="grid items-center gap-3 border-t border-gray-100 pt-3"
+        className="grid items-center gap-3 border-t border-gray-100 dark:border-gray-800 pt-3"
         style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
       >
         {Array.from({ length: columns }).map((_, colIdx) => (
           <div
             key={`cell-${rowIdx}-${colIdx}`}
-            className={`h-3 rounded bg-gray-100 animate-pulse ${colIdx === 0 ? "w-4/5" : "w-3/4"}`}
+            className={`h-3 rounded bg-gray-100 dark:bg-gray-800 animate-pulse ${colIdx === 0 ? "w-4/5" : "w-3/4"}`}
           />
         ))}
       </div>
@@ -61,7 +61,7 @@ const AdminPage = () => {
   if (loadingProfile) {
     return (
       <div
-        className="min-h-screen flex items-center justify-center bg-gray-50"
+        className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950"
         style={{ minHeight: 'var(--app-height, 100vh)' }}
       >
         <Loader2 className="animate-spin mr-2" size={18} /> 加载中...
@@ -72,12 +72,12 @@ const AdminPage = () => {
   if (!profile || profile.role !== "admin") {
     return (
       <div
-        className="min-h-screen bg-gray-50 flex items-center justify-center"
+        className="min-h-screen bg-gray-50 dark:bg-gray-950 flex items-center justify-center"
         style={{ minHeight: 'var(--app-height, 100vh)' }}
       >
-        <div className="bg-white rounded-xl shadow border border-gray-200 p-8 text-center max-w-md">
-          <div className="text-lg font-semibold text-gray-900 mb-2">无权限访问</div>
-          <div className="text-sm text-gray-500 mb-6">
+        <div className="bg-white dark:bg-slate-900 rounded-xl shadow border border-gray-200 dark:border-slate-700 p-8 text-center max-w-md">
+          <div className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">无权限访问</div>
+          <div className="text-sm text-gray-500 dark:text-gray-400 mb-6">
             该页面仅管理员可访问。
           </div>
           <a
@@ -92,16 +92,16 @@ const AdminPage = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50" style={{ minHeight: 'var(--app-height, 100vh)' }}>
-      <header className="sticky top-0 z-20 bg-white/90 backdrop-blur border-b border-gray-200">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950" style={{ minHeight: 'var(--app-height, 100vh)' }}>
+      <header className="sticky top-0 z-20 bg-white/90 dark:bg-gray-900/90 backdrop-blur border-b border-gray-200 dark:border-gray-700">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div>
-            <div className="text-xs text-gray-500">Admin Console</div>
-            <div className="text-lg font-semibold text-gray-900">企业管理后台</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400">Admin Console</div>
+            <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">企业管理后台</div>
           </div>
           <a
             href="/"
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-100"
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-slate-800"
           >
             <ArrowLeft size={16} /> 返回工作台
           </a>
@@ -117,7 +117,7 @@ const AdminPage = () => {
               className={`px-4 py-2 rounded-full text-sm font-medium border ${
                 activeTab === tab.key
                   ? "bg-black text-white border-black"
-                  : "bg-white text-gray-600 border-gray-200 hover:border-gray-400"
+                  : "bg-white dark:bg-slate-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-slate-700 hover:border-gray-400 dark:hover:border-slate-500"
               }`}
             >
               {tab.label}
@@ -221,48 +221,48 @@ const UsersTab = ({ currentUserId }) => {
   };
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
-      <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-        <div className="text-sm font-medium text-gray-800">用户列表</div>
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
+        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">用户列表</div>
         <div className="flex items-center gap-2">
           <input
-            className="px-3 py-2 border border-gray-200 rounded-lg text-sm"
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
             placeholder="搜索邮箱/手机号/姓名"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
           <button
             onClick={loadUsers}
-            className="px-3 py-2 rounded-lg border border-gray-200 text-sm"
+            className="px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800"
           >
             搜索
           </button>
         </div>
       </div>
-      <div className="p-4 border-b border-gray-100 bg-gray-50">
-        <div className="text-xs text-gray-500 mb-2">添加用户</div>
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-950/50">
+        <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">添加用户</div>
         <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
           <input
-            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
             placeholder="账号（邮箱或手机号）"
             value={newUser.account}
             onChange={(e) => setNewUser((prev) => ({ ...prev, account: e.target.value }))}
           />
           <input
-            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
             type="password"
             placeholder="密码（至少6位）"
             value={newUser.password}
             onChange={(e) => setNewUser((prev) => ({ ...prev, password: e.target.value }))}
           />
           <input
-            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
             placeholder="姓名（可选）"
             value={newUser.name}
             onChange={(e) => setNewUser((prev) => ({ ...prev, name: e.target.value }))}
           />
           <select
-            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white"
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
             value={newUser.role}
             onChange={(e) => setNewUser((prev) => ({ ...prev, role: e.target.value }))}
           >
@@ -284,9 +284,9 @@ const UsersTab = ({ currentUserId }) => {
         {loading ? (
           <AdminTableSkeleton columns={5} rows={6} />
         ) : (
-          <table className="min-w-full text-sm">
+          <table className="min-w-full text-sm text-gray-700 dark:text-gray-200">
             <thead>
-              <tr className="text-left text-gray-500">
+              <tr className="text-left text-gray-500 dark:text-gray-400">
                 <th className="py-2">账号</th>
                 <th className="py-2">角色</th>
                 <th className="py-2">状态</th>
@@ -296,14 +296,14 @@ const UsersTab = ({ currentUserId }) => {
             </thead>
             <tbody>
               {users.map((u) => (
-                <tr key={u.id} className="border-t border-gray-100">
+                <tr key={u.id} className="border-t border-gray-100 dark:border-gray-800">
                   <td className="py-2">
-                    <div className="font-medium text-gray-800">{u.email || u.phone || u.id}</div>
+                    <div className="font-medium text-gray-800 dark:text-gray-100">{u.email || u.phone || u.id}</div>
                     <div className="text-xs text-gray-400">{u.name}</div>
                   </td>
                   <td className="py-2">
                     <select
-                      className="border border-gray-200 rounded-md px-2 py-1 text-sm"
+                      className="border border-gray-200 dark:border-gray-700 rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
                       value={u.role || "user"}
                       onChange={(e) => updateRole(u.id, e.target.value)}
                     >
@@ -315,7 +315,7 @@ const UsersTab = ({ currentUserId }) => {
                   </td>
                   <td className="py-2">
                     <select
-                      className="border border-gray-200 rounded-md px-2 py-1 text-sm"
+                      className="border border-gray-200 dark:border-gray-700 rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200"
                       value={u.status || "active"}
                       onChange={(e) => updateStatus(u.id, e.target.value)}
                     >
@@ -323,17 +323,17 @@ const UsersTab = ({ currentUserId }) => {
                       <option value="disabled">disabled</option>
                     </select>
                   </td>
-                  <td className="py-2 text-xs text-gray-500">{u.created_at || "-"}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{u.created_at || "-"}</td>
                   <td className="py-2">
                     <button
-                      className="text-xs text-blue-600 hover:underline"
+                      className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
                       onClick={() => forceLogout(u.id)}
                     >
                       强制下线
                     </button>
-                    <span className="mx-2 text-gray-300">|</span>
+                    <span className="mx-2 text-gray-300 dark:text-slate-600">|</span>
                     <button
-                      className={`text-xs ${u.id === currentUserId ? "text-gray-300 cursor-not-allowed" : "text-red-600 hover:underline"}`}
+                      className={`text-xs ${u.id === currentUserId ? "text-gray-300 dark:text-slate-600 cursor-not-allowed" : "text-red-600 dark:text-red-400 hover:underline"}`}
                       onClick={() => deleteUser(u)}
                       disabled={u.id === currentUserId}
                       title={u.id === currentUserId ? "无法删除当前账号" : "删除用户"}
@@ -386,23 +386,23 @@ const AuditTab = () => {
   };
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
-      <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-        <div className="text-sm font-medium text-gray-800">审单记录</div>
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
+        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">审单记录</div>
         <div className="flex items-center gap-2">
-          <select className="border border-gray-200 rounded-md px-2 py-1 text-sm" value={risk} onChange={(e) => setRisk(e.target.value)}>
+          <select className="border border-gray-200 dark:border-gray-700 rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200" value={risk} onChange={(e) => setRisk(e.target.value)}>
             <option value="">风险等级</option>
             <option value="high">high</option>
             <option value="medium">medium</option>
             <option value="low">low</option>
           </select>
-          <select className="border border-gray-200 rounded-md px-2 py-1 text-sm" value={status} onChange={(e) => setStatus(e.target.value)}>
+          <select className="border border-gray-200 dark:border-gray-700 rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200" value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">状态</option>
             <option value="done">done</option>
             <option value="failed">failed</option>
             <option value="running">running</option>
           </select>
-          <button className="px-3 py-2 rounded-lg border border-gray-200 text-sm" onClick={loadRecords}>
+          <button className="px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800" onClick={loadRecords}>
             筛选
           </button>
         </div>
@@ -411,9 +411,9 @@ const AuditTab = () => {
         {loading ? (
           <AdminTableSkeleton columns={6} rows={6} />
         ) : (
-          <table className="min-w-full text-sm">
+          <table className="min-w-full text-sm text-gray-700 dark:text-gray-200">
             <thead>
-              <tr className="text-left text-gray-500">
+              <tr className="text-left text-gray-500 dark:text-gray-400">
                 <th className="py-2">任务ID</th>
                 <th className="py-2">用户</th>
                 <th className="py-2">类型</th>
@@ -424,16 +424,16 @@ const AuditTab = () => {
             </thead>
             <tbody>
               {records.map((r) => (
-                <tr key={r.job_id} className="border-t border-gray-100">
-                  <td className="py-2 text-xs text-gray-500">{r.job_id}</td>
-                  <td className="py-2 text-xs text-gray-500">{r.user_id}</td>
+                <tr key={r.job_id} className="border-t border-gray-100 dark:border-gray-800">
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{r.job_id}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{r.user_id}</td>
                   <td className="py-2">{r.doc_type}</td>
                   <td className="py-2">{r.risk_level || "-"}</td>
-                  <td className="py-2 text-xs text-gray-500">{r.summary || "-"}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{r.summary || "-"}</td>
                   <td className="py-2 space-x-2">
-                    <button className="text-xs text-green-600" onClick={() => review(r.job_id, "approved")}>通过</button>
-                    <button className="text-xs text-red-600" onClick={() => review(r.job_id, "rejected")}>驳回</button>
-                    <button className="text-xs text-amber-600" onClick={() => review(r.job_id, "need_more")}>补材料</button>
+                    <button className="text-xs text-green-600 dark:text-green-400" onClick={() => review(r.job_id, "approved")}>通过</button>
+                    <button className="text-xs text-red-600 dark:text-red-400" onClick={() => review(r.job_id, "rejected")}>驳回</button>
+                    <button className="text-xs text-amber-600 dark:text-amber-400" onClick={() => review(r.job_id, "need_more")}>补材料</button>
                   </td>
                 </tr>
               ))}
@@ -484,10 +484,10 @@ const RulesTab = () => {
   };
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
-      <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-        <div className="text-sm font-medium text-gray-800">审单规则库</div>
-        <select className="border border-gray-200 rounded-md px-2 py-1 text-sm" value={docType} onChange={(e) => setDocType(e.target.value)}>
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
+        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">审单规则库</div>
+        <select className="border border-gray-200 dark:border-gray-700 rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200" value={docType} onChange={(e) => setDocType(e.target.value)}>
           <option value="invoice">invoice</option>
           <option value="contract">contract</option>
           <option value="payment">payment</option>
@@ -496,7 +496,7 @@ const RulesTab = () => {
       </div>
       <div className="p-4">
         <textarea
-          className="w-full min-h-[300px] font-mono text-xs border border-gray-200 rounded-lg p-3"
+          className="w-full min-h-[300px] font-mono text-xs border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
           value={rules}
           onChange={(e) => setRules(e.target.value)}
         />
@@ -550,10 +550,10 @@ const KbTab = () => {
   };
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
-      <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-        <div className="text-sm font-medium text-gray-800">知识库治理</div>
-        <button className="text-sm text-gray-500 flex items-center gap-1" onClick={loadDocs}>
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
+        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">知识库治理</div>
+        <button className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1" onClick={loadDocs}>
           <RefreshCw size={14} /> 刷新
         </button>
       </div>
@@ -561,9 +561,9 @@ const KbTab = () => {
         {loading ? (
           <AdminTableSkeleton columns={5} rows={6} />
         ) : (
-          <table className="min-w-full text-sm">
+          <table className="min-w-full text-sm text-gray-700 dark:text-gray-200">
             <thead>
-              <tr className="text-left text-gray-500">
+              <tr className="text-left text-gray-500 dark:text-gray-400">
                 <th className="py-2">来源</th>
                 <th className="py-2">用户</th>
                 <th className="py-2">状态</th>
@@ -573,17 +573,17 @@ const KbTab = () => {
             </thead>
             <tbody>
               {docs.map((d) => (
-                <tr key={`${d.user_id}-${d.source}`} className="border-t border-gray-100">
+                <tr key={`${d.user_id}-${d.source}`} className="border-t border-gray-100 dark:border-gray-800">
                   <td className="py-2">{d.source}</td>
-                  <td className="py-2 text-xs text-gray-500">{d.user_id}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{d.user_id}</td>
                   <td className="py-2">{d.status}</td>
                   <td className="py-2">{d.chunk_count}</td>
                   <td className="py-2 space-x-2">
-                    <button className="text-xs text-green-600" onClick={() => updateStatus(d, "approved")}>通过</button>
-                    <button className="text-xs text-red-600" onClick={() => updateStatus(d, "rejected")}>拒绝</button>
-                    <button className="text-xs text-amber-600" onClick={() => updateStatus(d, "archived")}>归档</button>
-                    <button className="text-xs text-blue-600" onClick={() => reindexDoc(d)}>重建向量</button>
-                    <button className="text-xs text-gray-500" onClick={() => deleteDoc(d)}>删除</button>
+                    <button className="text-xs text-green-600 dark:text-green-400" onClick={() => updateStatus(d, "approved")}>通过</button>
+                    <button className="text-xs text-red-600 dark:text-red-400" onClick={() => updateStatus(d, "rejected")}>拒绝</button>
+                    <button className="text-xs text-amber-600 dark:text-amber-400" onClick={() => updateStatus(d, "archived")}>归档</button>
+                    <button className="text-xs text-blue-600 dark:text-blue-400" onClick={() => reindexDoc(d)}>重建向量</button>
+                    <button className="text-xs text-gray-500 dark:text-gray-400" onClick={() => deleteDoc(d)}>删除</button>
                   </td>
                 </tr>
               ))}
@@ -633,10 +633,10 @@ const JobsTab = () => {
   };
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
-      <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-        <div className="text-sm font-medium text-gray-800">任务中心（审单）</div>
-        <button className="text-sm text-gray-500 flex items-center gap-1" onClick={loadJobs}>
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
+        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">任务中心（审单）</div>
+        <button className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1" onClick={loadJobs}>
           <RefreshCw size={14} /> 刷新
         </button>
       </div>
@@ -644,9 +644,9 @@ const JobsTab = () => {
         {loading ? (
           <AdminTableSkeleton columns={5} rows={6} />
         ) : (
-          <table className="min-w-full text-sm">
+          <table className="min-w-full text-sm text-gray-700 dark:text-gray-200">
             <thead>
-              <tr className="text-left text-gray-500">
+              <tr className="text-left text-gray-500 dark:text-gray-400">
                 <th className="py-2">任务ID</th>
                 <th className="py-2">状态</th>
                 <th className="py-2">进度</th>
@@ -656,14 +656,14 @@ const JobsTab = () => {
             </thead>
             <tbody>
               {jobs.map((j) => (
-                <tr key={j.job_id} className="border-t border-gray-100">
-                  <td className="py-2 text-xs text-gray-500">{j.job_id}</td>
+                <tr key={j.job_id} className="border-t border-gray-100 dark:border-gray-800">
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{j.job_id}</td>
                   <td className="py-2">{j.status}</td>
                   <td className="py-2">{j.progress}%</td>
-                  <td className="py-2 text-xs text-gray-500">{j.created_at}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{j.created_at}</td>
                   <td className="py-2 space-x-2">
-                    <button className="text-xs text-red-600" onClick={() => cancelJob(j.job_id)}>取消</button>
-                    <button className="text-xs text-blue-600" onClick={() => retryJob(j.job_id)}>重试</button>
+                    <button className="text-xs text-red-600 dark:text-red-400" onClick={() => cancelJob(j.job_id)}>取消</button>
+                    <button className="text-xs text-blue-600 dark:text-blue-400" onClick={() => retryJob(j.job_id)}>重试</button>
                   </td>
                 </tr>
               ))}
@@ -703,10 +703,10 @@ const LogsTab = () => {
   }, []);
 
   return (
-    <div className="bg-white border border-gray-200 rounded-2xl shadow-sm">
-      <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-        <div className="text-sm font-medium text-gray-800">审计日志</div>
-        <button className="text-sm text-gray-500 flex items-center gap-1" onClick={loadLogs}>
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
+        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">审计日志</div>
+        <button className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1" onClick={loadLogs}>
           <RefreshCw size={14} /> 刷新
         </button>
       </div>
@@ -714,9 +714,9 @@ const LogsTab = () => {
         {loading ? (
           <AdminTableSkeleton columns={4} rows={6} />
         ) : (
-          <table className="min-w-full text-sm">
+          <table className="min-w-full text-sm text-gray-700 dark:text-gray-200">
             <thead>
-              <tr className="text-left text-gray-500">
+              <tr className="text-left text-gray-500 dark:text-gray-400">
                 <th className="py-2">时间</th>
                 <th className="py-2">管理员</th>
                 <th className="py-2">动作</th>
@@ -725,11 +725,11 @@ const LogsTab = () => {
             </thead>
             <tbody>
               {logs.map((l) => (
-                <tr key={l.id} className="border-t border-gray-100">
-                  <td className="py-2 text-xs text-gray-500">{l.created_at}</td>
-                  <td className="py-2 text-xs text-gray-500">{l.actor_id}</td>
+                <tr key={l.id} className="border-t border-gray-100 dark:border-gray-800">
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{l.created_at}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{l.actor_id}</td>
                   <td className="py-2">{l.action}</td>
-                  <td className="py-2 text-xs text-gray-500">{l.target_id || "-"}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{l.target_id || "-"}</td>
                 </tr>
               ))}
               {logs.length === 0 && (
