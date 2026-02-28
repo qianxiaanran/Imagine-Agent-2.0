@@ -201,8 +201,8 @@ def get_user_sessions(user_id):
             .limit(4000) \
             .execute()
 
-        # If current account has no history, try to merge legacy rows that
-        # belong to another profile id with the same email.
+        # 如果当前帐户没有历史记录，请尝试合并旧行
+        # 属于具有相同电子邮件地址的另一个个人资料 ID。
         if not (t_res.data or []) and not (res.data or []):
             moved = _relink_legacy_history_by_email(user_id)
             if moved > 0:

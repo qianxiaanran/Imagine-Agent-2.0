@@ -71,7 +71,7 @@ const Sidebar = ({
     }
   }, [isLoadingProfile]);
 
-  // Pinned session state (local storage)
+  // 固定会话状态（本地存储）
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`);
@@ -88,14 +88,14 @@ const Sidebar = ({
   const searchInputRef = useRef(null);
   const searchListRef = useRef(null); // 新增：列表容器Ref
 
-  // Session operation state
+  // 会话运行状态
   const [menuOpenId, setMenuOpenId] = useState(null);
   const menuRef = useRef(null);
 
   // 删除确认弹窗
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, sessionId: null, title: "" });
 
-  // Rename modal state
+  // 重命名模态状态
   const [renameModal, setRenameModal] = useState({ isOpen: false, sessionId: null, title: "" });
   const [newTitleInput, setNewTitleInput] = useState("");
 
@@ -108,7 +108,7 @@ const Sidebar = ({
 
   const profileMenuRef = useRef(null);
 
-  // Update pinned state and persist locally
+  // 更新固定状态并在本地保留
   const togglePinSession = (sessionId) => {
     const newPinned = new Set(pinnedSessionIds);
     if (newPinned.has(sessionId)) {
@@ -122,7 +122,7 @@ const Sidebar = ({
 
   const safeSessions = Array.isArray(sessionList) ? sessionList : [];
 
-  // Sorting: remove deleted -> pinned first -> original chronological order
+  // 排序：删除已删除 -> 固定在第一位 -> 原始时间顺序
   const displaySessions = useMemo(() => {
     const active = safeSessions.filter(s => !optimisticDeletedIds.has(s.id));
     return active.sort((a, b) => {
@@ -151,7 +151,7 @@ const Sidebar = ({
   const isRestrictedMode = selectedModel !== 0;
 
   useEffect(() => {
-    // If switched to restricted mode, force-collapse knowledge menu
+    // 如果切换到限制模式，强制折叠知识菜单
     if (isRestrictedMode) {
       setIsKbExpanded(false);
     }
@@ -160,7 +160,7 @@ const Sidebar = ({
   useEffect(() => {
     if (userProfile) {
       setLocalUserProfile((prev) => ({ ...prev, ...userProfile }));
-      // Reload pinned configuration when user changes
+      // 用户更改时重新加载固定配置
       try {
         const saved = localStorage.getItem(`pinned_sessions_${userProfile.id}`);
         setPinnedSessionIds(new Set(saved ? JSON.parse(saved) : []));
@@ -204,15 +204,15 @@ const Sidebar = ({
     };
   }, [shouldRenderAllSessions, visibleSessionCount, displaySessions.length]);
 
-  // Global shortcut listener
+  // 全局快捷监听器
   useEffect(() => {
     const handleGlobalKeyDown = (e) => {
-      // Ctrl + K or Cmd + K to toggle search
+      // Ctrl + K 或 Cmd + K 切换搜索
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
         setIsSearchOpen((prev) => !prev);
       }
-      // Esc to close search (handled globally as well just in case focus is lost)
+      // Esc 关闭搜索（全局处理，以防焦点丢失）
       if (e.key === 'Escape' && isSearchOpen) {
         setIsSearchOpen(false);
       }
@@ -222,7 +222,7 @@ const Sidebar = ({
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [isSearchOpen]);
 
-  // Focus search input when opened, and reset selection
+  // 打开时聚焦搜索输入，并重置选择
   useEffect(() => {
     if (isSearchOpen) {
       setSelectedIndex(0);
@@ -234,12 +234,12 @@ const Sidebar = ({
     }
   }, [isSearchOpen]);
 
-  // Reset selection on search query change
+  // 搜索查询更改时重置选择
   useEffect(() => {
     setSelectedIndex(0);
   }, [searchQuery]);
 
-  // Auto-scroll to selected item
+  // 自动滚动到所选项目
   useEffect(() => {
     if (isSearchOpen && searchListRef.current) {
       const selectedElement = searchListRef.current.children[selectedIndex];
@@ -249,7 +249,7 @@ const Sidebar = ({
     }
   }, [selectedIndex, isSearchOpen]);
 
-  // Keyboard navigation inside search list
+  // 搜索列表内的键盘导航
   const handleSearchKeyDown = (e) => {
     if (filteredSessions.length === 0) return;
 
@@ -393,7 +393,7 @@ const Sidebar = ({
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/20 backdrop-blur-[2px] animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-[400px] rounded-2xl shadow-2xl border border-gray-100 dark:border-gray-700 p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
             <div>
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">Delete Chat?</h3>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">删除聊天？</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
                 这会删除“<span className="font-medium text-gray-900 dark:text-gray-200">{deleteModal.title}</span>”。
               </p>
@@ -417,7 +417,7 @@ const Sidebar = ({
         </div>
       )}
 
-      {/* Rename modal */}
+      {/* Re 重命名模态 */}
       {renameModal.isOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/20 backdrop-blur-[2px] animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-[400px] rounded-2xl shadow-2xl border border-gray-100 dark:border-gray-700 p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
@@ -540,15 +540,15 @@ const Sidebar = ({
         </div>
       )}
 
-      {/* Desktop sidebar body */}
+      {/* De 桌面侧边栏主体 */}
       <div
-        className={`${isOpen ? "w-[260px] border-r" : "w-0 border-none"} bg-[#f9f9f9] dark:bg-gray-900 border-gray-100 dark:border-gray-800 flex-shrink-0 transition-[width] duration-300 hidden md:flex z-20 overflow-hidden relative flex-col`}
+        className={`dashboard-sidebar-shell ${isOpen ? "w-[260px] border-r" : "w-0 border-none"} bg-[#f9f9f9] dark:bg-gray-900 border-gray-100 dark:border-gray-800 flex-shrink-0 transition-[width] duration-300 hidden md:flex z-20 overflow-hidden relative flex-col`}
       >
         <div className="w-[260px] h-full flex flex-col">
 
-          {/* Fixed top controls (not scrolling with history) */}
+          {/* Fi 固定顶部控件（不随历史记录滚动） */}
           <div className="flex-shrink-0">
-              {/* 1. Header Buttons */}
+              {/* 1. 1. 标题按钮 */}
               <div className="p-3 pb-1 flex items-center gap-2">
                 <button
                   className="flex-1 flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-200/60 dark:hover:bg-gray-800 transition-colors text-sm text-gray-700 dark:text-gray-200 font-medium"
@@ -569,7 +569,7 @@ const Sidebar = ({
                 </button>
               </div>
 
-              {/* 2. Tools: Search & KB Management */}
+              {/* 2. 2. 工具：搜索和知识库管理 */}
               <div className="px-3 py-2 space-y-1">
                   <div
                     onClick={() => setIsSearchOpen(true)}
@@ -630,7 +630,7 @@ const Sidebar = ({
               </div>
           </div>
 
-          {/* Divider */}
+          {/* Di 分频器 */}
           <div className="h-px bg-gray-100 dark:bg-gray-800 mx-4 mb-2"></div>
 
           {/* 3. 滚动区域：仅包含历史记录 */}
@@ -679,7 +679,7 @@ const Sidebar = ({
                     {menuOpenId === session.id && (
                       <div
                         ref={menuRef}
-                        className="absolute right-2 top-8 z-50 w-32 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+                        className="dashboard-dropdown absolute right-2 top-8 z-50 w-32 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
                         onClick={(e) => e.stopPropagation()}
                       >
                          <button
@@ -745,7 +745,7 @@ const Sidebar = ({
           <div className="p-3 border-t border-gray-100 dark:border-gray-800 relative" ref={profileMenuRef}>
             {isProfileMenuOpen && !isLoadingProfile && (
               <div className="absolute bottom-full left-0 w-full px-3 mb-2 z-50 animate-in fade-in zoom-in-95 duration-200 origin-bottom">
-                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden w-full">
+                <div className="dashboard-dropdown bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden w-full">
                   <div className="p-1.5">
                     <div
                       className="px-2 py-2 flex items-center gap-3 mb-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg cursor-pointer transition-colors"
@@ -779,7 +779,7 @@ const Sidebar = ({
                       <Sparkles size={18} strokeWidth={1.5} /> 个性化
                     </button>
 
-                    {/* [New] Change password button */}
+                    {/* [N [新增]更改密码按钮 */}
                     <button
                       className="w-full flex items-center gap-3 px-2 py-2.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors text-left"
                       onClick={() => {
@@ -847,7 +847,7 @@ const Sidebar = ({
 
       </div>
 
-      {/* [New] Change password modal */}
+      {/* [N [新增]修改密码模式 */}
       <ChangePasswordModal
         isOpen={isChangePasswordOpen}
         onClose={() => setIsChangePasswordOpen(false)}

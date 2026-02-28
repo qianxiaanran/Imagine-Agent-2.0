@@ -16,6 +16,9 @@ Backend/static/temp_audio/
 Backend/storage/
 voice.wav
 frontend/src.zip
+.sms_token_cache.json
+Backend/.sms_token_cache.json
+backend/.sms_token_cache.json
 .venv/
 Backend/.venv/
 node_modules/

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import httpx
 import mimetypes
+import json
 from typing import Optional, Dict, Any
 from uuid import uuid4
 import time
@@ -27,9 +28,73 @@ MAX_AVATAR_BYTES = 5 * 1024 * 1024  # Raise avatar limit to 5MB for better toler
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 # -----------------------------------------------------------------------------
-# 内存缓存层
+# 短信登录令牌缓存（内存 + 磁盘）
 # -----------------------------------------------------------------------------
-_TOKEN_CACHE: Dict[str, Dict[str, Any]] = {}
+SMS_TOKEN_TTL_SECONDS = 14 * 24 * 3600
+SMS_TOKEN_CACHE_FILE = os.path.join(os.path.dirname(__file__), ".sms_token_cache.json")
+
+
+def _load_token_cache_from_disk() -> Dict[str, Dict[str, Any]]:
+    try:
+        if not os.path.exists(SMS_TOKEN_CACHE_FILE):
+            return {}
+        with open(SMS_TOKEN_CACHE_FILE, "r", encoding="utf-8") as fp:
+            raw = json.load(fp)
+        if not isinstance(raw, dict):
+            return {}
+
+        now = time.time()
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        for token, session in raw.items():
+            if not isinstance(token, str) or not isinstance(session, dict):
+                continue
+            expires_at = float(session.get("expires_at") or 0)
+            if expires_at <= now:
+                continue
+            user_id = str(session.get("user_id") or "").strip()
+            phone = str(session.get("phone") or "").strip()
+            email = str(session.get("email") or "").strip()
+            if not user_id or not phone:
+                continue
+            cleaned[token] = {
+                "user_id": user_id,
+                "phone": phone,
+                "email": email,
+                "expires_at": expires_at,
+            }
+        return cleaned
+    except Exception:
+        return {}
+
+
+_TOKEN_CACHE: Dict[str, Dict[str, Any]] = _load_token_cache_from_disk()
+
+
+def _persist_token_cache() -> None:
+    try:
+        cache_dir = os.path.dirname(SMS_TOKEN_CACHE_FILE)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        temp_file = f"{SMS_TOKEN_CACHE_FILE}.tmp"
+        with open(temp_file, "w", encoding="utf-8") as fp:
+            json.dump(_TOKEN_CACHE, fp, ensure_ascii=False)
+        os.replace(temp_file, SMS_TOKEN_CACHE_FILE)
+    except Exception as e:
+        print(f"[Auth] Persist sms token cache failed: {e}")
+
+
+def _purge_expired_token_cache(persist: bool = False) -> None:
+    now = time.time()
+    expired_tokens = [
+        token for token, session in _TOKEN_CACHE.items()
+        if float((session or {}).get("expires_at") or 0) <= now
+    ]
+    if not expired_tokens:
+        return
+    for token in expired_tokens:
+        _TOKEN_CACHE.pop(token, None)
+    if persist:
+        _persist_token_cache()
 
 
 def _get_sb_url_and_key(sb) -> tuple[str, str]:
@@ -40,7 +105,7 @@ def _get_sb_url_and_key(sb) -> tuple[str, str]:
     if not url:
         url = os.getenv("SUPABASE_URL", "") or os.getenv("SUPABASE_PROJECT_URL", "")
     if not key:
-        # Must use anon key here (not service role).
+        # 此处必须使用匿名密钥（不是服务角色）。
         key = os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_KEY", "")
     if not url or not key:
         raise HTTPException(status_code=500, detail="后端缺少 SUPABASE_URL / SUPABASE_ANON_KEY 配置")
@@ -61,13 +126,13 @@ def _update_user_metadata_via_gotrue(sb, jwt_token: str, data: dict) -> None:
         "Content-Type": "application/json",
     }
 
-    # Only update user_metadata: payload format is {"data": {...}}
+    # 仅更新 user_metadata：负载格式为 {"data": {...}}
     payload = {"data": data}
 
     try:
         r = httpx.put(endpoint, headers=headers, json=payload, timeout=10)
         if r.status_code >= 400:
-            # Common case: 401 means token is not a Supabase JWT (e.g. sms-token).
+            # 常见情况：401 表示令牌不是 Supabase JWT（例如 sms-token）。
             detail = ""
             try:
                 detail = r.json()
@@ -83,22 +148,24 @@ def _update_user_metadata_via_gotrue(sb, jwt_token: str, data: dict) -> None:
 
 def _cache_token(token: str, user_id: str, phone: str, email: str):
     """Cache mapping between temporary token and real user identity."""
+    _purge_expired_token_cache()
     _TOKEN_CACHE[token] = {
         "user_id": user_id,
         "phone": phone,
         "email": email,
-        "expires_at": time.time() + (7 * 24 * 3600)
+        "expires_at": time.time() + SMS_TOKEN_TTL_SECONDS
     }
+    _persist_token_cache()
 
 
 def _get_session_from_token(token: str) -> Optional[Dict]:
     """Return cached session mapping by token."""
-    if token in _TOKEN_CACHE:
-        session = _TOKEN_CACHE[token]
-        if session["expires_at"] > time.time():
+    session = _TOKEN_CACHE.get(token)
+    if session:
+        if float(session.get("expires_at") or 0) > time.time():
             return session
-        else:
-            del _TOKEN_CACHE[token]
+        _TOKEN_CACHE.pop(token, None)
+        _persist_token_cache()
     return None
 
 
@@ -299,7 +366,7 @@ def _extract_avatar_path(value: Any) -> str:
         if not direct:
             return ""
         if "/" not in direct and "." not in direct and len(direct) <= 3:
-            # e.g. "U" / "JD" fallback initials, not a storage object path
+            # 例如“U”/“JD”后备缩写，不是存储对象路径
             return ""
         return direct
 
@@ -361,7 +428,7 @@ def _build_signed_url(storage, path: str, expires_in: int = 60 * 60) -> str:
 
 
 # -----------------------------------------------------------------------------
-# API Models
+# API模型
 # -----------------------------------------------------------------------------
 class SendCodeRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -386,7 +453,7 @@ class UpdateProfileRequest(BaseModel):
     # username 前端会传，但系统不允许改：后端会忽略它（不写入）
     name: Optional[str] = None
     username: Optional[str] = None
-    # avatar only stores URL (from Storage)
+    # 头像仅存储 URL（来自存储）
     avatar: Optional[str] = None
 
 
@@ -404,7 +471,7 @@ class ResetPasswordRequest(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# Routes
+# 路线
 # -----------------------------------------------------------------------------
 @router.post("/send_code")
 def api_send_code(req: SendCodeRequest):
@@ -494,7 +561,7 @@ def api_register(req: RegisterRequest):
 
 @router.post("/login")
 def api_login(req: LoginRequest):
-    # Avoid mutating shared admin client auth state during sign-in.
+    # 避免在登录期间改变共享管理客户端身份验证状态。
     sb_anon = get_anon_supabase(fresh=True)
     sb_admin = get_admin_supabase(fresh=True)
     email = _get_email_from_phone(req.phone)
@@ -507,7 +574,7 @@ def api_login(req: LoginRequest):
                 "password": req.password
             })
             meta = auth_res.user.user_metadata or {}
-            # Ensure username is not empty
+            # 确保用户名不为空
             if not meta.get("username"):
                 meta["username"] = meta.get("name") or f"User_{req.phone[-4:]}"
                 try:
@@ -549,7 +616,7 @@ def api_login(req: LoginRequest):
             user_name = u_meta.get("name", f"User_{req.phone[-4:]}")
             user_email = real_user.email or email
 
-            # Ensure username is initialized
+            # 确保用户名已初始化
             if not u_meta.get("username"):
                 u_meta["username"] = user_name
                 try:
@@ -628,7 +695,7 @@ def get_profile(
     token = _bearer_token(authorization)
 
     if token:
-        # A. JWT Token
+        # A. JWT 令牌
         if len(token) > 100:
             try:
                 user_res = sb.auth.get_user(token)
@@ -657,7 +724,7 @@ def get_profile(
             except Exception:
                 pass
 
-        # B. Custom token
+        # B. 自定义代币
         session = _get_session_from_token(token)
         if session:
             try:
@@ -822,10 +889,10 @@ def update_profile(
     if not updates:
         return {"success": True, "message": "Nothing to update"}
 
-    # Resolve user_id from either Supabase JWT or custom sms-token.
+    # 从 Supabase JWT 或自定义短信令牌解析 user_id。
     user_id = _resolve_user_id(sb_admin, token)
 
-    # Use admin API to patch user_metadata, so both token types are supported.
+    # 使用管理 API 修补 user_metadata，因此两种令牌类型都受支持。
     try:
         user_res = sb_admin.auth.admin.get_user_by_id(user_id)
         current_meta = {}
@@ -857,7 +924,7 @@ def update_password(
     sb_admin = get_admin_supabase()  # 使用 admin client 确保权限
     token = _bearer_token(authorization)
 
-    # 1. Authenticate: resolve user_id
+    # 1. 认证：解析user_id
     user_id = _resolve_user_id(sb_admin, token)
 
     # 2. 获取用户邮箱以便验证旧密码

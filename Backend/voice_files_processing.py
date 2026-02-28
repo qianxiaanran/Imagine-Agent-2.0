@@ -22,7 +22,7 @@ VOICE_INLINE_FALLBACK = os.getenv("VOICE_INLINE_FALLBACK", "true").lower() not i
     "off",
 }
 
-# Fallback cache when Redis is temporarily unavailable.
+# Redis 暂时不可用时的回退缓存。
 TRANSCRIPTION_TASKS: Dict[str, Dict[str, Any]] = {}
 
 

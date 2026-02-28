@@ -10,7 +10,7 @@ const ChangePasswordModal = ({ isOpen, onClose }) => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
 
-  // Reset state when opening
+  // 打开弹窗时重置状态
   React.useEffect(() => {
     if (isOpen) {
       setOldPassword('');

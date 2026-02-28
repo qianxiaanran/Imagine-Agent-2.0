@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-import os
+﻿import os
 import sys
 import time
 import threading
@@ -23,7 +22,7 @@ _env_dir = os.path.dirname(__file__)
 load_dotenv(dotenv_path=os.path.join(_env_dir, ".env"), override=False)
 load_dotenv(dotenv_path=os.path.join(_env_dir, ".env.local"), override=True)
 
-# Initialize optional modules
+# 初始化可选模块
 auth_router = None
 user_router = None
 chat_router = None
@@ -47,7 +46,7 @@ generate_email_draft = None
 parse_ocr_content = None
 save_ocr_record = None
 warmup_embeddings = None
-# Added optional sync ASR callable
+# 添加了可选的同步 ASR 可调用功能
 baidu_asr_from_bytes = None
 get_cached_sms_session = None
 
@@ -98,7 +97,7 @@ try:
     import voice_ws_proxy
     from admin_utils import _bearer_token, _get_token_iat, _get_user_from_token, _fetch_profile
     from auth_router import _get_session_from_token as get_cached_sms_session
-    # Import sync ASR helper
+    # 导入同步 ASR 助手
     from voice_manager import baidu_asr_from_bytes
     from deepseek_llm import warmup_models
 
@@ -109,7 +108,7 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
-# Load share module separately
+# 单独的负载共享模块
 share_manager = None
 try:
     import share_manager as _share_manager
@@ -441,7 +440,7 @@ async def transcribe(file: UploadFile = File(...)):
         return {"error": str(e)}
 
 
-# Added: realtime voice / short audio endpoint
+# 新增：实时语音/短音频端点
 @app.post("/api/voice/instant")
 async def transcribe_instant(file: UploadFile = File(...)):
     """
@@ -457,7 +456,7 @@ async def transcribe_instant(file: UploadFile = File(...)):
                 file.filename,
                 file.content_type or "audio/wav"
             )
-        # Call sync ASR helper in voice_manager
+        # 在 voice_manager 中调用同步 ASR 助手
         text = baidu_asr_from_bytes(content, file.filename)
         return {"success": True, "text": text, "file_path": stored_path}
     except Exception as e:
@@ -493,7 +492,7 @@ async def get_audio_playback_url(path: str = Query(..., description="Supabase st
         return {"error": str(e)}
 
 
-# Updated: RAG upload endpoint returns previews
+# 更新：RAG 上传端点返回预览
 @app.post("/api/documents/upload")
 async def upload_docs(
     request: Request,
@@ -510,11 +509,11 @@ async def upload_docs(
     if token:
         try:
             token_user_id = None
-            # Supabase JWT
+            # 智威汤逊
             if len(token) > 100 and "_get_user_from_token" in globals():
                 token_user = _get_user_from_token(token)
                 token_user_id = getattr(token_user, "id", None)
-            # SMS login temporary token
+            # 短信登录临时令牌
             elif token.startswith("sms-token-") and get_cached_sms_session:
                 sms_session = get_cached_sms_session(token)
                 if sms_session:

@@ -9,7 +9,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
   const REMEMBER_UNTIL_KEY = 'app_auth_remember_until';
   const REMEMBER_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
-  // 'password' | 'code_step1' | 'code_step2' | 'forgot_password'
+  // '密码' | '代码步骤1' | '代码步骤2' | '忘记密码'
   const [view, setView] = useState('password');
   const [showPassword, setShowPassword] = useState(false);
   const [formData, setFormData] = useState({ account: '', password: '', code: '' });
@@ -189,8 +189,13 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
       const result = await authApi.loginWithCode(formData.account, formData.code);
       if (result.success) {
         if (result.token) localStorage.setItem(AUTH_TOKEN_KEY, result.token);
-        localStorage.removeItem(REMEMBER_UNTIL_KEY);
-        await supabase.auth.signOut();
+        if (rememberLogin) {
+          const rememberUntil = Date.now() + REMEMBER_WINDOW_MS;
+          localStorage.setItem(REMEMBER_UNTIL_KEY, String(rememberUntil));
+        } else {
+          localStorage.removeItem(REMEMBER_UNTIL_KEY);
+          await supabase.auth.signOut();
+        }
         onLoginSuccess();
       } else {
         setError('登录失败：验证码校验未通过');
@@ -289,7 +294,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
                   <span className={`inline-block w-2 h-2 rounded-full ${rememberLogin ? 'bg-emerald-400' : 'bg-gray-300'}`}></span>
                   两周内免登录
                 </button>
-                <button type="button" className="text-gray-400 text-xs hover:text-gray-600 dark:hover:text-gray-300 transition-colors" onClick={() => { setView('forgot_password'); setError(''); setShowRegisterShortcut(false); }}>忘记密码?</button>
+                <button type="button" className="text-gray-400 text-xs hover:text-gray-600 dark:hover:text-gray-300 transition-colors" onClick={() => { setView('forgot_password'); setError(''); setShowRegisterShortcut(false); }}>忘记密码？</button>
               </div>
 
               <div className="space-y-3 pt-2">
@@ -408,6 +413,17 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
                   </button>
                 </div>
               )}
+
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium transition-colors ${rememberLogin ? 'bg-black text-white border-black' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-gray-400'}`}
+                  onClick={() => setRememberLogin((prev) => !prev)}
+                >
+                  <span className={`inline-block w-2 h-2 rounded-full ${rememberLogin ? 'bg-emerald-400' : 'bg-gray-300'}`}></span>
+                  两周内免登录
+                </button>
+              </div>
 
               <div className="space-y-3 pt-4">
                 <button className={`w-full rounded-lg py-3 font-bold text-[15px] transition-colors ${formData.code ? 'bg-black text-white hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200 shadow-lg' : 'bg-[#bfbfbf] dark:bg-gray-700 text-white cursor-not-allowed'}`} onClick={handleCodeLogin} disabled={!formData.code || isLoading}>

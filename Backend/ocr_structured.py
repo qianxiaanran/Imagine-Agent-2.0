@@ -1,5 +1,4 @@
-﻿# -*- coding: utf-8 -*-
-import json
+﻿import json
 import os
 import re
 from datetime import datetime

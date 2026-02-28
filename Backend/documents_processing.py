@@ -10,7 +10,7 @@ from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, Te
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from supabase_client import require_supabase
 
-# Compatibility import for Document across LangChain versions.
+# 文档跨LangChain版本的兼容性导入。
 try:
     from langchain_core.documents import Document
 except ImportError:
@@ -20,7 +20,7 @@ except ImportError:
         print("[Documents] failed to import Document")
         Document = None
 
-# Compatibility import for text splitter across LangChain versions.
+# 跨 LangChain 版本的文本分割器的兼容性导入。
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
@@ -30,13 +30,13 @@ except ImportError:
         print("[Documents] failed to import RecursiveCharacterTextSplitter")
         RecursiveCharacterTextSplitter = None
 
-# Default splitter config; adaptive split logic is used later.
+# 默认分离器配置；稍后使用自适应分割逻辑。
 if RecursiveCharacterTextSplitter:
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 else:
     text_splitter = None
 
-# Embedding model singleton
+# 嵌入模型单例
 _embeddings = None
 
 
@@ -130,7 +130,7 @@ def _adaptive_split_documents(docs: Iterable, filename: str) -> list:
             if len(split_sections) >= 2:
                 sections = split_sections
         elif is_table:
-            # For table-like text, split by empty lines first to preserve rows.
+            # 对于类似表格的文本，首先用空行分割以保留行。
             sections = [s for s in re.split(r"\n{2,}", content) if s.strip()]
 
         for section in sections:
@@ -138,7 +138,7 @@ def _adaptive_split_documents(docs: Iterable, filename: str) -> list:
             if not section:
                 continue
             if splitter and len(section) > chunk_size * 1.4:
-                # Second pass split while preserving page metadata.
+                # 第二遍分割，同时保留页面元数据。
                 temp_doc = _make_document(section, metadata)
                 for piece in splitter.split_documents([temp_doc]):
                     all_chunks.append(piece)
@@ -156,7 +156,7 @@ def _adaptive_split_text(text: str) -> list[str]:
     splitter = _build_splitter(chunk_size, overlap)
     if splitter:
         return splitter.split_text(text)
-    # fallback: naive split
+    # 后备：天真的分裂
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
@@ -286,7 +286,7 @@ def _ensure_torch_pytree_compat():
             base_fn = _pytree._register_pytree_node  # type: ignore[attr-defined]
 
             def _register_wrapper(*args, **kwargs):
-                # Drop newer kwargs that old torch versions do not support.
+                # 删除旧版本不支持的新 kwargs。
                 for key in (
                     "serialized_type_name",
                     "to_dumpable_context",
@@ -297,22 +297,22 @@ def _ensure_torch_pytree_compat():
                 try:
                     return base_fn(*args, **kwargs)
                 except TypeError:
-                    # Some old versions only accept (typ, flatten_fn, unflatten_fn).
+                    # 一些旧版本只接受（typ、flatten_fn、unflatten_fn）。
                     if len(args) >= 3:
                         return base_fn(args[0], args[1], args[2])
                     raise
 
-            # Always wrap to avoid signature mismatch.
+            # 始终换行以避免签名不匹配。
             _pytree.register_pytree_node = _register_wrapper  # type: ignore[attr-defined]
     except Exception:
-        # Do not block main flow.
+        # 不要阻塞主流。
         pass
 
 
 def get_embeddings():
     global _embeddings
     if _embeddings is None:
-        # Local embedding model path.
+        # 本地嵌入模型路径。
         local_model_path = r"F:\Enterprise-Intelligent-Office-Agent-2.0\bge-small-zh-v1.5"
 
         print(f"[Model] loading local embedding model: {local_model_path} ...", flush=True)
@@ -460,7 +460,7 @@ def delete_user_documents(user_id: str):
     try:
         print(f"[Delete] clearing documents for user {user_id} ...", flush=True)
         sb = require_supabase()
-        # Filter by user_id kept in metadata.
+        # 按元数据中保存的 user_id 进行过滤。
         sb.table("documents").delete().eq("metadata->>user_id", user_id).execute()
         print("[Delete] old documents cleared", flush=True)
         return True
@@ -488,7 +488,7 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
         if not chunks:
             return False, "Unable to split document", None
 
-        # Use the first few chunks as preview text for immediate context.
+        # 使用前几个块作为直接上下文的预览文本。
         full_text_preview = "\n".join([c.page_content for c in chunks[:5]])
         if len(full_text_preview) > 3000:
             full_text_preview = full_text_preview[:3000] + "...(remaining content in knowledge base)"
@@ -497,7 +497,7 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
         embeddings_model = get_embeddings()
         texts = [c.page_content for c in chunks]
 
-        # Batch embedding generation.
+        # 批量嵌入生成。
         vectors = embeddings_model.embed_documents(texts)
 
         display_name = _normalize_source_name(filename) or filename
@@ -545,7 +545,7 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
         print("[Logic] writing chunks to Supabase...", flush=True)
         sb = require_supabase()
         try:
-            # Remove older chunks of the same file to avoid mixing old/new versions.
+            # 删除同一文件的旧块以避免混合旧/新版本。
             sb.table("documents").delete().eq("metadata->>user_id", user_id).eq("metadata->>source", display_name).execute()
         except Exception as cleanup_err:
             print(f"[Logic] pre-clean same-source chunks failed: {cleanup_err}", flush=True)

@@ -5,6 +5,13 @@
 :root {
   --font-ui: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", sans-serif;
   --font-display: "Plus Jakarta Sans", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", sans-serif;
+  --dashboard-bg-main: #0b0d12;
+  --dashboard-bg-sidebar: #131820;
+  --dashboard-bg-surface: #1d232d;
+  --dashboard-bg-hover: #262d39;
+  --dashboard-border: #303949;
+  --dashboard-text: #f5f7fb;
+  --dashboard-text-muted: #a3adbb;
   font-family: var(--font-ui);
   line-height: 1.5;
   font-weight: 400;
@@ -17,6 +24,58 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+.light {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+.dark .dashboard-unified-dark {
+  background-color: var(--dashboard-bg-main);
+  color: var(--dashboard-text);
+}
+
+.dark .dashboard-unified-dark .dashboard-main-surface {
+  background-color: var(--dashboard-bg-main) !important;
+}
+
+.dark .dashboard-unified-dark .dashboard-topbar {
+  background-color: rgba(14, 17, 23, 0.92) !important;
+  border-color: var(--dashboard-border) !important;
+}
+
+.dark .dashboard-unified-dark .dashboard-sidebar-shell {
+  background-color: var(--dashboard-bg-sidebar) !important;
+  border-color: var(--dashboard-border) !important;
+}
+
+.dark .dashboard-unified-dark .dashboard-pane {
+  background-color: #11161f !important;
+  border-color: var(--dashboard-border) !important;
+}
+
+.dark .dashboard-unified-dark .dashboard-input-dock {
+  background-color: rgba(11, 13, 18, 0.94) !important;
+  border-color: var(--dashboard-border) !important;
+}
+
+.dark .dashboard-unified-dark .dashboard-composer {
+  background-color: var(--dashboard-bg-surface) !important;
+  border-color: var(--dashboard-border) !important;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.dark .dashboard-unified-dark .dashboard-dropdown {
+  background-color: var(--dashboard-bg-surface) !important;
+  border-color: var(--dashboard-border) !important;
+}
+
+.dark .dashboard-unified-dark .dashboard-muted {
+  color: var(--dashboard-text-muted) !important;
 }
 
 /* ✅ 修复：移除强制的 overflow: hidden 和 height: 100vh */

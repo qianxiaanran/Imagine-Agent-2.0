@@ -97,16 +97,16 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     session_id: Optional[str] = None
 
-    # Frontend fields: mode / modelId
+    # 前端字段：mode / modelId
     mode: Optional[str] = Field(default="general", description="对话模式：general / database / rag / search / audit ...")
     modelId: Optional[str] = Field(default=None, description="Selected model ID from frontend")
 
-    # New field: model backend selection
+    # 新字段：模型后端选择
     model_backend: Optional[str] = Field(default="local", description="backend: local (Qwen) / cloud (DeepSeek)")
 
     # 上下文内容（OCR/会议/订单文本）
     context_content: Optional[str] = None
-    # Explicit file list (reserved)
+    # 显式文件列表（保留）
     files: List[str] = []
     personalization: Dict[str, Any] = Field(default_factory=dict)
 
@@ -116,7 +116,7 @@ class RenameRequest(BaseModel):
 
 
 # ------------------------------------------------------------
-# Helper: sanitize history content
+# 助手：清理历史内容
 # ------------------------------------------------------------
 def _sanitize_history_content(text: str) -> str:
     """Clean history text and remove tool/debug traces before prompting."""
@@ -124,7 +124,7 @@ def _sanitize_history_content(text: str) -> str:
         return ""
     s = str(text)
 
-    # Remove special tokens that may leak into history
+    # 删除可能泄漏到历史记录中的特殊令牌
     s = s.replace("<|im_start|>", "").replace("<|im_end|>", "")
     # 移除前端/中间层注入的 meta 行
     s = re.sub(r'^\s*Assistant:\s*\{.*?\}\s*$', '', s, flags=re.MULTILINE)
@@ -139,9 +139,9 @@ def _sanitize_history_content(text: str) -> str:
 
     # 移除 ReAct 过程日志
     s = re.sub(r'^\s*ReAct\s*(思考|行动|观察).*$', '', s, flags=re.MULTILINE)
-    # Remove generic debug banner lines
+    # 删除通用调试横幅行
     s = re.sub(r'^\s*\[[A-Z_]+\].*$', '', s, flags=re.MULTILINE)
-    # Collapse excessive blank lines
+    # 折叠过多的空白行
     s = re.sub(r'\n{3,}', '\n\n', s)
 
     return s.strip()
@@ -152,11 +152,11 @@ def _looks_like_meeting_minutes(text: str) -> bool:
         return False
     s = str(text)
     markers = [
-        "浼氳涓婚",
+        "会议主题",
         "关键决策",
         "行动项",
         "风险与待事项",
-        "浼氳绾",
+        "会议纪要",
     ]
     hit_count = sum(1 for marker in markers if marker in s)
     return hit_count >= 2
@@ -431,7 +431,7 @@ def _extract_query_terms(text: Optional[str], max_terms: int = 14) -> List[str]:
                 terms.append(seq)
             continue
 
-        # For long Chinese phrases, use n-grams so topic overlap can still be detected.
+        # 对于长中文短语，请使用 n-gram，这样仍然可以检测到主题重叠。
         for n in (4, 3, 2):
             for i in range(0, len(seq) - n + 1):
                 t = seq[i:i + n]
@@ -857,7 +857,7 @@ def _looks_like_db_request(text: str) -> bool:
     if not q:
         return False
 
-    # Direct table-name hit from whitelist.
+    # 从白名单中直接命中表名。
     for table_name in ALLOWED_TABLES:
         if table_name.lower() in q:
             return True
@@ -867,7 +867,7 @@ def _looks_like_db_request(text: str) -> bool:
     if has_action and has_entity:
         return True
 
-    # Raw SQL pattern
+    # 原始 SQL 模式
     if re.search(r"\bselect\b.*\bfrom\b", q):
         return True
 
@@ -934,7 +934,7 @@ def _build_doc_source(metadata: Dict[str, Any], content: Optional[str]) -> Dict[
     if page_display:
         title = f"{file_name} · 第{page_display}页"
 
-    # Prefer live chunk text snippet to keep displayed source aligned with the actual evidence.
+    # 优先使用实时片段内容，保证展示来源与实际证据一致。
     snippet = _make_snippet(content) if content else (metadata.get("snippet") or "")
     source = {
         "title": title,
@@ -959,21 +959,21 @@ def _to_text_and_sources(items) -> tuple[list[str], list[Dict[str, Any]]]:
     for it in items:
         if it is None:
             continue
-        # Save short-term snapshot
+        # 保存短期快照
         if isinstance(it, str):
             t = it.strip()
             if t:
                 texts.append(t)
             continue
 
-        # LangChain Document
+        # LangChain 文档
         page_content = getattr(it, "page_content", None)
         metadata = getattr(it, "metadata", None)
 
         if isinstance(page_content, str) and page_content.strip():
             texts.append(page_content.strip())
 
-        # Build compact shared context
+        # 构建紧凑的共享上下文
         if isinstance(metadata, dict):
             src = _build_doc_source(metadata, page_content if isinstance(page_content, str) else None)
             src_key = f"{src.get('file_name')}|{src.get('page')}|{src.get('snippet')}"
@@ -1024,7 +1024,7 @@ def _build_rag_chunk_entries(items, max_chunks: int = RAG_MAX_CHUNKS) -> List[Di
 
 
 # ------------------------------------------------------------
-# Search relevance scoring helpers
+# 搜索相关性评分助手
 # ------------------------------------------------------------
 HIGH_VALUE_DOMAINS = [
     ".gov", ".edu", ".org",  # 政府、教育、非盈利
@@ -1049,7 +1049,7 @@ def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
     snippet = result.get("snippet", "").lower()
     link = result.get("link", "").lower()
 
-    # 1. Title keyword boost
+    # 1. 标题关键词加权
     for kw in query_keywords:
         kw = kw.lower()
         if kw in title:
@@ -1057,7 +1057,7 @@ def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
         if kw in snippet:
             score += 1.0  # 摘要包含关键词
 
-    # 2. Domain credibility boost
+    # 2. 域名可信度提升
     domain_boost = False
     for domain in HIGH_VALUE_DOMAINS:
         if domain in link:
@@ -1065,13 +1065,13 @@ def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
             domain_boost = True
             break
 
-    # 3. Low-value domain penalty
+    # 3. 低价值域名惩罚
     if not domain_boost:
         for domain in LOW_VALUE_DOMAINS:
             if domain in link:
                 score -= 2.0
 
-    # 4. Very short snippet penalty
+    # 4. 非常短的片段惩罚
     if len(snippet) < 20:
         score -= 5.0
 
@@ -1083,8 +1083,8 @@ def _rank_search_results(results: List[dict], query: str, min_score: float = 3.0
     if not results:
         return []
 
-    # Tokenize query for relevance scoring
-    # Fallback to full query if tokenization is empty
+    # 对相关性评分的查询进行标记化
+    # 如果标记化为空，则回退到完整查询
     keywords = [k for k in query.split() if len(k) > 1]
     if not keywords:
         keywords = [query]
@@ -1092,19 +1092,19 @@ def _rank_search_results(results: List[dict], query: str, min_score: float = 3.0
     scored_results = []
     for r in results:
         score = _calculate_result_score(r, keywords)
-        # Persist intermediate relevance score
+        # 保持中间相关性分数
         r["_score"] = score
         if score >= min_score:
             scored_results.append(r)
 
-    # Sort by score descending
+    # 按分数降序排列
     scored_results.sort(key=lambda x: x["_score"], reverse=True)
 
     return scored_results
 
 
 # ------------------------------------------------------------
-# Weather tool API
+# 天气工具API
 # ------------------------------------------------------------
 def tool_get_weather(city_name: str) -> List[dict]:
     """Get weather information from wttr.in."""
@@ -1136,13 +1136,13 @@ def tool_get_stock(query: str) -> List[dict]:
     try:
         # 1. 简单的正则匹配股票代码 (支持 sh/sz/hk/us)
         # 如果用户输入 "贵州茅台股价"，这里需要先有一个 Search 步骤去换取代码，
-        # If market prefix is missing, call suggest first
+        # 如果缺少市场前缀，先通过 suggest 接口补全
         # 这里做一个简化策略：如果包含中文，先去 suggest 接口拿代码
 
         stock_code = ""
         market = ""
 
-        # Match stock code (e.g. sh600519 / sz000001 / 600519 / AAPL)
+        # 匹配股票代码（例如sh600519 / sz000001 / 600519 / AAPL）
         code_match = re.search(r"\b(?:sh|sz|hk|us)?\d{5,6}\b", query.lower())
         ticker_match = re.search(r"\b[A-Z]{2,6}\b", query)
         if code_match:
@@ -1206,7 +1206,7 @@ def tool_get_stock(query: str) -> List[dict]:
 
 
 # ------------------------------------------------------------
-# Search tool: prefer official API, fallback to scraping
+# 搜索工具：首选官方API，回退到抓取
 # ------------------------------------------------------------
 def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
     """
@@ -1218,11 +1218,11 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
     """
     results = []
 
-    # --- 1. Try direct tools first (weather / stock) ---
+    # --- 1. 首先尝试直接工具（天气/股票）---
     q_lower = query.lower()
     if "天气" in q_lower or "weather" in q_lower or "气温" in q_lower:
-        # Invoke registered tool (tool)
-        # Normalize query before parsing
+        # 调用注册的工具（tool）
+        # 解析之前规范化查询
         city = query.replace("天气", "").replace("气温", "").replace("weather", "").strip()
         if not city: city = "Shanghai"  # 默认
 
@@ -1237,7 +1237,7 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
 
     # --- 2. 官方 API 搜索 ---
 
-    # [Option A] Bing Web Search API
+    # [选项 A] Bing 网页搜索 API
     if BING_SUBSCRIPTION_KEY:
         print(f"🔍 [Search] Using Official Bing API for: {query}")
         try:
@@ -1262,7 +1262,7 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
         except Exception as e:
             print(f"⚠️ [Bing API] Exception: {e}")
 
-    # [Option B] SerpAPI
+    # [选项B] SerpAPI
     elif SERPAPI_API_KEY:
         print(f"🔍 [Search] Using SerpAPI (Bing Engine) for: {query}")
         try:
@@ -1371,7 +1371,7 @@ def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
 # ------------------------------------------------------------
 # 核心 Chat 接口
 # ------------------------------------------------------------
-# Fixed identity reply for creator/model questions.
+# 修复了创作者/模特问题的身份回复。
 IDENTITY_FIXED_REPLY = "我是由浅夏安然创造的imagine agent，是你的办公小助手，感谢使用。"
 
 _IDENTITY_CN_PATTERNS = [
@@ -1561,7 +1561,7 @@ async def chat(
             return [text]
         return [text[i:i + size] for i in range(0, len(text), size)]
 
-    # 1. Request validation
+    # 1. 请求验证
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(422, "message 不能为空")
@@ -1583,7 +1583,7 @@ async def chat(
     model_id = (req.modelId or "").strip()
 
     mode = _normalize_mode(req.mode)
-    # Hard guard: when meeting model is selected, force meeting mode to avoid accidental RAG routing.
+    # 硬防护：选择会议模式时，强制会议模式以避免意外的 RAG 路由。
     if mode == "general" and model_id == "1":
         mode = "meeting"
         print("🔒 [Router] Force mode -> meeting (modelId=1)")
@@ -1681,7 +1681,7 @@ async def chat(
                 ui_mode=normalized_mode
             )
 
-            # Inject compacted mid-term state into structured hub memory.
+            # 将压缩的中期状态注入结构化集线器内存中。
             if isinstance(compaction_payload, dict):
                 facts = _normalize_text_list(compaction_payload.get("facts"), max_items=10, max_len=180)
                 preferences = _normalize_text_list(compaction_payload.get("preferences"), max_items=8, max_len=140)
@@ -1692,7 +1692,7 @@ async def chat(
                 if facts or open_items:
                     hub.add_compressed_facts(facts + open_items, source="会话压缩")
 
-            # Pull long-term memory snippets even in FAST path when possible.
+            # 尽可能在快速路径中提取长期记忆片段。
             if memory_vector and not active_context and normalized_mode in {"general", "chat", "rag", "database"}:
                 try:
                     docs = memory_vector.retrieve(user_id, message, top_k=4) or []
@@ -1733,7 +1733,7 @@ async def chat(
 
             summary_context = hub.get_combined_context(max_len=3600)
             if summary_context and not _is_context_related(message, summary_context, min_hits=1):
-                # Drop stale summary context when the topic has shifted.
+                # 当主题转移时，删除陈旧的摘要上下文。
                 summary_context = ""
         except Exception:
             summary_context = ""
@@ -1771,7 +1771,7 @@ async def chat(
         )
 
     # --------------------------------------------------------
-    # Fast fallback path: Chat mode without Graph
+    # 快速回退路径：无图表的聊天模式
     # --------------------------------------------------------
     async def fast_chat_response_generator(func_type: str = "chat", return_mode: str = "chat"):
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
@@ -1897,7 +1897,7 @@ async def chat(
 
             if is_weather_intent:
                 city = _extract_city(message, history_text)
-                search_query = f"{city} ??"
+                search_query = f"{city} 天气"
             elif is_stock_intent:
                 search_query = _normalize_stock_query(message)
             else:
@@ -1995,7 +1995,7 @@ async def chat(
         full_reply = ""
         try:
             shared_ctx = await _get_shared_context_async("database", history_limit=FAST_CHAT_HISTORY_LIMIT)
-            # 来源：先发数据库信息，后续收到 SQL 事件后会追加
+            # 来源：先发数据库信息，后续收到​​​​​​ SQL 事件后会追加
             db_sources: List[Dict[str, Any]] = [{
                 "type": "database",
                 "title": f"数据库：{DEFAULT_DB_NAME}",
@@ -2049,7 +2049,7 @@ async def chat(
             if _is_cancelled():
                 return
 
-            # Persist conversation history
+            # 保留对话历史记录
             if user_id != "anonymous":
                 try:
                     sb = require_supabase()
@@ -2095,7 +2095,7 @@ async def chat(
             return
 
         full_reply = ""
-        # Normalize message before passing to Audit Service
+        # 在传递到审核服务之前对消息进行标准化
         # 这里直接传 raw message 即可
         try:
             shared_ctx = await _get_shared_context_async("audit", history_limit=FAST_CHAT_HISTORY_LIMIT)
@@ -2132,7 +2132,7 @@ async def chat(
                     yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                     await asyncio.sleep(0)
 
-            # Persist audit run for traceability
+            # 持续审计运行以实现可追溯性
             if _is_cancelled():
                 return
             if user_id != "anonymous":
@@ -2159,7 +2159,7 @@ async def chat(
 
 
     # --------------------------------------------------------
-    # Fallback to RAG + LLM when audit path is unavailable
+    # 当审核路径不可用时回退到 RAG + LLM
     # --------------------------------------------------------
     async def rag_response_generator():
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
@@ -2175,6 +2175,14 @@ async def chat(
 
         try:
             shared_ctx = await _get_shared_context_async("rag", history_limit=FAST_CHAT_HISTORY_LIMIT)
+            # 当用户显式附加源文件时，将 RAG 与过时的聊天历史记录隔离。
+            explicit_source_mode = bool(requested_source_files)
+            if explicit_source_mode:
+                shared_ctx = dict(shared_ctx or {})
+                shared_ctx["history_text"] = ""
+                shared_ctx["summary_context"] = ""
+                shared_ctx["session_state"] = ""
+
             docs = await asyncio.to_thread(
                 lambda: search_user_documents(
                     user_id=user_id,
@@ -2220,6 +2228,12 @@ async def chat(
                     f"用户问题:\n{message}\n\n"
                     f"知识片段:\n{kb_text}"
                 )
+                if explicit_source_mode:
+                    prompt = (
+                        "用户本轮已明确指定附件来源。"
+                        "请仅依据本轮附件命中的知识片段回答，忽略历史会话中的其他文档内容。\n\n"
+                        + prompt
+                    )
                 prompt = _wrap_prompt_with_shared_context(
                     prompt,
                     shared_ctx,
@@ -2280,7 +2294,7 @@ async def chat(
                 yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
 
     async def langgraph_response_generator():
-        # Unified fallback error handling
+        # 统一回退错误处理
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
         if not app_graph:
@@ -2311,10 +2325,10 @@ async def chat(
             "final_response": "",
             "explain_steps": [],
             "sources": [],  # 初始化为空
-            # [New] carry mode / modelId into graph state
+            # [新增]将mode / modelId带入图状态
             "mode": mode,
             "modelId": req.modelId,
-            # [New] carry model_backend into graph state
+            # [新增]将model_backend带入图状态
             "model_backend": model_backend
         }
 
@@ -2347,10 +2361,10 @@ async def chat(
             if explain_steps:
                 steps_str = "\n".join([f"> {step}" for step in explain_steps])
                 yield json.dumps({"t": "c", "v": f"{steps_str}\n\n"}, ensure_ascii=False) + "\n"
-                # Include explain-steps in final streamed output
+                # 在最终流输出中包含解释步骤
                 full_reply_display += f"{steps_str}\n\n"
 
-            # Continue with synthesizer streaming
+            # 继续合成器流
             if sources:
                 yield json.dumps({"t": "m", "sid": session_id, "src": sources}, ensure_ascii=False) + "\n"
 
@@ -2384,7 +2398,7 @@ async def chat(
             if _is_cancelled():
                 return
 
-            # === Persist history (user + assistant) ===
+            # === 保留历史记录（用户+助手）===
             if user_id != "anonymous":
                 try:
                     sb = require_supabase()
@@ -2397,12 +2411,12 @@ async def chat(
                         "role": "assistant", "content": full_reply_clean,
                         "func_type": final_intent,
                         # 可选：如果表支持 metadata，可以把 sources 存进去
-                        # "metadata": {"sources": sources}
+                        # “元数据”：{“来源”：来源}
                     }).execute()
                 except Exception as e:
                     print(f"History save failed: {e}")
 
-            # Graph stage fallback handling
+            # 图阶段回退处理
             if _is_cancelled():
                 return
             yield json.dumps(
@@ -2416,7 +2430,7 @@ async def chat(
             traceback.print_exc()
             yield json.dumps({"t": "c", "v": f"\nGraph execution failed: {str(e)}"}, ensure_ascii=False) + "\n"
 
-    # Unified stream response exit
+    # 统一流响应退出
     is_report_write_mode = (model_id == "3") or _is_report_write_prompt(message)
     auto_routing_enabled = (mode == "general") and (not is_report_write_mode)
     is_doc_query = _is_doc_query(message) if auto_routing_enabled else False
@@ -2433,7 +2447,7 @@ async def chat(
     if auto_routing_enabled and FAST_CHAT_DIRECT and not context_content and not is_doc_query and not is_db_query:
         return _stream(fast_chat_response_generator())
 
-    # 🚀 Fast-path: auto-routed DB questions go straight to database mode (skip LangGraph + extra LLM)
+    # 🚀 快速路径：自动路由的数据库问题直接进入数据库模式（跳过 LangGraph + 额外的 LLM）
     if auto_routing_enabled and is_db_query and not is_doc_query:
         return _stream(database_response_generator())
 
@@ -2456,7 +2470,7 @@ async def chat(
 
 
 # ------------------------------------------------------------
-# Chat route entrypoint
+# 聊天路由入口点
 # ------------------------------------------------------------
 @router.get("/history/sessions")
 def get_sessions_api(user_id: str):

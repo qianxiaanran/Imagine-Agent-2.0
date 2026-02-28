@@ -38,7 +38,7 @@ except ImportError:
     try:
         from langchain.schema import HumanMessage, SystemMessage
     except ImportError:
-        # Fallback import path for compatibility
+        # 兼容性的后备导入路径
         print("❌ [DeepSeek] 无法导入 HumanMessage/SystemMessage")
         HumanMessage = None
         SystemMessage = None
@@ -48,7 +48,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 # =================================================
 # 🔥 配置：LLM 模型设置 (支持环境变量)
 # =================================================
-# Local Ollama Config
+# 本地 Ollama 配置
 MODEL_NAME = os.getenv("LLM_MODEL_NAME", "qwen2.5-coder")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "1"))
@@ -62,14 +62,14 @@ OLLAMA_HTTP_CONNECT_TIMEOUT = float(os.getenv("OLLAMA_HTTP_CONNECT_TIMEOUT", "8"
 OLLAMA_HTTP_READ_TIMEOUT = float(os.getenv("OLLAMA_HTTP_READ_TIMEOUT", "120"))
 OLLAMA_HTTP_WRITE_TIMEOUT = float(os.getenv("OLLAMA_HTTP_WRITE_TIMEOUT", "30"))
 OLLAMA_HTTP_POOL_TIMEOUT = float(os.getenv("OLLAMA_HTTP_POOL_TIMEOUT", "30"))
-# Local Router (small) model config
+# 本地路由器（小）型号配置
 ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "deepseek-r1:1.5b")
 ROUTER_NUM_CTX = int(os.getenv("ROUTER_NUM_CTX", "2048"))
 ROUTER_TEMPERATURE = float(os.getenv("ROUTER_TEMPERATURE", "0.1"))
 ROUTER_TOP_P = float(os.getenv("ROUTER_TOP_P", "0.9"))
 ROUTER_KEEP_ALIVE = os.getenv("ROUTER_KEEP_ALIVE", "1h")
 
-# Cloud DeepSeek Config (Inserted per user request)
+# 云端 DeepSeek 配置（按用户需求补充）
 DEEPSEEK_URL = "https://api.deepseek.com"
 DEEPSEEK_KEY = "***REMOVED_DEEPSEEK_KEY***"
 DEEPSEEK_MODEL_NAME = "deepseek-chat"  # V3
@@ -93,7 +93,7 @@ try:
             top_p=0.9,
             num_gpu=OLLAMA_NUM_GPU,
             # streaming=True, # langchain_ollama 部分版本可能不需要显式传此参数，视情况而定
-            # --- performance tuning options ---
+            # --- 性能调整选项 ---
             num_ctx=OLLAMA_NUM_CTX,
             keep_alive=OLLAMA_KEEP_ALIVE,
             num_predict=OLLAMA_NUM_PREDICT,
@@ -106,7 +106,7 @@ except Exception as e:
     print(f"❌ [LLM Init Error] Failed to initialize ChatOllama: {e}")
     llm_local = None
 
-# Initialize local router model (small, low-latency)
+# 初始化本地路由器模型（小型、低延迟）
 try:
     if ChatOllama:
         router_llm = ChatOllama(
@@ -115,7 +115,7 @@ try:
             temperature=ROUTER_TEMPERATURE,
             top_p=ROUTER_TOP_P,
             num_gpu=OLLAMA_NUM_GPU,
-            # streaming=False,
+            # 流=假，
             num_ctx=ROUTER_NUM_CTX,
             keep_alive=ROUTER_KEEP_ALIVE,
             repeat_penalty=1.05
@@ -148,7 +148,7 @@ def get_llm_instance(model_type: str = "local", temperature: float = 0.7) -> Any
             streaming=True
         )
     else:
-        # Local
+        # 本地模型
         if not llm_local:
             raise ValueError("Local LLM not initialized. Please check Ollama and langchain-ollama.")
         return llm_local
@@ -582,7 +582,7 @@ def ask_llm(prompt: str, model_type: str = "local") -> str:
 
     try:
         try:
-            # Get model instance via get_llm_instance
+            # 通过 get_llm_instance 获取模型实例
             target_llm = get_llm_instance(model_type)
         except Exception as e:
             return f"❌ 系统错误：LLM 模型未初始化 ({e})"
@@ -598,7 +598,7 @@ def ask_llm(prompt: str, model_type: str = "local") -> str:
         sem.release()
 
 
-# Export default instance for legacy callers (prefer get_llm_instance)
+# 导出旧调用者的默认实例（首选 get_llm_instance）
 def ask_router(prompt: str, system_prompt: Optional[str] = None) -> str:
     """
     Local small-model router for intent classification.

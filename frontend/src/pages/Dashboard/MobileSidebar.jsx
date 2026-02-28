@@ -10,7 +10,7 @@ import {
   getPreferredAvatarSource,
 } from "../../utils/avatar";
 
-// Performance optimization: lazy-load modal
+// 性能优化：延迟加载模式
 const EditProfileModal = lazy(() => import("./EditProfileModal"));
 const ShareModal = lazy(() => import('./ShareModal'));
 const INITIAL_SESSION_RENDER_COUNT = 40;
@@ -76,7 +76,7 @@ const MobileSidebar = memo(({
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef(null);
 
-  // Pinned session state (local storage)
+  // 固定会话状态（本地存储）
   const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
     try {
       const saved = localStorage.getItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`);
@@ -86,7 +86,7 @@ const MobileSidebar = memo(({
     }
   });
 
-  // Session operation state
+  // 会话运行状态
   const [menuOpenId, setMenuOpenId] = useState(null);
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, sessionId: null, title: "" });
   const [renameModal, setRenameModal] = useState({ isOpen: false, sessionId: null, title: "" });
@@ -99,10 +99,10 @@ const MobileSidebar = memo(({
   const [optimisticDeletedIds, setOptimisticDeletedIds] = useState(new Set());
   const [optimisticRenames, setOptimisticRenames] = useState({});
 
-  // Visible list: base list minus optimistic deletions
+  // 可见列表：基列表减去乐观删除
   const safeSessions = Array.isArray(sessionList) ? sessionList : [];
 
-  // Sorting logic
+  // 排序逻辑
   const displaySessions = useMemo(() => {
     const active = safeSessions.filter(s => !optimisticDeletedIds.has(s.id));
     return active.sort((a, b) => {
@@ -125,7 +125,7 @@ const MobileSidebar = memo(({
     : displaySessions.slice(0, visibleSessionCount);
   const hasMoreSessions = !shouldRenderAllSessions && displaySessions.length > sessionsToRender.length;
 
-  // Update pinned state and persist locally
+  // 更新固定状态并在本地保留
   const togglePinSession = (sessionId) => {
     const newPinned = new Set(pinnedSessionIds);
     if (newPinned.has(sessionId)) {
@@ -142,7 +142,7 @@ const MobileSidebar = memo(({
   const isRestrictedMode = selectedModel !== 0;
 
   useEffect(() => {
-    // If switched to restricted mode, collapse knowledge menu
+    // 如果切换到限制模式，则折叠知识菜单
     if (isRestrictedMode) {
       setIsKbExpanded(false);
     }
@@ -151,7 +151,7 @@ const MobileSidebar = memo(({
   useEffect(() => {
     if (userProfile) {
       setLocalUserProfile((prev) => ({ ...prev, ...userProfile }));
-      // Reload pinned config when user changes
+      // 当用户更改时重新加载固定配置
       try {
         const saved = localStorage.getItem(`pinned_sessions_${userProfile.id}`);
         setPinnedSessionIds(new Set(saved ? JSON.parse(saved) : []));
@@ -324,12 +324,12 @@ const MobileSidebar = memo(({
 
   return (
     <>
-      {/* Delete confirmation modal (Mobile) */}
+      {/* De 删除确认模式（移动） */}
       {deleteModal.isOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-full max-w-sm rounded-2xl shadow-2xl p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
              <div>
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">Delete Chat?</h3>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">删除聊天？</h3>
               <p className="text-sm text-gray-600 dark:text-gray-400 leading-relaxed">
                 这会删除“<span className="font-medium text-gray-900 dark:text-gray-200">{deleteModal.title}</span>”。
               </p>
@@ -353,7 +353,7 @@ const MobileSidebar = memo(({
         </div>
       )}
 
-      {/* Rename modal */}
+      {/* Re 重命名模态 */}
       {renameModal.isOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white dark:bg-gray-800 w-full max-w-sm rounded-2xl shadow-2xl p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
@@ -387,14 +387,14 @@ const MobileSidebar = memo(({
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm transition-opacity" onClick={onClose}></div>
 
         <div
-          className="relative w-[85%] max-w-[300px] bg-[#f9f9f9] dark:bg-gray-900 h-full shadow-2xl animate-in slide-in-from-left duration-300 flex flex-col z-50"
+          className="dashboard-sidebar-shell relative w-[85%] max-w-[300px] bg-[#f9f9f9] dark:bg-gray-900 h-full shadow-2xl animate-in slide-in-from-left duration-300 flex flex-col z-50"
           style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
         >
 
-          {/* Search overlay */}
+          {/* Se 搜索叠加 */}
           {isSearchOpen ? (
             <div
-              className="absolute inset-0 bg-[#f9f9f9] dark:bg-gray-900 z-20 flex flex-col animate-in fade-in duration-200"
+              className="dashboard-sidebar-shell absolute inset-0 bg-[#f9f9f9] dark:bg-gray-900 z-20 flex flex-col animate-in fade-in duration-200"
               style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
             >
               <div
@@ -432,7 +432,7 @@ const MobileSidebar = memo(({
                               }}
                               className="px-3 py-3 text-sm text-gray-600 dark:text-gray-300 border-b border-gray-100 dark:border-gray-800/50 last:border-0 hover:bg-gray-100 dark:hover:bg-gray-800"
                           >
-                              {/* Prefer optimistic title when available */}
+                              {/* Pr 如果有的话，更喜欢乐观的标题 */}
                               <div className="font-medium truncate">{optimisticRenames[session.id] || session.title}</div>
                               <div className="text-xs text-gray-400 mt-0.5">{new Date(session.date).toLocaleDateString()}</div>
                           </div>
@@ -453,7 +453,7 @@ const MobileSidebar = memo(({
                 </button>
               </div>
 
-              {/* Fixed top controls (Mobile) */}
+              {/* Fi 固定顶部控件（移动） */}
               <div className="flex-shrink-0 px-3 pt-4 pb-2">
                 <button
                     className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-gray-200/60 dark:hover:bg-gray-800 transition-colors text-sm text-gray-700 dark:text-gray-200 font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-sm mb-3"
@@ -514,10 +514,10 @@ const MobileSidebar = memo(({
                 </div>
               </div>
 
-               {/* Divider */}
+               {/* Di 分频器 */}
               <div className="h-px bg-gray-100 dark:bg-gray-800 mx-4 mb-2"></div>
 
-              {/* Scroll area: history list only */}
+              {/* Sc 滚动区域：仅历史列表 */}
               <div className="flex-1 overflow-y-auto px-3 py-2 custom-scrollbar" onClick={() => setMenuOpenId(null)}>
                 <div className="">
                   <h3 className="px-3 text-xs font-medium text-gray-400 mb-3">最近聊天</h3>
@@ -559,7 +559,7 @@ const MobileSidebar = memo(({
 
                          {menuOpenId === session.id && (
                           <div
-                            className="absolute right-4 top-10 z-50 w-32 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
+                            className="dashboard-dropdown absolute right-4 top-10 z-50 w-32 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-100"
                             onClick={(e) => e.stopPropagation()}
                           >
                              {/* 置顶按钮 */}
@@ -625,11 +625,9 @@ const MobileSidebar = memo(({
 
               {/* 底部用户区域 */}
               <div className="border-t border-gray-100 dark:border-gray-800 p-3 bg-gray-50 dark:bg-gray-900/50 flex-shrink-0">
-                {/* Changed max-h-48 to max-h-72 to accommodate all items in the expanded menu.
-                   Previous value was too short for (Profile + Appearance + Settings + Logout).
-                */}
+                {/* 将高度从 max-h-48 调整为 max-h-72，确保展开菜单可完整显示全部项。 */}
                 <div className={`transition-all duration-300 ease-in-out overflow-hidden ${isProfileExpanded && !isLoading ? "max-h-72 opacity-100 mb-3" : "max-h-0 opacity-0"}`}>
-                  <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 overflow-hidden py-1">
+                  <div className="dashboard-dropdown bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 overflow-hidden py-1">
                     <div
                       className="px-4 py-3 border-b border-gray-100 dark:border-gray-700 flex items-center gap-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50"
                       onClick={() => {
@@ -658,7 +656,7 @@ const MobileSidebar = memo(({
                       <Sparkles size={16} /> 个性化
                     </button>
 
-                     {/* [New] Change password button */}
+                     {/* [N [新增]更改密码按钮 */}
                     <button
                        onClick={() => {
                          setIsChangePasswordOpen(true);
@@ -733,7 +731,7 @@ const MobileSidebar = memo(({
               userProfile={localUserProfile || {}}
               onSave={handleUpdateProfile}
           />
-          {/* [New] Change password modal */}
+          {/* [N [新增]修改密码模式 */}
           <ChangePasswordModal
             isOpen={isChangePasswordOpen}
             onClose={() => setIsChangePasswordOpen(false)}

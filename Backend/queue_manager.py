@@ -81,9 +81,9 @@ def enqueue_job(
         "failure_ttl": failure_ttl,
     }
     if timeout is not None:
-        # RQ 1.x accepts `job_timeout`; older wrappers may rely on queue default_timeout.
+        # RQ 1.x 接受 `job_timeout`；较旧的包装器可能依赖于队列default_timeout。
         enqueue_kwargs["job_timeout"] = int(timeout)
-    # NOTE: RQ 1.16 Queue.enqueue requires the function as the first positional arg (`f`).
+    # 注意：RQ 1.16 Queue.enqueue 要求该函数作为第一个位置参数 (`f`)。
     return queue.enqueue(func, **enqueue_kwargs)
 
 

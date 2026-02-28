@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import json
 import re
 import os
@@ -130,7 +129,7 @@ def list_users(
                     continue
             results.append(row)
     except Exception:
-        # fallback: list from profiles only (service role may not be available)
+        # 后备：仅从配置文件中列出（服务角色可能不可用）
         try:
             prof_query = sb.table("profiles").select("*").order("created_at", desc=True).range((page - 1) * per_page, page * per_page - 1)
             if query:
@@ -259,7 +258,7 @@ def update_user_role(
     ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN])),
 ):
     role = _normalize_role(payload.role)
-    # Use a fresh admin client to avoid stale auth session state.
+    # 使用新的管理客户端以避免过时的身份验证会话状态。
     sb_admin = get_admin_supabase(fresh=True)
     email = None
     try:
@@ -274,7 +273,7 @@ def update_user_role(
     except HTTPException:
         raise
     except Exception:
-        # fallback: update app_metadata via SQL (requires DB password)
+        # 后备：通过 SQL 更新 app_metadata（需要数据库密码）
         try:
             with engine.begin() as conn:
                 conn.execute(
@@ -350,7 +349,7 @@ def delete_user(
         raise HTTPException(status_code=400, detail="Cannot delete current user")
 
     sb = require_supabase()
-    # Use a fresh admin client to avoid stale auth session state.
+    # 使用新的管理客户端以避免过时的身份验证会话状态。
     sb_admin = get_admin_supabase(fresh=True)
     delete_ok = False
 
@@ -368,7 +367,7 @@ def delete_user(
         delete_ok = False
 
     if not delete_ok:
-        # fallback: delete via SQL (requires DB password)
+        # 后备：通过 SQL 删除（需要数据库密码）
         try:
             with engine.begin() as conn:
                 conn.execute(

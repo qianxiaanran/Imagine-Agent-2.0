@@ -1,7 +1,7 @@
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
 
-# config/supabase_config.py
+# 配置/supabase_config.py
 SUPABASE_URL = os.getenv("SUPABASE_URL", "http://127.0.0.1:54321")
 
 # 👇 前端等价权限（登录 / 查询 / 校验 JWT）

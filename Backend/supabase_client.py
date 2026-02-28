@@ -4,7 +4,7 @@ from supabase import Client, create_client
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# Local Supabase defaults (supabase start)
+# 本地 Supabase 默认值（supabase 启动）
 DEFAULT_SUPABASE_URL = "http://127.0.0.1:54321"
 DEFAULT_SUPABASE_ANON_KEY = (
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
@@ -23,7 +23,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv(
     "SUPABASE_SERVICE_ROLE_KEY", DEFAULT_SUPABASE_SERVICE_ROLE_KEY
 )
 
-# Database defaults point to local Supabase Postgres
+# 数据库默认指向本地 Supabase Postgres
 DB_USER = os.getenv("SUPABASE_DB_USER", "postgres")
 DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "postgres")
 DB_HOST = os.getenv("SUPABASE_DB_HOST", "127.0.0.1")

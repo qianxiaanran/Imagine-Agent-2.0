@@ -13,7 +13,7 @@ import {
 import Sidebar from './Sidebar';
 import MobileSidebar from './MobileSidebar';
 import Suggestions from './Suggestions';
-// API Imports
+// 原料药进口
 import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/apiClient';
 import userApi from '../../api/user';
 import historyApi from '../../api/history';
@@ -46,7 +46,7 @@ const AUDIT_DOC_TYPES = [
 const AUDIT_POLL_INTERVAL = 1500;
 const INSTANT_TRANSCRIBE_MAX_SECONDS = 75;
 const HISTORY_FIRST_PAINT_COUNT = 6;
-// const STREAM_UI_THROTTLE_MS = 24; // REMOVED: No longer using throttle
+// 常量 STREAM_UI_THROTTLE_MS = 24; // 已删除：不再使用油门
 const STREAM_UI_FLUSH_MS = 12;
 const MAX_CONTEXT_CHARS = 6000;
 const OCR_SUMMARY_STREAM_TIMEOUT_MS = 180000;
@@ -468,12 +468,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState('chat');
   const [ocrMobileTab, setOcrMobileTab] = useState('preview');
   const fileInputRef = useRef(null);
+  const handleFileSelectRef = useRef(null);
+  const dragDepthRef = useRef(0);
   const messageInputRef = useRef(null);
   const auditPollRef = useRef(null);
   const auditHistorySavedRef = useRef(null);
-  // const scrollRafRef = useRef(null); // REMOVED: Deleted throttling
+  // constscrollRafRef = useRef(null); // REMOVED: 删除节流
 
-  // ✨✨✨ SMOOTH STREAMING REFS ✨✨✨
+  // ✨✨✨ 流畅的流媒体参考 ✨✨✨
   // streamBufferRef: 存储网络接收到但尚未显示的字符队列
   const streamBufferRef = useRef('');
   // streamDisplayRef: 存储当前屏幕上已显示的完整文本（用于闭包中获取最新状态）
@@ -511,6 +513,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const isRAGMode = currentMode === 'rag';
   const isKeyboardVisible = isMobileViewport && keyboardOffset > 80;
   const isSearchMode = currentMode === 'search'; // ✅ 搜索模式判断
+
+  const isFileDragEvent = (event) => {
+    const types = event?.dataTransfer?.types;
+    if (!types) return false;
+    return Array.from(types).includes('Files');
+  };
 
   const getVirtualKeyboardHeight = () => {
     if (typeof navigator === 'undefined') return 0;
@@ -713,7 +721,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       window.addEventListener('resize', handleResize);
       return () => window.removeEventListener('resize', handleResize);
   }, [activeOcrFile?.id, ocrPreviewSize.width, ocrPreviewSize.height]);
-  // Keep desktop input bar height stable: do not hide/show hint on focus.
+  // 保持桌面输入栏高度稳定：不要隐藏/显示焦点提示。
   const shouldHideInputHint = isMobileViewport;
   const shouldLockSuggestionsScroll =
     !isMobileViewport &&
@@ -817,7 +825,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       scrollToBottom("auto");
   };
 
-  // ✨✨✨ SMOOTH ANIMATION LOOP ✨✨✨
+  // ✨✨✨ 流畅的动画循环 ✨✨✨
   // 启动平滑动画循环
   const startSmoothStream = () => {
     if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
@@ -1115,9 +1123,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) setIsDropdownOpen(false);
       if (mobileDropdownRef.current && !mobileDropdownRef.current.contains(event.target)) setIsMobileModelDropdownOpen(false);
-      // Close plus menu if clicked outside
+      // 如果在外部单击则关闭加号菜单
       if (isPlusMenuOpen && !event.target.closest('.plus-menu-container')) setIsPlusMenuOpen(false);
-      // Close backend dropdown
+      // 关闭后端下拉菜单
       if (backendDropdownRef.current && !backendDropdownRef.current.contains(event.target)) setIsBackendDropdownOpen(false);
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -1260,31 +1268,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   }, []);
 
   // -------------------------------------------------------------------------
-  // 🖱️ Drag and Drop Handlers
+  // 🖱️ 全局拖放处理（任意位置拖入文件都可上传）
   // -------------------------------------------------------------------------
-  const handleDragEnter = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragActive(true);
-  };
-  const handleDragLeave = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragActive(false);
-  };
-  const handleDragOver = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (!isDragActive) setIsDragActive(true);
-  };
-  const handleDrop = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragActive(false);
-      const files = e.dataTransfer.files;
-      if (files && files.length > 0) {
-          handleFileSelect({ target: { files } });
-      }
+  const processDroppedFiles = (fileList) => {
+      const files = Array.from(fileList || []);
+      if (!files.length) return;
+      handleFileSelectRef.current?.({ target: { files } });
   };
 
   const formatFileSize = (size) => {
@@ -2185,7 +2174,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   };
 
   // -------------------------------------------------------------------------
-  // 🚀 File Upload & Process Logic
+  // 🚀 文件上传和处理逻辑
   // -------------------------------------------------------------------------
   const applyFileContext = async (context, audioPathOverride = null) => {
       if (!context) return;
@@ -2676,7 +2665,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         setPendingFiles(prev => [...prev, ...newWrappers]);
         await uploadAndVectorizeFiles(newWrappers);
     } else {
-        // Clear input value to allow re-selection of same file
+        // 清除输入值以允许重新选择同一文件
         if (fileInputRef.current) fileInputRef.current.value = '';
         if (e.target && e.target.value) e.target.value = '';
 
@@ -2687,10 +2676,75 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             await applyFileContext(context, audioPath);
         }
     }
-    // Clear input
+    // 清除输入
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (e.target && e.target.value) e.target.value = '';
   };
+
+  useEffect(() => {
+    handleFileSelectRef.current = handleFileSelect;
+  }, [handleFileSelect]);
+
+  useEffect(() => {
+    const resetDragState = () => {
+      dragDepthRef.current = 0;
+      setIsDragActive(false);
+    };
+
+    const onDragEnter = (event) => {
+      if (!isFileDragEvent(event)) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setIsDragActive(true);
+    };
+
+    const onDragOver = (event) => {
+      if (!isFileDragEvent(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'copy';
+      }
+      setIsDragActive(true);
+    };
+
+    const onDragLeave = (event) => {
+      if (!isFileDragEvent(event)) return;
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) {
+        setIsDragActive(false);
+      }
+    };
+
+    const onDrop = (event) => {
+      if (!isFileDragEvent(event)) return;
+      event.preventDefault();
+      resetDragState();
+      processDroppedFiles(event.dataTransfer?.files);
+    };
+
+    const onVisibilityChange = () => {
+      if (document.hidden) resetDragState();
+    };
+
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    window.addEventListener('dragend', resetDragState);
+    window.addEventListener('blur', resetDragState);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+      window.removeEventListener('dragend', resetDragState);
+      window.removeEventListener('blur', resetDragState);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
 
   const removePendingFile = (id) => {
       setPendingFiles(prev => prev.filter(f => f.id !== id));
@@ -2759,7 +2813,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     // 立即滚动到底部
     queueScrollToBottom("auto");
 
-    // ✨✨✨ RESET STREAMING STATE ✨✨✨
+    // ✨✨✨ 重置流媒体状态 ✨✨✨
     setStreamingAssistantText('');
     streamBufferRef.current = '';
     streamDisplayRef.current = "";
@@ -2829,7 +2883,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
              effectiveMode = 'rag';
          }
 
-          const contextToSend = activePanelContent ? activePanelContent.slice(0, MAX_CONTEXT_CHARS) : activePanelContent;
+         const shouldIsolateRagContext = effectiveMode === 'rag' && attachedFileNames.length > 0;
+         const isolatedRagContext = [fileContext, uploadedContext].filter(Boolean).join('\n\n');
+         const contextBase = shouldIsolateRagContext ? isolatedRagContext : activePanelContent;
+         const contextToSend = contextBase ? contextBase.slice(0, MAX_CONTEXT_CHARS) : contextBase;
 
          const sessionIdToSend = currentSessionId || ocrSessionId;
          const payload = {
@@ -2928,7 +2985,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (e.name === 'AbortError') {
           console.log('Generation stopped by user');
       } else {
-          // Reset animation state on error
+          // 出错时重置动画状态
           setStreamingAssistantText('');
           console.error(e);
           setChatHistory(prev => {
@@ -2943,13 +3000,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       // ⚠️ 关键修复：确保状态更新的顺序，避免闪烁和“变回加载动画”
 
-      // FIX START: Capture the value LOCALLY before clearing the ref
+      // 修复开始：在清除引用之前捕获本地值
       const finalContent = streamDisplayRef.current;
       const resolvedFinalContent =
         (!finalContent || !finalContent.trim()) && shouldPostProcessReply
           ? '未收到模型返回内容，请重试；如在引用文档模式，建议减少上下文长度或切换云端模型。'
           : finalContent;
-      // FIX END
+      // 固定结束
 
       // 1. 先同步更新历史记录 - 保证 UI 有内容可读
       setChatHistory(prev => {
@@ -2984,7 +3041,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               body: resolvedFinalContent.slice(0, 120),
             });
           } catch {
-            // ignore
+            // 忽略
           }
         }
         if (appSettings.autoReadReplies) {
@@ -3011,7 +3068,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       // 🔴 旧逻辑：调用 voiceApi.transcribe (默认指向文件转写)
-      // const result = await voiceApi.transcribe(wavBlob);
+      // const 结果 = 等待 voiceApi.transcribe(wavBlob);
 
       // 🟢 新逻辑：调用 /api/voice/instant (实时转写)
       const formData = new FormData();
@@ -3119,7 +3176,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setShareModal({ isOpen: true, sessionId: currentSessionId, title: session ? session.title : '新聊天' });
   };
 
-  // --- Actions Handler ---
+  // --- 动作处理程序 ---
   const trimIndexedState = (state, maxIndex) => {
       const next = {};
       Object.keys(state).forEach((key) => {
@@ -3229,7 +3286,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const handleRegenerate = () => {
       // 1. 找到倒数第二个消息 (Role=User)
-      // 2. 移除最后两个消息 (AI回复 + 刚刚的用户提问?? 不，用户提问要保留)
+      // 2. 移除最后两个消息（AI 回复 + 刚刚的用户提问；注意：用户提问要保留）
       // 一般逻辑：重新生成是对上一条用户指令的重新响应。
       // 所以：获取最后一条 User Message 的内容，删除最后一条 AI Message，然后重新调用 handleSendMessage(userContent, true)
 
@@ -3240,17 +3297,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const lastUserMsg = chatHistory[chatHistory.length - 2];
       if (!lastUserMsg || lastUserMsg.role !== 'user') return; // Should be user
 
-      // Remove last AI message
+      // 删除最后一条 AI 消息
       setChatHistory(prev => prev.slice(0, -1));
 
-      // Resend invisible to UI (because UI already has the user bubble)
-      // Wait, if I use isHidden=true, user bubble won't be added. Correct.
-      // But I need to extract text content, stripping "Attached files" prefix if any.
+      // 重新发送对UI不可见（因为UI已经有用户气泡）
+      // 等等，如果我使用 isHidden=true，则不会添加用户气泡。正确的。
+      // 但我需要提取文本内容，剥离“附加文件”前缀（如果有）。
       let textToResend = lastUserMsg.content;
 
-      // Simple logic: pass raw content.
-      // NOTE: handleSendMessage will append NEW user message if isHidden=false.
-      // So we use isHidden=true.
+      // 简单的逻辑：传递原始内容。
+      // 注意：如果 isHidden=false，handleSendMessage 将附加新的用户消息。
+      // 所以我们使用isHidden=true。
       handleSendMessage(textToResend, true);
   };
 
@@ -3259,7 +3316,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           ...prev,
           [idx]: prev[idx] === type ? null : type
       }));
-      // Here you would typically call an API to log feedback
+      // 在这里，您通常会调用 API 来记录反馈
   };
 
   const toggleFormArrayValue = (field, value) => {
@@ -3440,7 +3497,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           }
                       }
                   } catch (e) {
-                      // ignore
+                      // 忽略
                   }
               };
 
@@ -3880,7 +3937,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     <div className="h-full flex flex-col items-center justify-center pt-4 sm:pt-5">
        <div className="w-16 h-16 bg-white dark:bg-gray-800 rounded-full shadow-sm border border-gray-100 dark:border-gray-700 flex items-center justify-center mb-6">{React.createElement(selectedModelInfo.icon, { size: 32, className: "text-gray-800 dark:text-white" })}</div>
        <h2 className="home-hero-title text-2xl text-gray-800 dark:text-white mb-8 text-center px-4">
-           {isMeetingMode ? "上传录音，一键总结" : (isAuditMode ? "智能审单 & 风险合规检测" : (isOCRMode ? "图片/PDF 转文字 & 智能分析" : "今天有什么计划?"))}
+           {isMeetingMode ? "上传录音，一键总结" : (isAuditMode ? "智能审单 & 风险合规检测" : (isOCRMode ? "图片/PDF 转文字 & 智能分析" : "今天有什么计划？"))}
        </h2>
        <Suggestions onSuggestionClick={handleSuggestionClick} />
      </div>
@@ -4115,10 +4172,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             <div
               className={`max-w-[520px] mx-auto rounded-xl border-2 border-dashed px-3 py-3 text-center transition-colors cursor-pointer ${isDragActive ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-600'}`}
               onClick={() => fileInputRef.current && fileInputRef.current.click()}
-              onDragEnter={handleDragEnter}
-              onDragLeave={handleDragLeave}
-              onDragOver={handleDragOver}
-              onDrop={handleDrop}
             >
               <div className="mx-auto w-8 h-8 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 flex items-center justify-center mb-2">
                 <FileUp size={16} />
@@ -4470,7 +4523,27 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   };
 
   return (
-    <div className="flex h-screen bg-white dark:bg-gray-950 font-sans text-gray-900 dark:text-gray-100 overflow-hidden animate-in fade-in duration-500 transition-colors">
+    <div className="dashboard-unified-dark flex h-screen bg-white dark:bg-gray-950 font-sans text-gray-900 dark:text-gray-100 overflow-hidden animate-in fade-in duration-500 transition-colors">
+      {isDragActive && (
+        <div className="pointer-events-none fixed inset-0 z-[130] flex items-center justify-center bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150">
+          <div className="relative flex flex-col items-center px-8 py-10 rounded-3xl border border-blue-300/25 bg-[#121826]/85 shadow-[0_30px_80px_rgba(0,0,0,0.55)]">
+            <div className="relative h-24 w-28 mb-4">
+              <div className="absolute left-1 top-3 w-12 h-12 rounded-2xl bg-indigo-300/95 text-indigo-900 flex items-center justify-center rotate-[-14deg] shadow-lg">
+                <FileText size={20} />
+              </div>
+              <div className="absolute right-1 top-5 w-12 h-12 rounded-2xl bg-blue-300/95 text-blue-900 flex items-center justify-center rotate-[14deg] shadow-lg">
+                <ImageIcon size={20} />
+              </div>
+              <div className="absolute left-1/2 -translate-x-1/2 bottom-0 w-14 h-14 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-xl animate-pulse">
+                <FileUp size={24} />
+              </div>
+            </div>
+            <div className="text-3xl font-bold text-white tracking-tight">添加任意内容</div>
+            <div className="mt-2 text-base text-blue-100/90">将文件拖放到此处，松手即可添加到对话中</div>
+          </div>
+        </div>
+      )}
+
       {isOcrSummaryOpen && (
         <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-[2px] flex items-center justify-center px-4 py-6">
           <div className="w-full max-w-3xl h-[75vh] bg-white dark:bg-gray-900 rounded-2xl shadow-2xl border border-gray-100 dark:border-gray-800 flex flex-col overflow-hidden">
@@ -4639,9 +4712,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         selectedModel={selectedModel}
       />
 
-      <div className="flex-1 flex flex-col h-full relative bg-white dark:bg-gray-950 min-w-0 transition-colors">
-        {/* Mobile Header */}
-        <div className="md:hidden fixed top-0 left-0 right-0 flex items-center justify-between px-4 py-3 bg-white/95 dark:bg-gray-950/95 backdrop-blur-sm border-b border-gray-100 dark:border-gray-800 z-40">
+      <div className="dashboard-main-surface flex-1 flex flex-col h-full relative bg-white dark:bg-gray-950 min-w-0 transition-colors">
+        {/* Mo 移动标头 */}
+        <div className="dashboard-topbar md:hidden fixed top-0 left-0 right-0 flex items-center justify-between px-4 py-3 bg-white/95 dark:bg-gray-950/95 backdrop-blur-sm border-b border-gray-100 dark:border-gray-800 z-40">
           <div className="flex items-center gap-3">
             <button onClick={() => setIsMobileSidebarOpen(true)} className="text-gray-600 dark:text-gray-300 p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"><PanelLeftOpen size={24} /></button>
             <div className="relative" ref={mobileDropdownRef}>
@@ -4649,7 +4722,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   {selectedModelInfo?.name.split(' ')[0]} <span className="text-xs font-normal text-gray-500 bg-gray-100 dark:bg-gray-800 dark:text-gray-400 px-1.5 py-0.5 rounded-full">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isMobileModelDropdownOpen ? 'rotate-180' : ''}`} />
                 </button>
                 {isMobileModelDropdownOpen && (
-                  <div className="absolute top-full left-0 mt-2 w-[min(88vw,280px)] max-h-[65vh] overflow-y-auto bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 animate-in fade-in slide-in-from-top-2 duration-200 z-50">
+                  <div className="dashboard-dropdown absolute top-full left-0 mt-2 w-[min(88vw,280px)] max-h-[65vh] overflow-y-auto bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 animate-in fade-in slide-in-from-top-2 duration-200 z-50">
                     <div className="p-1.5 space-y-0.5">
                       {models.map((model) => (
                         <div key={model.id} className={`flex items-center gap-3 px-3 py-3 rounded-lg cursor-pointer transition-colors ${selectedModel === model.id ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { handleModelChange(model.id); setIsMobileModelDropdownOpen(false); }}>
@@ -4669,8 +4742,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           </div>
         </div>
 
-        {/* Desktop Header */}
-        <div className="hidden md:flex items-center p-3 sticky top-0 z-30 bg-white/80 dark:bg-gray-950/80 backdrop-blur-sm border-b border-gray-100 dark:border-gray-800/50">
+        {/* De 桌面标题 */}
+        <div className="dashboard-topbar hidden md:flex items-center p-3 sticky top-0 z-30 bg-white/80 dark:bg-gray-950/80 backdrop-blur-sm border-b border-gray-100 dark:border-gray-800/50">
           <div className="flex items-center">
               {!isSidebarOpen && <button onClick={() => setIsSidebarOpen(true)} className="mr-3 p-2 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"><PanelLeftOpen size={20} /></button>}
               <div className="relative" ref={dropdownRef}>
@@ -4678,7 +4751,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   {selectedModelInfo?.name.split(' ')[0]} <span className="text-gray-400 text-base font-normal">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isDropdownOpen ? 'rotate-180' : ''}`} />
                 </button>
                 {isDropdownOpen && (
-                  <div className="absolute top-full left-0 mt-2 w-[320px] bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 z-50">
+                  <div className="dashboard-dropdown absolute top-full left-0 mt-2 w-[320px] bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 z-50">
                     <div className="p-1.5 space-y-0.5">
                       {models.map((model) => (
                         <div key={model.id} className={`flex items-center gap-3 px-3 py-3 rounded-lg cursor-pointer transition-colors ${selectedModel === model.id ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { handleModelChange(model.id); setIsDropdownOpen(false); }}>
@@ -4697,7 +4770,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           </div>
         </div>
 
-        {/* Hidden File Input (Shared) */}
+        {/* UI 隐藏文件输入（共享） */}
         <input
           type="file"
           className="hidden"
@@ -4708,14 +4781,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           accept={isMeetingMode ? "audio/*,.wav,.mp3,.m4a" : (isOCRMode ? "image/*,application/pdf" : (isAuditMode ? "image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "*/*"))}
         />
 
-        {/* MAIN CONTENT */}
+        {/* MA 主要内容 */}
         <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative pt-14 md:pt-0">
             {isOCRMode ? (
                 renderOcrWorkspace()
             ) : (
             <>
               {showMobileWorkspaceTabs && (
-                <div className="md:hidden px-4 py-2 border-b border-gray-100 dark:border-gray-800 bg-white/95 dark:bg-gray-950/95">
+                <div className="dashboard-topbar md:hidden px-4 py-2 border-b border-gray-100 dark:border-gray-800 bg-white/95 dark:bg-gray-950/95">
                   <div className="grid grid-cols-2 gap-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/90 dark:bg-gray-900/70 p-1">
                     <button
                       type="button"
@@ -4744,7 +4817,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               )}
               {shouldRenderPanel && (
                   <Suspense fallback={
-                      <div className={`w-full ${isAuditSinglePane ? 'md:w-full md:border-r-0' : 'md:w-1/2 md:border-r'} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
+                      <div className={`dashboard-pane w-full ${isAuditSinglePane ? 'md:w-full md:border-r-0' : 'md:w-1/2 md:border-r'} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
                           <div className={`px-4 py-3 border-b flex justify-between items-center ${panelStyle.headerBg} ${panelStyle.border}`}>
                               <div className="h-4 w-40 bg-gray-200 dark:bg-gray-800 rounded animate-pulse"></div>
                               <div className="h-3 w-16 bg-gray-200 dark:bg-gray-800 rounded animate-pulse"></div>
@@ -4994,7 +5067,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                         </div>
 
                         <div
-                          className={`w-full bg-white/95 dark:bg-gray-950/95 backdrop-blur-md px-4 pt-2 transition-colors z-30 fixed bottom-0 left-0 right-0 md:static ${showContentPanel ? 'border-t border-gray-50 dark:border-gray-800/50' : 'border-t border-gray-100/60 dark:border-gray-800/60'}`}
+                          className={`dashboard-input-dock w-full bg-white/95 dark:bg-gray-950/95 backdrop-blur-md px-4 pt-2 transition-colors z-30 fixed bottom-0 left-0 right-0 md:static ${showContentPanel ? 'border-t border-gray-50 dark:border-gray-800/50' : 'border-t border-gray-100/60 dark:border-gray-800/60'}`}
                           style={inputBarStyle}
                         >
                           <div className={`mx-auto w-full relative ${showContentPanel ? 'max-w-full px-2' : 'max-w-3xl'}`}>
@@ -5036,15 +5109,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                  </Suspense>
                               </div>
                             ) : (
-                                // ✨ Updated Input Bar Container with Drag & Drop
+                                // ✨ 通过拖放更新了输入栏容器
                               <div
-                                className={`relative flex flex-col w-full bg-white dark:bg-gray-800 rounded-[30px] border shadow-sm transition-all duration-200 focus-within:shadow-md focus-within:border-gray-300 dark:focus-within:border-gray-500 ${isDragActive ? 'border-blue-400 ring-2 ring-blue-200/70 dark:ring-blue-500/40 bg-blue-50/60 dark:bg-blue-900/20' : (isRAGMode ? 'border-blue-200 dark:border-blue-800' : (currentMode === 'database' ? 'border-green-200 dark:border-green-800' : (isSearchMode ? 'border-sky-200 dark:border-sky-800' : 'border-gray-200 dark:border-gray-700')))}`}
-                                onDragEnter={handleDragEnter}
-                                onDragLeave={handleDragLeave}
-                                onDragOver={handleDragOver}
-                                onDrop={handleDrop}
+                                className={`dashboard-composer relative flex flex-col w-full bg-white dark:bg-gray-800 rounded-[30px] border shadow-sm transition-all duration-200 focus-within:shadow-md focus-within:border-gray-300 dark:focus-within:border-gray-500 ${isDragActive ? 'border-blue-400 ring-2 ring-blue-200/70 dark:ring-blue-500/40 bg-blue-50/60 dark:bg-blue-900/20' : (isRAGMode ? 'border-blue-200 dark:border-blue-800' : (currentMode === 'database' ? 'border-green-200 dark:border-green-800' : (isSearchMode ? 'border-sky-200 dark:border-sky-800' : 'border-gray-200 dark:border-gray-700')))}`}
                               >
-                                {/* ✨ File Preview Area */}
+                                {/* ✨  ✨ 文件预览区 */}
                                 {pendingFiles.length > 0 && (
                                     <div className="px-4 pt-1 pb-1 flex flex-wrap gap-2">
                                         {pendingFiles.map((pf) => (
@@ -5093,9 +5162,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                     </div>
                                 )}
 
-                                {/* ✨ Input & Actions Area */}
+                                {/* ✨  ✨ 输入和操作区域 */}
                                 <div className="flex items-center w-full px-2.5 py-1.5 relative gap-1.5">
-                                    {/* ✨ Plus Menu Button */}
+                                    {/* ✨  ✨ 加号菜单按钮 */}
                                     <div className="relative z-20 plus-menu-container flex items-center">
                                         <button
                                             onClick={() => setIsPlusMenuOpen(!isPlusMenuOpen)}
@@ -5105,10 +5174,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                             <Plus size={18} strokeWidth={1.6} />
                                         </button>
 
-                                        {/* ✨ Plus Menu Dropdown */}
+                                        {/* ✨  ✨ 加号菜单下拉 */}
                                         {isPlusMenuOpen && (
                                             <div
-                                              className={`bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-bottom-2 p-1.5 flex flex-col gap-0.5 z-50 ${
+                                              className={`dashboard-dropdown bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-bottom-2 p-1.5 flex flex-col gap-0.5 z-50 ${
                                                 isMobileViewport
                                                   ? 'fixed left-3 right-3 bottom-[calc(env(safe-area-inset-bottom)+88px)] max-h-[55vh] overflow-y-auto'
                                                   : 'absolute bottom-full left-0 mb-3 w-56'
@@ -5227,7 +5296,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                           </button>
 
                                           {isBackendDropdownOpen && (
-                                            <div className="absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                                            <div className="dashboard-dropdown absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-xl z-50 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
                                               <button
                                                 type="button"
                                                 onClick={() => { setLlmBackend('local'); setIsBackendDropdownOpen(false); }}
@@ -5261,18 +5330,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                     </div>
                                 </div>
 
-                                {/* ✨ Drag Overlay (Visual Feedback) */}
-                                {isDragActive && (
-                                     <div className="absolute inset-0 bg-blue-500/10 rounded-[26px] z-10 flex items-center justify-center border-2 border-blue-500 border-dashed backdrop-blur-[1px] pointer-events-none">
-                                          <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg flex flex-col items-center gap-2 animate-bounce">
-                                              <div className="p-3 bg-blue-100 dark:bg-blue-900/50 rounded-full text-blue-600 dark:text-blue-400">
-                                                  <Plus size={32} />
-                                              </div>
-                                              <span className="font-bold text-blue-600 dark:text-blue-400">松手上传文件</span>
-                                          </div>
-                                     </div>
-
-                                )}
                               </div>
                             )}
                             {!shouldHideInputHint && (

@@ -1,7 +1,8 @@
-# -*- coding: utf-8 -*-
 import base64
 import json
+import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,7 @@ ROLE_ALIASES = {
 ADMIN_ROLES = {ROLE_ADMIN}
 AUDIT_ROLES = {ROLE_ADMIN, ROLE_AUDITOR}
 KB_ROLES = {ROLE_ADMIN, ROLE_KB_ADMIN}
+SMS_TOKEN_CACHE_FILE = os.path.join(os.path.dirname(__file__), ".sms_token_cache.json")
 
 
 def _bearer_token(authorization: Optional[str]) -> Optional[str]:
@@ -152,11 +154,54 @@ def _get_user_from_token(token: str):
     return user_res.user
 
 
+def _get_sms_session_from_cache(token: str) -> Optional[Dict[str, Any]]:
+    if not token or not token.startswith("sms-token-"):
+        return None
+    try:
+        if not os.path.exists(SMS_TOKEN_CACHE_FILE):
+            return None
+        with open(SMS_TOKEN_CACHE_FILE, "r", encoding="utf-8") as fp:
+            cache = json.load(fp)
+        if not isinstance(cache, dict):
+            return None
+        session = cache.get(token)
+        if not isinstance(session, dict):
+            return None
+        expires_at = float(session.get("expires_at") or 0)
+        if expires_at <= time.time():
+            return None
+        user_id = str(session.get("user_id") or "").strip()
+        if not user_id:
+            return None
+        return {"user_id": user_id}
+    except Exception:
+        return None
+
+
 def require_active_user(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     token = _bearer_token(authorization)
-    if not token or len(token) < 100:
+    if not token:
         raise HTTPException(status_code=401, detail="Missing token")
-    user = _get_user_from_token(token)
+
+    # JWT token (密码登录)
+    if len(token) >= 100:
+        user = _get_user_from_token(token)
+    else:
+        # sms-token (验证码登录)
+        sms_session = _get_sms_session_from_cache(token)
+        if not sms_session:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        sb_admin = get_admin_supabase()
+        try:
+            user_res = sb_admin.auth.admin.get_user_by_id(sms_session["user_id"])
+            if not user_res or not user_res.user:
+                raise HTTPException(status_code=401, detail="Invalid session")
+            user = user_res.user
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid session")
+
     profile = _ensure_profile(user)
     if profile.get("status") == "disabled":
         raise HTTPException(status_code=403, detail="Account disabled")

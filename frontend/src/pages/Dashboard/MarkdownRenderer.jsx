@@ -66,10 +66,10 @@ const Mermaid = ({ chart }) => {
 };
 
 const MarkdownRenderer = ({ content, streaming = false }) => {
-  // Directly use content without deferral to ensure instant updates for streaming tables
+  // 直接使用内容，不做延迟，以保证流式表格实时更新
   const renderContent = content;
 
-  // Always load these styles for Math
+  // 始终加载数学公式样式
   useEffect(() => {
     if (!document.getElementById('katex-css')) {
       const link = document.createElement('link');
@@ -82,7 +82,7 @@ const MarkdownRenderer = ({ content, streaming = false }) => {
     }
   }, []);
 
-  // Unconditionally load plugins to prevent "flash" during streaming when table characters appear
+  // 无条件加载插件，避免流式输出遇到表格字符时出现样式闪烁
   const remarkPlugins = useMemo(() => [remarkGfm, remarkMath], []);
   const rehypePlugins = useMemo(() => [rehypeKatex], []);
 

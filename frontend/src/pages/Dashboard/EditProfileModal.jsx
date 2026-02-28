@@ -48,7 +48,7 @@ const EditProfileModal = ({ isOpen, onClose, userProfile, onSave }) => {
         return;
       }
 
-      // Keep frontend and backend limit consistent.
+      // 保持前后端文件大小限制一致
       if (file.size > MAX_AVATAR_BYTES) {
         setUploadError("头像不能超过 5MB");
         return;

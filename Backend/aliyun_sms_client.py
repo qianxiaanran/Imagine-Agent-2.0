@@ -1,4 +1,4 @@
-# aliyun_sms_client.py
+# 阿里云短信认证客户端
 import os
 import json
 from typing import Optional

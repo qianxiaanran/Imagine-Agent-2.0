@@ -3,7 +3,7 @@ import apiClient from './apiClient';
 const shareApi = {
   // 创建分享链接
   createShare: (sessionId, userId, options = {}) => {
-    // options: { title: string, days: number }
+    // options 参数：{ title: string, days: number }
     return apiClient(`/api/share/create?user_id=${userId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

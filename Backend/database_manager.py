@@ -39,7 +39,7 @@ DB_CONNECTION_STRING = (
 )
 
 # ============================================================
-# Define strict table whitelist
+# 定义严格的表白名单
 # ============================================================
 ALLOWED_TABLES = {
     "company_info", "departments", "roles", "employees", "customers",
@@ -47,7 +47,7 @@ ALLOWED_TABLES = {
 }
 
 # ============================================================
-# 🚀 Prompt optimization: slim schema + table routing
+# 🚀 快速优化：slim schema + 表路由
 # ============================================================
 TABLE_ORDER = [
     "company_info", "departments", "roles", "employees", "customers",
@@ -120,7 +120,7 @@ DB_LOCAL_RESULT_PROMPT_MAX_CHARS = int(os.getenv("DB_LOCAL_RESULT_PROMPT_MAX_CHA
 # 🧭 DDL 与 规范定义 (已根据 SQL 脚本更新)
 # ============================================================
 ENTERPRISE_DB_SPEC = r"""
-================【企业数据库结构规范（严格白名单）?===============
+================【企业数据库结构规范（严格白名单）】===============
 ⚠️ 权限警告：只允许查询以下 11 张表。禁止查询任何系统表（如 pg_table）或臆造表。
 
 1) company_info (公司信息): id, company_name, registration_code, address, contact_phone, business_scope, established_date
@@ -156,7 +156,7 @@ SQL_GENERATION_RULES = r"""
 """
 
 # ============================================================
-# Safety and policy validators
+# 安全和政策验证器
 # ============================================================
 _ONLY_SELECT_PATTERN = re.compile(r"^\s*(WITH\b[\s\S]+?\bSELECT\b|SELECT\b)", re.IGNORECASE)
 _FORBIDDEN_PATTERN = re.compile(
@@ -245,12 +245,12 @@ def _select_tables_for_query(user_query: str) -> list[str]:
 
     selected = set()
 
-    # Direct table name hits
+    # 直接表名命中
     for t in TABLE_ORDER:
         if t in q:
             selected.add(t)
 
-    # Keyword hits
+    # 关键词命中
     for t, keywords in TABLE_KEYWORDS.items():
         for kw in keywords:
             if kw.lower() in q:
@@ -260,7 +260,7 @@ def _select_tables_for_query(user_query: str) -> list[str]:
     if not selected:
         return TABLE_ORDER.copy()
 
-    # Expand related tables for joins
+    # 展开关联表
     related = set()
     for t in list(selected):
         related.update(TABLE_RELATED.get(t, set()))
@@ -275,7 +275,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
         tables = TABLE_ORDER
 
     lines = [
-        "================?Enterprise DB Schema (Whitelisted)?===============",
+        "================ Enterprise DB Schema (Whitelisted) ================",
         "Only use the tables listed below. Do NOT access system tables.",
     ]
 
@@ -289,7 +289,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
     ]
     if relations:
         lines.append("")
-        lines.append("----------------?Relationships?---------------")
+        lines.append("---------------- Relationships ----------------")
         for rel in relations:
             lines.append(f"- {rel}")
 
@@ -367,12 +367,12 @@ def _select_tables_for_query(user_query: str) -> list[str]:
 
     selected = set()
 
-    # Direct table name hits
+    # 直接表名命中
     for t in TABLE_ORDER:
         if t in q:
             selected.add(t)
 
-    # Keyword hits
+    # 关键词命中
     for t, keywords in TABLE_KEYWORDS.items():
         for kw in keywords:
             if kw.lower() in q:
@@ -382,7 +382,7 @@ def _select_tables_for_query(user_query: str) -> list[str]:
     if not selected:
         return TABLE_ORDER.copy()
 
-    # Expand related tables for joins
+    # 展开关联表
     related = set()
     for t in list(selected):
         related.update(TABLE_RELATED.get(t, set()))
@@ -397,7 +397,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
         tables = TABLE_ORDER
 
     lines = [
-        "================?Enterprise DB Schema (Whitelisted)?===============",
+        "================ Enterprise DB Schema (Whitelisted) ================",
         "Only use the tables listed below. Do NOT access system tables.",
     ]
 
@@ -411,7 +411,7 @@ def _build_db_spec(selected_tables: list[str]) -> str:
     ]
     if relations:
         lines.append("")
-        lines.append("----------------?Relationships?---------------")
+        lines.append("---------------- Relationships ----------------")
         for rel in relations:
             lines.append(f"- {rel}")
 
@@ -696,7 +696,7 @@ class DatabaseManager:
             yield cached_summary
             return
 
-        # Use streaming for summary as well
+        # 也使用流式传输进行摘要
         status = _status_event("正在整理查询结果...")
         if status:
             yield status

@@ -1,8 +1,8 @@
 // -----------------------------------------------------------------------------
-// Audio Processing Utilities (Format Converter)
+// 音频处理工具（格式转换）
 // -----------------------------------------------------------------------------
 
-// Float32Array -> 16-bit PCM ArrayBuffer (raw PCM, no header)
+// Float32Array -> 16 位 PCM ArrayBuffer（原始 PCM，无头信息）
 export const floatTo16BitPCM = (input) => {
   const output = new DataView(new ArrayBuffer(input.length * 2));
   for (let i = 0; i < input.length; i++) {
@@ -104,7 +104,7 @@ const normalizeSamples = (samples) => {
   return out;
 };
 
-// Convert MediaRecorder blob (webm/mp4) to 16kHz mono WAV for backend ASR
+// 将 MediaRecorder 产生的 blob（webm/mp4）转换为后端 ASR 使用的 16kHz 单声道 WAV
 export const convertWebMToWav = async (webmBlob) => {
   try {
     const arrayBuffer = await webmBlob.arrayBuffer();

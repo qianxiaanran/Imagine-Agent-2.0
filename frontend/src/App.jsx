@@ -62,7 +62,7 @@ export default function App() {
       const supabase = await getSupabaseClient();
       if (isDisposed) return;
 
-      const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      const { data } = supabase.auth.onAuthStateChange((event, session) => {
         const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
         if (!rememberUntil) return;
 
@@ -76,9 +76,13 @@ export default function App() {
 
         if (session?.access_token) {
           localStorage.setItem(AUTH_TOKEN_KEY, session.access_token);
-        } else {
+          return;
+        }
+
+        if (event === 'SIGNED_OUT') {
           localStorage.removeItem(AUTH_TOKEN_KEY);
           localStorage.removeItem(REMEMBER_UNTIL_KEY);
+          setIsAuthenticated(false);
         }
       });
 
@@ -113,6 +117,13 @@ export default function App() {
     const checkAuth = async () => {
       let isValidSession = false;
       const settleAuth = () => setIsAuthReady(true);
+      const applySessionToken = (session) => {
+        if (session?.access_token) {
+          localStorage.setItem(AUTH_TOKEN_KEY, session.access_token);
+          return true;
+        }
+        return false;
+      };
 
       try {
         const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
@@ -133,10 +144,12 @@ export default function App() {
             localStorage.removeItem(AUTH_TOKEN_KEY);
           } else {
             const { data } = await supabase.auth.getSession();
-            if (data?.session?.access_token) {
-              localStorage.setItem(AUTH_TOKEN_KEY, data.session.access_token);
-            } else {
-              localStorage.removeItem(REMEMBER_UNTIL_KEY);
+            const hasSessionToken = applySessionToken(data?.session);
+            if (!hasSessionToken) {
+              const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
+              if (!refreshError) {
+                applySessionToken(refreshed?.session);
+              }
             }
           }
         }
@@ -159,7 +172,11 @@ export default function App() {
             }
           } catch (err) {
             console.warn('Token validation failed:', err);
-            localStorage.removeItem(AUTH_TOKEN_KEY);
+            const message = String(err?.message || '');
+            const isAuthError = /401|not logged in|invalid session|missing token|jwt/i.test(message);
+            if (isAuthError) {
+              localStorage.removeItem(AUTH_TOKEN_KEY);
+            }
           }
         }
       } catch (error) {

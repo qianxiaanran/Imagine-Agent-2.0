@@ -43,7 +43,7 @@ def _ensure_share_schema() -> bool:
 
         try:
             with engine.begin() as conn:
-                # Keep table definitions compatible with existing schema.
+                # 保持表定义与现有架构兼容。
                 conn.execute(
                     text(
                         """
@@ -279,12 +279,12 @@ def _infer_owner_user_id(session_id: str) -> str:
 
 
 def _load_history_for_share(owner_user_id: str, session_id: str) -> List[Dict[str, Any]]:
-    # Prefer strict owner+session match first.
+    # 首先优先选择严格的所有者+会话匹配。
     rows = get_history(str(owner_user_id), str(session_id)) or []
     if rows:
         return rows
 
-    # Fallback: if owner cannot be confirmed, at least share current session snapshot.
+    # 后备：如果无法确认所有者，至少共享当前会话快照。
     try:
         fallback = (
             supabase.table("history")

@@ -210,7 +210,7 @@ def _normalize_text(value: Any) -> str:
     if not text:
         return ""
     text = re.sub(r"[\s\u3000]+", "", text)
-    # Keep letters/digits/Chinese only; strip punctuation for stable ID/vendor matching.
+    # 仅保留字母/数字/中文；去除标点符号以实现稳定的 ID/供应商匹配。
     text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
     return text
 
@@ -2402,7 +2402,7 @@ def _extract_text(file_bytes: bytes, filename: str) -> Tuple[str, List[str], Opt
             raw_text, page_texts, confidence = _parse_with_ocr(file_bytes, filename)
             return raw_text, page_texts, confidence, "ocr"
         except Exception:
-            # OCR is preferred for image/PDF. Fallback keeps the pipeline usable.
+            # OCR 是图像/PDF 的首选。回退使管道保持可用。
             if ext == ".pdf":
                 raw_text, page_texts = _parse_with_loader(file_bytes, filename)
                 return raw_text, page_texts, None, "loader_fallback"

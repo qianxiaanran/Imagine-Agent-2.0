@@ -7,7 +7,7 @@ import time
 from config import BAIDU_API_KEY, BAIDU_SECRET_KEY
 
 # ----------------------------------------------------
-#  Baidu ASR Token 缓存
+# Baidu ASR Token 缓存
 # ----------------------------------------------------
 BAIDU_ASR_TOKEN = None
 BAIDU_ASR_TOKEN_TIME = None
@@ -64,8 +64,8 @@ def get_format_from_filename(filename: str) -> str:
 
 
 # ----------------------------------------------------
-#  长语音/录音文件转写 (异步 API)
-#  文档: https://ai.baidu.com/ai-doc/SPEECH/
+# 长语音/录音文件转写 (异步 API)
+# 文档: https://ai.baidu.com/ai-doc/SPEECH/
 # ----------------------------------------------------
 
 def create_transcription_task(speech_url: str, format: str = "wav", pid: int = 80001, rate: int = 16000):
@@ -188,7 +188,7 @@ def transcribe_audio_via_url(speech_url: str, format: str = "wav") -> str:
 
 
 # ----------------------------------------------------
-#  ✨ [修改] 短语音/实时语音识别：字节流 → 百度 ASR (Server API)
+# ✨ [修改] 短语音/实时语音识别：字节流 → 百度 ASR (Server API)
 # ----------------------------------------------------
 def baidu_asr_from_bytes(wav_bytes: bytes, filename: str = None):
     """

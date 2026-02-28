@@ -15,17 +15,17 @@ import {
  * Suggestions（建议卡片）
  *
  * ✅ 只在“通用企业问答”显示：
- *    - general / chat / qa / enterprise_qa ...
+ *    - `general/chat/qa/enterprise_qa` 等
  *    - database  （数据库查询）
  *    - documents （文档分析 / RAG）
  *
- * Props:
- * - mode?: string
- * - onSuggestionClick?: (text: string) => void
- * - className?: string
- * - disabled?: boolean
- * - showHeader?: boolean
- * - generalModes?: string[]   // 允许显示建议的 mode 列表
+ * 组件参数：
+ * - mode：模式字符串
+ * - onSuggestionClick：点击建议时的回调
+ * - className：外层容器样式类名
+ * - disabled：是否禁用点击
+ * - showHeader：是否展示头部标题
+ * - generalModes?: string[]   // 允许显示建议的模式列表
  */
 const Suggestions = memo(function Suggestions({
   mode = "general",

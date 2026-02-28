@@ -151,7 +151,7 @@ class SummaryMemory:
     def __init__(self, flush_every: int = 10, window_limit: int = 12):
         self.flush_every = flush_every
         self.window_limit = window_limit
-        # key -> {"summary": str, "recent": List[str], "seen": set, "last_digest": str}
+        # 存储结构：{"summary": str, "recent": List[str], "seen": set, "last_digest": str}
         self._store: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
@@ -411,7 +411,7 @@ def _build_source_meta(meta: Dict[str, Any], content: Optional[str]) -> Dict[str
 
 
 # ============================================================
-# Layer 1: Router
+# 第一层：路由器
 # ============================================================
 
 def router_node(state: AgentState):
@@ -439,8 +439,8 @@ def router_node(state: AgentState):
     summary = hub.history_summary
     context_preview = hub.get_combined_context(max_len=500)
 
-    # Fast-path routing to reduce token cost.
-    # If the intent is obvious, skip LLM router.
+    # 快速路径路由以降低令牌成本。
+    # 如果意图很明显，请跳过 LLM 路由器。
     doc_kw = ["document", "doc", "policy", "contract", "report", "pdf", "attachment", "附件", "文档", "合同", "制度",
               "报告", "纪要"]
     db_kw_quick = ["sql", "database", "table", "select", "where", "join", "order", "订单", "库存", "客户", "员工",
@@ -459,7 +459,7 @@ def router_node(state: AgentState):
         print("🚦 [Router] Fast-path -> database (db keywords)")
         return {"intent": "database", "explain_steps": ["快速路由: 数据库关键词 -> database"]}
 
-    # Lightweight hierarchical split for long multi-part queries.
+    # 用于长多部分查询的轻量级分层拆分。
     if len(hub.query or "") > 120 and any(
             sep in (hub.query or "") for sep in ["；", "。", "?", "？", "并且", "同时", "以及"]):
         parts = [p.strip() for p in re.split(r"[；。?？]|并且|同时|以及", hub.query or "") if p.strip()]
@@ -536,7 +536,7 @@ Final: rag
         print(f"🚦 [Router Error] {e} -> Defaulting to chat")
         intent = "chat"
 
-    # Reflexion guardrails: fix common misroutes after LLM.
+    # 反射护栏：修复 LLM 后常见的错误路线。
     if intent == "chat" and has_doc_signal and any(k in (hub.query or "") for k in pronoun_kw):
         intent = "rag"
     if intent == "database" and has_doc_signal and not has_db_signal:
@@ -547,7 +547,7 @@ Final: rag
 
 
 # ============================================================
-# Layer 2: Context Processor
+# 第 2 层：上下文处理器
 # ============================================================
 
 def context_processor_node(state: AgentState):
@@ -599,7 +599,7 @@ def context_processor_node(state: AgentState):
 
 
 # ============================================================
-# Layer 3: Agents
+# 第三层：代理
 # ============================================================
 
 def _db_keyword_map() -> Dict[str, List[str]]:
@@ -743,7 +743,7 @@ def chat_placeholder_node(state: AgentState):
 
 
 # ============================================================
-# Layer 4: Synthesizer
+# 第 4 层：合成器
 # ============================================================
 
 def synthesizer_node(state: AgentState):
