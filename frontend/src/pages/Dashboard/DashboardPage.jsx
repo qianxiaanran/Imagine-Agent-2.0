@@ -976,6 +976,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (!isActive) return;
       setIsProfileLoading(true);
       let profile = { id: 'anonymous', name: 'User', avatar: '' };
+      const tokenBeforeLoad = localStorage.getItem(AUTH_TOKEN_KEY);
       try {
         profile = await userApi.getProfile();
         const localToken = localStorage.getItem(AUTH_TOKEN_KEY);
@@ -986,6 +987,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         if (isActive) setUserProfile(profile);
       } catch (e) {
         console.error("Profile load error", e);
+        const message = String(e?.message || '');
+        const isAuthError = /401|not logged in|invalid session|missing token|jwt/i.test(message);
+        if (tokenBeforeLoad && isAuthError) {
+          onLogout();
+          return;
+        }
       } finally {
         if (isActive) setIsProfileLoading(false);
       }

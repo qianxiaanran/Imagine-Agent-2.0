@@ -693,6 +693,7 @@ def get_profile(
 ):
     sb = require_supabase()
     token = _bearer_token(authorization)
+    jwt_error: Optional[Exception] = None
 
     if token:
         # A. JWT 令牌
@@ -721,8 +722,8 @@ def get_profile(
                         "department": (profile or {}).get("department"),
                         "job_title": (profile or {}).get("job_title"),
                     }
-            except Exception:
-                pass
+            except Exception as e:
+                jwt_error = e
 
         # B. 自定义代币
         session = _get_session_from_token(token)
@@ -760,6 +761,11 @@ def get_profile(
                     "plan": "Enterprise",
                     "avatar": "S"
                 }
+
+        # 携带了 token 但既不是有效 JWT，也不是可解析的 sms-token，明确返回 401。
+        if jwt_error:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        raise HTTPException(status_code=401, detail="Invalid session")
 
     return {"phone": None, "nickname": "Guest", "avatar": None}
 
