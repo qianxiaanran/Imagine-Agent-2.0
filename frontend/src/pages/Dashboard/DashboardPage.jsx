@@ -7,7 +7,7 @@ import {
   TrendingUp, AlertTriangle, Play, Image as ImageIcon,
   Volume2, File as FileIcon,
   ThumbsUp, ThumbsDown, Square, RefreshCw, Globe, Star,
-  FileUp, Cloud, Cpu
+  FileUp, Cloud, Cpu, GitBranch
 } from 'lucide-react';
 
 import Sidebar from './Sidebar';
@@ -17,6 +17,7 @@ import Suggestions from './Suggestions';
 import { API_BASE_URL, AUTH_TOKEN_KEY, refreshAccessToken as refreshAccessTokenFromApiClient } from '../../api/apiClient';
 import userApi from '../../api/user';
 import historyApi from '../../api/history';
+import workflowApi from '../../api/workflow';
 import { convertWebMToWav } from '../../utils/audio';
 import {
   APP_SETTINGS_UPDATED_EVENT,
@@ -33,6 +34,7 @@ const OcrIngestModal = lazy(() => import('./OcrIngestModal'));
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
 const SourcePanel = lazy(() => import('./SourcePanel'));
 const ModePanel = lazy(() => import('./ModePanel'));
+const WorkflowTimeline = lazy(() => import('./WorkflowTimeline'));
 
 const INITIAL_MESSAGE_COUNT = 20;
 const MARKDOWN_MESSAGE_COUNT = 6;
@@ -44,6 +46,7 @@ const AUDIT_DOC_TYPES = [
   { value: 'expense', label: '报销单' },
 ];
 const AUDIT_POLL_INTERVAL = 1500;
+const WORKFLOW_POLL_INTERVAL = 2000;
 const INSTANT_TRANSCRIBE_MAX_SECONDS = 75;
 const HISTORY_FIRST_PAINT_COUNT = 6;
 // 常量 STREAM_UI_THROTTLE_MS = 24; // 已删除：不再使用油门
@@ -115,7 +118,8 @@ const MODEL_OPTIONS = [
   { id: 1, name: "会议纪要", icon: Mic },
   { id: 2, name: "OCR 识别", icon: ScanText },
   { id: 3, name: "写作助手", icon: PencilLine },
-  { id: 4, name: "智能审单", icon: ClipboardCheck }
+  { id: 4, name: "智能审单", icon: ClipboardCheck },
+  { id: 5, name: "任务编排", icon: GitBranch }
 ];
 
 const CONVERSATION_PATH_PREFIX = '/c/';
@@ -388,6 +392,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [audioFileUrl, setAudioFileUrl] = useState(null);
   // ✨ 新增：保存当前音频在服务端的存储路径
   const [currentAudioPath, setCurrentAudioPath] = useState(null);
+  const [workflowInput, setWorkflowInput] = useState('请分析本月经营数据，输出关键发现与改进动作。');
+  const [workflowJob, setWorkflowJob] = useState(null);
+  const [workflowError, setWorkflowError] = useState('');
+  const [isWorkflowLoading, setIsWorkflowLoading] = useState(false);
+  const [isWorkflowActionLoading, setIsWorkflowActionLoading] = useState(false);
 
   const [reportStep, setReportStep] = useState('selection');
   const [reportType, setReportType] = useState(null);
@@ -472,6 +481,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const dragDepthRef = useRef(0);
   const messageInputRef = useRef(null);
   const auditPollRef = useRef(null);
+  const workflowPollRef = useRef(null);
   const auditHistorySavedRef = useRef(null);
   // constscrollRafRef = useRef(null); // REMOVED: 删除节流
 
@@ -510,6 +520,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const isOCRMode = selectedModel === 2;
   const isReportMode = selectedModel === 3;
   const isAuditMode = selectedModel === 4;
+  const isWorkflowMode = selectedModel === 5;
   const isRAGMode = currentMode === 'rag';
   const isKeyboardVisible = isMobileViewport && keyboardOffset > 80;
   const isSearchMode = currentMode === 'search'; // ✅ 搜索模式判断
@@ -528,12 +539,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     return Math.max(0, Math.round(rect?.height || 0));
   };
 
-  const showContentPanel = isMeetingMode || isOCRMode || isAuditMode || (panelContent && panelContent.length > 0);
-  const isAuditSinglePane = isAuditMode && showContentPanel;
-  const showMobileWorkspaceTabs = isMobileViewport && showContentPanel && !isAuditSinglePane;
+  const showContentPanel = isMeetingMode || isOCRMode || isAuditMode || isWorkflowMode || (panelContent && panelContent.length > 0);
+  const isSinglePaneMode = (isAuditMode || isWorkflowMode) && showContentPanel;
+  const showMobileWorkspaceTabs = isMobileViewport && showContentPanel && !isSinglePaneMode;
   const shouldRenderPanel = showContentPanel && (!showMobileWorkspaceTabs || mobileWorkspaceTab === 'panel');
-  const shouldRenderChat = !isAuditSinglePane && (!showMobileWorkspaceTabs || mobileWorkspaceTab === 'chat');
-  const mobilePanelTabLabel = isMeetingMode ? '工作台' : (isOCRMode ? '识别面板' : '上下文');
+  const shouldRenderChat = !isSinglePaneMode && (!showMobileWorkspaceTabs || mobileWorkspaceTab === 'chat');
+  const mobilePanelTabLabel = isMeetingMode ? '工作台' : (isOCRMode ? '识别面板' : (isWorkflowMode ? '流程面板' : '上下文'));
   const activeOcrFile = useMemo(() => ocrFiles.find((item) => item.id === activeOcrId) || null, [ocrFiles, activeOcrId]);
 
   useEffect(() => {
@@ -1735,6 +1746,120 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
   };
 
+  const stopWorkflowPolling = () => {
+      if (workflowPollRef.current) {
+          clearInterval(workflowPollRef.current);
+          workflowPollRef.current = null;
+      }
+  };
+
+  const refreshWorkflowJob = async (jobId, options = {}) => {
+      const silent = options?.silent === true;
+      if (!jobId || !userProfile?.id || userProfile.id === 'anonymous') return null;
+      if (!silent) setIsWorkflowLoading(true);
+      try {
+          const res = await workflowApi.getJob(jobId, userProfile.id);
+          const job = res?.data || null;
+          if (job) {
+              setWorkflowJob(job);
+              setWorkflowError('');
+              if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+                  stopWorkflowPolling();
+              }
+          }
+          return job;
+      } catch (error) {
+          if (!silent) setWorkflowError(error?.message || '刷新工作流失败');
+          return null;
+      } finally {
+          if (!silent) setIsWorkflowLoading(false);
+      }
+  };
+
+  const startWorkflowPolling = (jobId) => {
+      stopWorkflowPolling();
+      if (!jobId) return;
+      workflowPollRef.current = setInterval(() => {
+          refreshWorkflowJob(jobId, { silent: true });
+      }, WORKFLOW_POLL_INTERVAL);
+  };
+
+  const handleWorkflowStart = async () => {
+      const query = String(workflowInput || '').trim();
+      if (!query || !userProfile?.id || userProfile.id === 'anonymous') return;
+      setWorkflowError('');
+      setIsWorkflowLoading(true);
+      try {
+          const result = await workflowApi.startMonthlyAnalysis({
+              userId: userProfile.id,
+              sessionId: currentSessionId,
+              query,
+              modelBackend: llmBackend,
+              topic: '月度经营分析',
+              title: '月度经营分析',
+          });
+          const job = result?.data || null;
+          if (!job?.job_id) throw new Error('工作流任务创建失败');
+          setWorkflowJob(job);
+          if (job.session_id && job.session_id !== currentSessionId) {
+              setCurrentSessionId(job.session_id);
+          }
+          await saveSessionMeta(job.session_id || currentSessionId || job.job_id, 5, 'workflow', currentAudioPath, llmBackend);
+          startWorkflowPolling(job.job_id);
+      } catch (error) {
+          setWorkflowError(error?.message || '启动工作流失败');
+      } finally {
+          setIsWorkflowLoading(false);
+      }
+  };
+
+  const handleWorkflowConfirm = async (action) => {
+      if (!workflowJob?.job_id || !userProfile?.id || userProfile.id === 'anonymous') return;
+      setIsWorkflowActionLoading(true);
+      setWorkflowError('');
+      try {
+          const result = await workflowApi.confirmJob({
+              jobId: workflowJob.job_id,
+              userId: userProfile.id,
+              action,
+          });
+          const job = result?.data || null;
+          if (job) {
+              setWorkflowJob(job);
+              if (job.status === 'running') {
+                  startWorkflowPolling(job.job_id);
+              } else if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+                  stopWorkflowPolling();
+              }
+          }
+      } catch (error) {
+          setWorkflowError(error?.message || '确认工作流失败');
+      } finally {
+          setIsWorkflowActionLoading(false);
+      }
+  };
+
+  const handleWorkflowRetry = async () => {
+      if (!workflowJob?.job_id || !userProfile?.id || userProfile.id === 'anonymous') return;
+      setIsWorkflowActionLoading(true);
+      setWorkflowError('');
+      try {
+          const result = await workflowApi.retryJob({
+              jobId: workflowJob.job_id,
+              userId: userProfile.id,
+          });
+          const job = result?.data || null;
+          if (job) {
+              setWorkflowJob(job);
+              startWorkflowPolling(job.job_id);
+          }
+      } catch (error) {
+          setWorkflowError(error?.message || '重试工作流失败');
+      } finally {
+          setIsWorkflowActionLoading(false);
+      }
+  };
+
 
   const handleOpenSettingsModal = (category = 'general') => {
       setSettingsModalState({ isOpen: true, category });
@@ -1745,6 +1870,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (selectedModel === modelId) return;
 
       if (modelId !== 0 && (currentMode === 'database' || currentMode === 'rag' || currentMode === 'search')) {
+          onModeChange('general');
+      }
+      if (modelId === 5 && currentMode !== 'workflow') {
+          onModeChange('workflow');
+      }
+      if (modelId !== 5 && currentMode === 'workflow') {
           onModeChange('general');
       }
 
@@ -1758,6 +1889,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setPanelContent('');
       setAudioFileUrl(null);
       setCurrentAudioPath(null);
+      setWorkflowJob(null);
+      setWorkflowError('');
+      stopWorkflowPolling();
       setPendingFiles([]);
       resetAuditState();
       setOcrFiles([]);
@@ -1806,6 +1940,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setCurrentAudioPath(null);
     setPendingFiles([]);
     resetAuditState();
+    setWorkflowJob(null);
+    setWorkflowError('');
+    stopWorkflowPolling();
     setSpeakingIdx(null);
     window.speechSynthesis.cancel();
 
@@ -1864,6 +2001,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       if (targetMode === 'audit') targetMode = 'general';
+      if (targetModel === 5 || targetMode === 'workflow') {
+          targetModel = 5;
+          targetMode = 'workflow';
+      }
 
       setSelectedModel(targetModel);
       setLlmBackend(savedBackend);
@@ -2001,6 +2142,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setPanelContent('');
       setAudioFileUrl(null);
       setCurrentAudioPath(null);
+      setWorkflowJob(null);
+      setWorkflowError('');
+      stopWorkflowPolling();
       setPendingFiles([]);
             setOcrFiles([]);
             setActiveOcrId(null);
@@ -2115,6 +2259,47 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         console.error("Failed to save session meta", e);
     }
   };
+
+  useEffect(() => {
+      return () => {
+          stopWorkflowPolling();
+      };
+  }, []);
+
+  useEffect(() => {
+      if (!isWorkflowMode || !userProfile?.id || userProfile.id === 'anonymous') {
+          stopWorkflowPolling();
+          return;
+      }
+      let cancelled = false;
+      const hydrateLatestWorkflow = async () => {
+          try {
+              const listResult = await workflowApi.listJobs(userProfile.id, 10);
+              if (cancelled) return;
+              const jobs = Array.isArray(listResult?.data) ? listResult.data : [];
+              if (!jobs.length) return;
+              const latest = jobs.find((item) => {
+                  const st = String(item?.status || '').toLowerCase();
+                  return st === 'pending' || st === 'running' || st === 'blocked';
+              }) || jobs[0];
+              if (!latest?.job_id) return;
+              const detailed = await refreshWorkflowJob(latest.job_id, { silent: true });
+              if (cancelled || !detailed) return;
+              const st = String(detailed.status || '').toLowerCase();
+              if (st === 'pending' || st === 'running' || st === 'blocked') {
+                  startWorkflowPolling(detailed.job_id);
+              }
+          } catch (error) {
+              if (!cancelled) {
+                  setWorkflowError(error?.message || '加载工作流失败');
+              }
+          }
+      };
+      hydrateLatestWorkflow();
+      return () => {
+          cancelled = true;
+      };
+  }, [isWorkflowMode, userProfile?.id]);
 
   useEffect(() => {
       if (!isAuditMode) return;
@@ -2929,7 +3114,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
          const headers = { 'Content-Type': 'application/json' };
          if (token) headers['Authorization'] = `Bearer ${token}`;
 
-         let effectiveMode = isAuditMode ? 'audit' : currentMode;
+         let effectiveMode = isAuditMode ? 'audit' : (isWorkflowMode ? 'workflow' : currentMode);
          if (ragTriggered) {
              effectiveMode = 'rag';
          }
@@ -3988,7 +4173,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     <div className="h-full flex flex-col items-center justify-center pt-4 sm:pt-5">
        <div className="w-16 h-16 bg-white dark:bg-gray-800 rounded-full shadow-sm border border-gray-100 dark:border-gray-700 flex items-center justify-center mb-6">{React.createElement(selectedModelInfo.icon, { size: 32, className: "text-gray-800 dark:text-white" })}</div>
        <h2 className="home-hero-title text-2xl text-gray-800 dark:text-white mb-8 text-center px-4">
-           {isMeetingMode ? "上传录音，一键总结" : (isAuditMode ? "智能审单 & 风险合规检测" : (isOCRMode ? "图片/PDF 转文字 & 智能分析" : "今天有什么计划？"))}
+           {isMeetingMode ? "上传录音，一键总结" : (isAuditMode ? "智能审单 & 风险合规检测" : (isWorkflowMode ? "任务编排闭环：自动执行 + 人工确认" : (isOCRMode ? "图片/PDF 转文字 & 智能分析" : "今天有什么计划？")))}
        </h2>
        <Suggestions onSuggestionClick={handleSuggestionClick} />
      </div>
@@ -4868,7 +5053,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               )}
               {shouldRenderPanel && (
                   <Suspense fallback={
-                      <div className={`dashboard-pane w-full ${isAuditSinglePane ? 'md:w-full md:border-r-0' : 'md:w-1/2 md:border-r'} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
+                      <div className={`dashboard-pane w-full ${isSinglePaneMode ? 'md:w-full md:border-r-0' : 'md:w-1/2 md:border-r'} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
                           <div className={`px-4 py-3 border-b flex justify-between items-center ${panelStyle.headerBg} ${panelStyle.border}`}>
                               <div className="h-4 w-40 bg-gray-200 dark:bg-gray-800 rounded animate-pulse"></div>
                               <div className="h-3 w-16 bg-gray-200 dark:bg-gray-800 rounded animate-pulse"></div>
@@ -4880,38 +5065,53 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           </div>
                       </div>
                   }>
-                      <ModePanel
-                          panelStyle={panelStyle}
-                          isMeetingMode={isMeetingMode}
-                          isOCRMode={isOCRMode}
-                          isAuditMode={isAuditMode}
-                          panelContent={panelContent}
-                          setPanelContent={setPanelContent}
-                          isUploadingFile={isUploadingFile}
-                          audioFileUrl={audioFileUrl}
-                          isProcessing={isProcessing}
-                          isOcrSaving={isOcrSaving}
-                          isSavingContext={isSavingContext}
-                          handleManualSave={handleManualSave}
-                          handleExportWord={handleExportWord}
-                          handleGenerateSummary={handleGenerateSummary}
-                          onOcrStore={handleOcrStore}
-                          ocrEngine={ocrEngine}
-                          onOcrEngineChange={setOcrEngine}
-                          auditState={auditState}
-                          auditDocType={auditDocType}
-                          auditDocTypes={AUDIT_DOC_TYPES}
-                          auditModelBackend={auditModelBackend}
-                          auditFile={auditFile}
-                          auditNotice={auditNotice}
-                          onAuditDocTypeChange={setAuditDocType}
-                          onAuditModelBackendChange={setAuditModelBackend}
-                          onAuditFileSelect={handleAuditFileSelect}
-                          onAuditReset={resetAuditState}
-                          onAuditErpAction={handleAuditErpAction}
-                          isAuditErpActionLoading={isAuditErpActionLoading}
-                          fullWidth={isAuditSinglePane}
-                      />
+                      {isWorkflowMode ? (
+                        <WorkflowTimeline
+                          workflowJob={workflowJob}
+                          inputQuery={workflowInput}
+                          onInputQueryChange={setWorkflowInput}
+                          onStart={handleWorkflowStart}
+                          onRefresh={() => refreshWorkflowJob(workflowJob?.job_id)}
+                          onConfirm={handleWorkflowConfirm}
+                          onRetry={handleWorkflowRetry}
+                          isLoading={isWorkflowLoading}
+                          actionLoading={isWorkflowActionLoading}
+                          error={workflowError}
+                        />
+                      ) : (
+                        <ModePanel
+                            panelStyle={panelStyle}
+                            isMeetingMode={isMeetingMode}
+                            isOCRMode={isOCRMode}
+                            isAuditMode={isAuditMode}
+                            panelContent={panelContent}
+                            setPanelContent={setPanelContent}
+                            isUploadingFile={isUploadingFile}
+                            audioFileUrl={audioFileUrl}
+                            isProcessing={isProcessing}
+                            isOcrSaving={isOcrSaving}
+                            isSavingContext={isSavingContext}
+                            handleManualSave={handleManualSave}
+                            handleExportWord={handleExportWord}
+                            handleGenerateSummary={handleGenerateSummary}
+                            onOcrStore={handleOcrStore}
+                            ocrEngine={ocrEngine}
+                            onOcrEngineChange={setOcrEngine}
+                            auditState={auditState}
+                            auditDocType={auditDocType}
+                            auditDocTypes={AUDIT_DOC_TYPES}
+                            auditModelBackend={auditModelBackend}
+                            auditFile={auditFile}
+                            auditNotice={auditNotice}
+                            onAuditDocTypeChange={setAuditDocType}
+                            onAuditModelBackendChange={setAuditModelBackend}
+                            onAuditFileSelect={handleAuditFileSelect}
+                            onAuditReset={resetAuditState}
+                            onAuditErpAction={handleAuditErpAction}
+                            isAuditErpActionLoading={isAuditErpActionLoading}
+                            fullWidth={isSinglePaneMode}
+                        />
+                      )}
                   </Suspense>
               )}
 
@@ -5293,11 +5493,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                           isUploadingFile ? "正在上传处理中，请稍候..." :
                                           (isMeetingMode ? (panelContent ? "在此提问关于会议内容的问题..." : "上传音频或录音...") :
                                           (isAuditMode ? "上传单据开始审单..." :
+                                          (isWorkflowMode ? "输入分析目标后可直接发起工作流..." :
                                           (isReportMode ? "输入修改意见..." :
                                           (isOCRMode ? (panelContent ? "在此分析文档内容..." : "上传图片或PDF...") :
                                           (currentMode === 'database' ? "查询企业数据..." :
                                           (isSearchMode ? "输入问题，将为您联网搜索..." :
-                                          (isRAGMode ? "向知识库提问..." : "询问任何问题...")))))))
+                                          (isRAGMode ? "向知识库提问..." : "询问任何问题..."))))))))
                                       }
                                       rows={1}
                                       value={inputValue}

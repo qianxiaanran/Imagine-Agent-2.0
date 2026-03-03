@@ -28,6 +28,7 @@ user_router = None
 chat_router = None
 audit_router = None
 admin_router = None
+workflow_router = None
 upload_document_to_vector_store = None
 delete_user_documents = None
 store_text_to_vector_store = None
@@ -87,6 +88,7 @@ try:
     from chat_router import router as chat_router
     from audit_router import router as audit_router
     from admin_router import router as admin_router
+    from workflow_router import router as workflow_router
     from documents_processing import upload_document_to_vector_store, delete_user_documents, store_text_to_vector_store, warmup_embeddings
     from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase
     from ocr_manager import OCRManager, get_shared_ocr_manager
@@ -221,6 +223,10 @@ if admin_router:
     app.include_router(admin_router)
 else:
     print("[Warn] Admin Router not loaded, /api/admin endpoints unavailable")
+if workflow_router:
+    app.include_router(workflow_router)
+else:
+    print("[Warn] Workflow Router not loaded, /api/workflow endpoints unavailable")
 if voice_ws_proxy: app.include_router(voice_ws_proxy.router, prefix="/api/ws", tags=["Voice WebSocket"])
 
 
