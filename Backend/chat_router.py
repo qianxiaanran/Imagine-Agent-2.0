@@ -70,13 +70,6 @@ except ImportError:
     print("⚠️ Audit Service not found, audit mode will fall back to general chat.")
     run_audit_pipeline = None
 
-# ✅ 引入 Workflow 服务（可选）
-workflow_start_monthly = None
-try:
-    from workflow_manager import start_monthly_analysis as workflow_start_monthly
-except Exception as e:
-    print(f"⚠️ [ChatRouter] workflow_manager 未就绪，workflow 模式不可用: {e}")
-
 # 可选：文档检索（RAG 直连模式，不经过 langgraph）
 search_user_documents = None
 try:
@@ -116,7 +109,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
 
     # 前端字段：mode / modelId
-    mode: Optional[str] = Field(default="general", description="对话模式：general / database / rag / search / audit / workflow ...")
+    mode: Optional[str] = Field(default="general", description="对话模式：general / database / rag / search / audit ...")
     modelId: Optional[str] = Field(default=None, description="Selected model ID from frontend")
 
     # 新字段：模型后端选择
@@ -895,8 +888,6 @@ def _normalize_mode(mode: Optional[str]) -> str:
         return "search"
     if m in {"audit", "review", "risk"}:
         return "audit"
-    if m in {"workflow", "flow", "pipeline"}:
-        return "workflow"
     if m in {"general", "chat", "default"}:
         return "general"
     return m
@@ -2903,45 +2894,6 @@ async def chat(
             yield json.dumps({"t": "m", "sid": session_id, "mode": "database", "end": True}, ensure_ascii=False) + "\n"
 
     # --------------------------------------------------------
-    # ✅ Workflow 模式：发起工作流任务并返回任务编号
-    # --------------------------------------------------------
-    async def workflow_response_generator():
-        yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
-
-        if not workflow_start_monthly:
-            yield json.dumps({"t": "c", "v": "Workflow service is not available."}, ensure_ascii=False) + "\n"
-            if not _is_cancelled():
-                yield json.dumps({"t": "m", "sid": session_id, "mode": "workflow", "end": True}, ensure_ascii=False) + "\n"
-            return
-
-        try:
-            job = await asyncio.to_thread(
-                workflow_start_monthly,
-                user_id,
-                session_id,
-                message,
-                model_backend,
-                "月度经营分析",
-                "月度经营分析",
-            )
-            job_id = str((job or {}).get("job_id") or "")
-            result_text = (
-                "已为你创建工作流任务。\n"
-                f"- 任务ID: {job_id or 'unknown'}\n"
-                "- 流程: 查库 -> 结论 -> 报告草案 -> 人工确认 -> 分享链接\n"
-                "- 请在右侧 Workflow 面板继续查看进度与确认步骤。"
-            )
-            yield json.dumps({"t": "c", "v": result_text}, ensure_ascii=False) + "\n"
-            if job_id:
-                yield json.dumps({"t": "m", "sid": session_id, "workflow_job_id": job_id}, ensure_ascii=False) + "\n"
-            if not _is_cancelled():
-                yield json.dumps({"t": "m", "sid": session_id, "mode": "workflow", "end": True}, ensure_ascii=False) + "\n"
-        except Exception as e:
-            yield json.dumps({"t": "c", "v": f"Workflow mode failed: {e}"}, ensure_ascii=False) + "\n"
-            if not _is_cancelled():
-                yield json.dumps({"t": "m", "sid": session_id, "mode": "workflow", "end": True}, ensure_ascii=False) + "\n"
-
-    # --------------------------------------------------------
     # ✅ 审计模式 (Audit Mode)：直连 Audit Service
     # --------------------------------------------------------
     async def audit_response_generator():
@@ -3319,8 +3271,6 @@ async def chat(
         return _stream(search_response_generator())
     if mode == "audit": # ✅ 新增 Audit 路由
         return _stream(audit_response_generator())
-    if mode == "workflow":
-        return _stream(workflow_response_generator())
 
     if auto_routing_enabled:
         return _stream(langgraph_response_generator())
