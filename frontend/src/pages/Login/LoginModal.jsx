@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Eye, EyeOff, Loader2, MessageCircle, ArrowLeft } from 'lucide-react';
 import Button from '../../components/Button';
 import authApi from '../../api/auth';
-import { AUTH_TOKEN_KEY } from '../../api/apiClient';
+import { AUTH_TOKEN_KEY, AUTH_REFRESH_TOKEN_KEY } from '../../api/apiClient';
 import { supabase } from '../../api/supabaseClient';
 
 const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => {
@@ -84,19 +84,27 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
       const result = await authApi.login(formData.account, formData.password);
       if (result.success) {
         if (result.token) localStorage.setItem(AUTH_TOKEN_KEY, result.token);
+        if (result.refresh_token) {
+          localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, result.refresh_token);
+        } else {
+          localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
+        }
 
         if (rememberLogin) {
           const rememberUntil = Date.now() + REMEMBER_WINDOW_MS;
           localStorage.setItem(REMEMBER_UNTIL_KEY, String(rememberUntil));
 
           if (result.refresh_token) {
-            const { error: sessionError } = await supabase.auth.setSession({
-              access_token: result.token,
-              refresh_token: result.refresh_token,
-            });
-            if (sessionError) {
-              console.warn('Remember login session error:', sessionError);
-              localStorage.removeItem(REMEMBER_UNTIL_KEY);
+            try {
+              const { error: sessionError } = await supabase.auth.setSession({
+                access_token: result.token,
+                refresh_token: result.refresh_token,
+              });
+              if (sessionError) {
+                console.warn('Remember login session error:', sessionError);
+              }
+            } catch (e) {
+              console.warn('Remember login setSession failed:', e);
             }
           } else {
             console.warn('Remember login requested but refresh token missing.');
@@ -104,7 +112,8 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
           }
         } else {
           localStorage.removeItem(REMEMBER_UNTIL_KEY);
-          await supabase.auth.signOut();
+          localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
+          void supabase.auth.signOut().catch((e) => console.warn('Supabase signOut failed:', e));
         }
 
         onLoginSuccess();
@@ -188,13 +197,18 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
 
       const result = await authApi.loginWithCode(formData.account, formData.code);
       if (result.success) {
+        try {
+          await supabase.auth.signOut();
+        } catch (e) {
+          console.warn('Supabase signOut before sms login failed:', e);
+        }
         if (result.token) localStorage.setItem(AUTH_TOKEN_KEY, result.token);
+        localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
         if (rememberLogin) {
           const rememberUntil = Date.now() + REMEMBER_WINDOW_MS;
           localStorage.setItem(REMEMBER_UNTIL_KEY, String(rememberUntil));
         } else {
           localStorage.removeItem(REMEMBER_UNTIL_KEY);
-          await supabase.auth.signOut();
         }
         onLoginSuccess();
       } else {

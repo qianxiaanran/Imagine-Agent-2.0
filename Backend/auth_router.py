@@ -442,6 +442,10 @@ class LoginRequest(BaseModel):
     code: Optional[str] = None
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(..., min_length=10, description="Supabase refresh token")
+
+
 class RegisterRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     phone: str = Field(validation_alias=AliasChoices("phone", "account"))
@@ -644,6 +648,65 @@ def api_login(req: LoginRequest):
         }
 
     raise HTTPException(status_code=400, detail="参数错误")
+
+
+@router.post("/refresh")
+def api_refresh(req: RefreshTokenRequest):
+    refresh_token = str(req.refresh_token or "").strip()
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="Missing refresh token")
+
+    sb_anon = get_anon_supabase(fresh=True)
+    supabase_url, anon_key = _get_sb_url_and_key(sb_anon)
+    endpoint = f"{supabase_url}/auth/v1/token?grant_type=refresh_token"
+
+    try:
+        resp = httpx.post(
+            endpoint,
+            headers={
+                "apikey": anon_key,
+                "Content-Type": "application/json",
+            },
+            json={"refresh_token": refresh_token},
+            timeout=10,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Refresh request failed: {str(e)}")
+
+    body: Dict[str, Any]
+    try:
+        body = resp.json()
+    except Exception:
+        body = {}
+
+    if resp.status_code >= 400:
+        detail = body.get("error_description") or body.get("msg") or "Invalid refresh token"
+        err_code = body.get("error_code") or body.get("code")
+        print(f"[Auth][refresh] failed | status={resp.status_code} | error_code={err_code} | detail={detail}")
+        raise HTTPException(status_code=401, detail=detail)
+
+    access_token = str(body.get("access_token") or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=500, detail="Refresh succeeded but access token missing")
+
+    next_refresh_token = str(body.get("refresh_token") or refresh_token).strip()
+    user = body.get("user") or {}
+    user_meta = user.get("user_metadata") if isinstance(user, dict) else {}
+
+    return {
+        "success": True,
+        "token": access_token,
+        "refresh_token": next_refresh_token,
+        "expires_at": body.get("expires_at"),
+        "user": {
+            "id": user.get("id") if isinstance(user, dict) else None,
+            "phone": (user_meta or {}).get("phone"),
+            "email": user.get("email") if isinstance(user, dict) else None,
+            "name": (user_meta or {}).get("name"),
+            "username": (user_meta or {}).get("username"),
+            "avatar": (user_meta or {}).get("avatar"),
+        },
+    }
 
 
 # ✨ [新增] 忘记密码重置接口

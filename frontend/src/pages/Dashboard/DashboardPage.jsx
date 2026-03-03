@@ -14,7 +14,7 @@ import Sidebar from './Sidebar';
 import MobileSidebar from './MobileSidebar';
 import Suggestions from './Suggestions';
 // 原料药进口
-import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/apiClient';
+import { API_BASE_URL, AUTH_TOKEN_KEY, refreshAccessToken as refreshAccessTokenFromApiClient } from '../../api/apiClient';
 import userApi from '../../api/user';
 import historyApi from '../../api/history';
 import { convertWebMToWav } from '../../utils/audio';
@@ -2236,42 +2236,91 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       formData.append('user_id', userProfile.id);
       }
 
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-
-      return new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open('POST', `${API_BASE_URL}/api/documents/upload`);
-          Object.entries(headers).forEach(([key, value]) => xhr.setRequestHeader(key, value));
-
-          xhr.upload.onprogress = (event) => {
-              if (!event.lengthComputable) return;
-              const percent = Math.round((event.loaded / event.total) * 100);
-              updatePendingFile(wrapper.id, { status: 'uploading', progress: percent });
-          };
-
-          xhr.upload.onload = () => {
-              updatePendingFile(wrapper.id, { status: 'processing', progress: 100 });
-          };
-
-          xhr.onload = () => {
-              if (xhr.status < 200 || xhr.status >= 300) {
-                  reject(new Error(`Upload failed with status ${xhr.status}`));
-                  return;
+      const sendOnce = (authToken) => (
+          new Promise((resolve, reject) => {
+              const xhr = new XMLHttpRequest();
+              xhr.open('POST', `${API_BASE_URL}/api/documents/upload`);
+              if (authToken) {
+                  xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
               }
-              try {
-                  const data = JSON.parse(xhr.responseText);
-                  resolve(data);
-              } catch (error) {
-                  reject(error);
+
+              xhr.upload.onprogress = (event) => {
+                  if (!event.lengthComputable) return;
+                  const percent = Math.round((event.loaded / event.total) * 100);
+                  updatePendingFile(wrapper.id, { status: 'uploading', progress: percent });
+              };
+
+              xhr.upload.onload = () => {
+                  updatePendingFile(wrapper.id, { status: 'processing', progress: 100 });
+              };
+
+              xhr.onload = () => {
+                  let data = null;
+                  try {
+                      data = xhr.responseText ? JSON.parse(xhr.responseText) : null;
+                  } catch {
+                      data = null;
+                  }
+                  resolve({ status: xhr.status, data });
+              };
+
+              xhr.onerror = () => reject(new Error('Upload failed'));
+
+              updatePendingFile(wrapper.id, { status: 'uploading', progress: 0 });
+              xhr.send(formData);
+          })
+      );
+
+      return (async () => {
+          let token = localStorage.getItem(AUTH_TOKEN_KEY);
+          let result = await sendOnce(token);
+
+          if (result.status === 401) {
+              const refreshedToken = await refreshAccessTokenFromApiClient();
+              if (refreshedToken) {
+                  token = refreshedToken;
+                  result = await sendOnce(token);
               }
-          };
+          }
 
-          xhr.onerror = () => reject(new Error('Upload failed'));
+          if (result.status >= 200 && result.status < 300) {
+              return result.data || {};
+          }
 
-          updatePendingFile(wrapper.id, { status: 'uploading', progress: 0 });
-          xhr.send(formData);
-      });
+          const message = result?.data?.detail || result?.data?.error || `Upload failed with status ${result.status}`;
+          throw new Error(message);
+      })();
+  };
+
+  const uploadDocumentWithAuthRetry = async (formData) => {
+      const sendOnce = async (authToken) => {
+          const headers = authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+          const response = await fetch(`${API_BASE_URL}/api/documents/upload`, {
+              method: 'POST',
+              headers,
+              body: formData
+          });
+          let data = null;
+          try {
+              data = await response.json();
+          } catch {
+              data = null;
+          }
+          return { response, data };
+      };
+
+      let token = localStorage.getItem(AUTH_TOKEN_KEY);
+      let result = await sendOnce(token);
+
+      if (result.response.status === 401) {
+          const refreshedToken = await refreshAccessTokenFromApiClient();
+          if (refreshedToken) {
+              token = refreshedToken;
+              result = await sendOnce(token);
+          }
+      }
+
+      return result;
   };
 
   const parseUploadResult = (data) => {
@@ -2557,15 +2606,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       formData.append('user_id', userProfile.id);
                       }
 
-                      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-                      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-
-                      const res = await fetch(`${API_BASE_URL}/api/documents/upload`, {
-                          method: 'POST',
-                          headers,
-                          body: formData
-                      });
-                      const data = await res.json();
+                      const { response, data } = await uploadDocumentWithAuthRetry(formData);
+                      if (!response.ok) {
+                          throw new Error(data?.detail || data?.error || `Upload failed with status ${response.status}`);
+                      }
                       const { isSuccess, error } = parseUploadResult(data);
 
                       if (isSuccess) {
@@ -4976,7 +5020,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                                   onClick={() => setExpandedSources((prev) => ({ ...prev, [messageIndex]: !prev[messageIndex] }))}
                                                   className="text-[11px] text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors"
                                                 >
-                                                  {sourcesExpanded ? '收起来源' : '查看来源'}
+                                                  {sourcesExpanded ? '收起数据来源' : '查看数据来源'}
                                                 </button>
                                                 {sourcesExpanded && (
                                                   <Suspense fallback={<div className="text-xs text-gray-400 mt-1">加载来源...</div>}>
@@ -5074,7 +5118,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                         </div>
 
                         <div
-                          className={`dashboard-input-dock w-full bg-white/95 dark:bg-gray-950/95 backdrop-blur-md px-4 pt-2 transition-colors z-30 fixed bottom-0 left-0 right-0 md:static ${showContentPanel ? 'border-t border-gray-50 dark:border-gray-800/50' : 'border-t border-gray-100/60 dark:border-gray-800/60'}`}
+                          className="dashboard-input-dock w-full bg-white/95 dark:bg-gray-950/95 backdrop-blur-md px-4 pt-2 transition-colors z-30 fixed bottom-0 left-0 right-0 md:static"
                           style={inputBarStyle}
                         >
                           <div className={`mx-auto w-full relative ${showContentPanel ? 'max-w-full px-2' : 'max-w-3xl'}`}>

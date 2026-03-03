@@ -164,7 +164,8 @@ jwt_expiry = 3600
 enable_refresh_token_rotation = true
 # Allows refresh tokens to be reused after expiry, up to the specified interval in seconds.
 # Requires enable_refresh_token_rotation = true.
-refresh_token_reuse_interval = 10
+# Increase tolerance to reduce occasional invalid refresh_token when multiple clients race to refresh.
+refresh_token_reuse_interval = 120
 # Allow/disallow new user signups to your project.
 enable_signup = true
 # Allow/disallow anonymous sign-ins to your project.

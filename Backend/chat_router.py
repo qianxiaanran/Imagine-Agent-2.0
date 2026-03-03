@@ -7,6 +7,7 @@ import urllib.parse
 import os
 import hashlib
 import threading
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 
@@ -18,10 +19,20 @@ from pydantic import BaseModel, Field
 # 🔧 配置区域：请在这里填入你的 API Key
 # -----------------------------------------------------------------------------
 # 1. Bing Web Search API (推荐，国内极稳): https://www.microsoft.com/en-us/bing/apis/bing-web-search-api
-BING_SUBSCRIPTION_KEY = os.environ.get("BING_SEARCH_V7_KEY", "")
+BING_SUBSCRIPTION_KEY = os.environ.get("BING_SEARCH_V7_KEY", "") or os.environ.get("BING_API_KEY", "")
+BING_SEARCH_ENDPOINT = os.environ.get("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search").strip()
 
 # 2. SerpAPI (备选): https://serpapi.com/
 SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "")
+# 3. Serper (Google Search API): https://serper.dev/
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
+# 4. Tavily Search API: https://tavily.com/
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+SEARCH_PROVIDER_ORDER = [
+    p.strip().lower()
+    for p in os.getenv("SEARCH_PROVIDER_ORDER", "bing,serpapi,serper,tavily,scrape").split(",")
+    if p.strip()
+]
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
 RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "2600"))
 RAG_MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHUNK_CHARS", "700"))
@@ -452,6 +463,48 @@ def _extract_query_terms(text: Optional[str], max_terms: int = 14) -> List[str]:
         if len(uniq) >= max_terms:
             break
     return uniq
+
+
+def _normalize_weather_city_name(text: Optional[str], default: str = "") -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return default
+
+    city = urllib.parse.unquote(raw)
+    city = re.sub(
+        r"(今天|今日|明天|后天|昨天|昨日|今晚|今早|今晨|当前|现在|实时|最新|最近|这几天|这两天|本周|下周|周末|天天|当天)",
+        " ",
+        city,
+    )
+    city = re.sub(
+        r"(天气|气温|温度|weather|forecast|怎么样|如何|怎样|情况|预报|查询|查下|查一下|看下|看看|请问|帮我|一下|呢|么|吗)",
+        " ",
+        city,
+        flags=re.IGNORECASE,
+    )
+    city = re.sub(r"[的地得]", " ", city)
+    city = re.sub(r"[，,。.!！?？;；:：/\\|]+", " ", city)
+    city = re.sub(r"\s{2,}", " ", city).strip()
+    if not city:
+        return default
+
+    zh_parts = re.findall(r"[\u4e00-\u9fa5]{2,12}", city)
+    if zh_parts:
+        municipalities = {"北京", "上海", "天津", "重庆", "香港", "澳门"}
+        preferred = [
+            p for p in zh_parts
+            if p.endswith(("市", "区", "县", "州", "旗", "自治州", "特别行政区")) or p in municipalities
+        ]
+        picked = (preferred[0] if preferred else zh_parts[0]).strip()
+        picked = re.sub(r"(今天|今日|明天|后天|昨天|昨日)$", "", picked).strip()
+        if picked:
+            return picked
+
+    en_parts = re.findall(r"[A-Za-z][A-Za-z\\-]{1,30}", city)
+    if en_parts:
+        return en_parts[0]
+
+    return city or default
 
 
 def _is_context_related(query: Optional[str], candidate_text: Optional[str], min_hits: int = 1) -> bool:
@@ -1083,11 +1136,12 @@ def _rank_search_results(results: List[dict], query: str, min_score: float = 3.0
     if not results:
         return []
 
-    # 对相关性评分的查询进行标记化
-    # 如果标记化为空，则回退到完整查询
-    keywords = [k for k in query.split() if len(k) > 1]
+    # 使用中英混合分词提取关键词；为空时再回退到空格分词。
+    keywords = _extract_query_terms(query, max_terms=12)
     if not keywords:
-        keywords = [query]
+        keywords = [k for k in query.split() if len(k) > 1]
+    if not keywords and query.strip():
+        keywords = [query.strip()]
 
     scored_results = []
     for r in results:
@@ -1103,28 +1157,345 @@ def _rank_search_results(results: List[dict], query: str, min_score: float = 3.0
     return scored_results
 
 
+def _normalize_search_item(item: dict) -> Optional[dict]:
+    if not isinstance(item, dict):
+        return None
+    title = str(item.get("title") or "").strip()
+    link = str(item.get("link") or "").strip()
+    snippet = re.sub(r"\s+", " ", str(item.get("snippet") or "")).strip()
+    if not link or link == "#" or link.startswith("javascript:") or link.startswith("/"):
+        return None
+    if not title:
+        title = link
+    normalized = {"title": title, "link": link, "snippet": snippet}
+    # 保留可选元信息，供“实时性”增强提示和前端来源展示使用。
+    for key in ("date", "source", "provider"):
+        val = item.get(key)
+        if val is not None and str(val).strip():
+            normalized[key] = str(val).strip()
+    return normalized
+
+
+def _canonicalize_link(link: str) -> str:
+    try:
+        parsed = urllib.parse.urlparse(link or "")
+        host = (parsed.netloc or "").lower().strip()
+        path = (parsed.path or "").rstrip("/")
+        if host:
+            return f"{host}{path}"
+    except Exception:
+        pass
+    return (link or "").strip().lower()
+
+
+def _post_process_search_results(results: List[dict], query: str, max_results: int = 8) -> List[dict]:
+    normalized: List[dict] = []
+    seen = set()
+    for item in results or []:
+        row = _normalize_search_item(item)
+        if not row:
+            continue
+        key = _canonicalize_link(row.get("link", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(row)
+
+    if not normalized:
+        return []
+
+    # 先做一轮“核心词命中”过滤，减少主题偏移。
+    core_terms = [t for t in _extract_query_terms(query, max_terms=8) if len(str(t)) >= 2][:4]
+    if core_terms:
+        strict_hits = []
+        for row in normalized:
+            hay = _normalize_match_text(
+                f"{row.get('title', '')} {row.get('snippet', '')} {row.get('link', '')}"
+            )
+            if any(_normalize_match_text(t) in hay for t in core_terms):
+                strict_hits.append(row)
+        # 严格命中太少时不强制，避免把结果清空。
+        if len(strict_hits) >= 2:
+            normalized = strict_hits
+
+    ranked = _rank_search_results(normalized, query, min_score=1.0)
+    if ranked:
+        if len(ranked) >= max_results:
+            return ranked[:max_results]
+        # 分数命中过少时，用原始结果补齐，避免上下文过窄导致答偏。
+        ranked_keys = {_canonicalize_link(x.get("link", "")) for x in ranked}
+        merged = list(ranked)
+        for row in normalized:
+            key = _canonicalize_link(row.get("link", ""))
+            if key in ranked_keys:
+                continue
+            merged.append(row)
+            if len(merged) >= max_results:
+                break
+        return merged[:max_results]
+    return normalized[:max_results]
+
+
+def _search_with_bing_api(query: str, max_results: int) -> List[dict]:
+    if not BING_SUBSCRIPTION_KEY:
+        return []
+    import requests
+
+    headers = {"Ocp-Apim-Subscription-Key": BING_SUBSCRIPTION_KEY}
+    params = {"q": query, "count": max_results, "mkt": "zh-CN"}
+    resp = requests.get(BING_SEARCH_ENDPOINT, headers=headers, params=params, timeout=8)
+    if resp.status_code != 200:
+        print(f"⚠️ [Bing API] Error {resp.status_code}: {resp.text[:240]}")
+        return []
+    data = resp.json()
+    web_pages = data.get("webPages", {}).get("value", [])
+    return [
+        {
+            "title": page.get("name"),
+            "link": page.get("url"),
+            "snippet": page.get("snippet", ""),
+        }
+        for page in web_pages
+    ]
+
+
+def _search_with_serpapi(query: str, max_results: int) -> List[dict]:
+    if not SERPAPI_API_KEY:
+        return []
+    import requests
+
+    params = {
+        "engine": "bing",
+        "q": query,
+        "api_key": SERPAPI_API_KEY,
+        "cc": "CN",
+        "num": max_results,
+    }
+    resp = requests.get("https://serpapi.com/search", params=params, timeout=10)
+    if resp.status_code != 200:
+        print(f"⚠️ [SerpAPI] Error {resp.status_code}: {resp.text[:240]}")
+        return []
+    data = resp.json()
+    organic = data.get("organic_results", [])
+    return [
+        {
+            "title": res.get("title"),
+            "link": res.get("link"),
+            "snippet": res.get("snippet", ""),
+        }
+        for res in organic[:max_results]
+    ]
+
+
+def _search_with_serper(query: str, max_results: int, prefer_fresh: bool = False) -> List[dict]:
+    if not SERPER_API_KEY:
+        return []
+    import requests
+
+    headers = {"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}
+    if prefer_fresh:
+        # 时效性优先：先走 news 接口，带最近一天过滤。
+        news_payload = {"q": query, "num": max_results, "hl": "zh-cn", "gl": "cn", "tbs": "qdr:d"}
+        news_resp = requests.post("https://google.serper.dev/news", headers=headers, json=news_payload, timeout=10)
+        if news_resp.status_code == 200:
+            news_data = news_resp.json()
+            rows = news_data.get("news", [])
+            if rows:
+                return [
+                    {
+                        "title": row.get("title"),
+                        "link": row.get("link"),
+                        "snippet": row.get("snippet", ""),
+                        "date": row.get("date", ""),
+                        "source": row.get("source", ""),
+                        "provider": "serper-news",
+                    }
+                    for row in rows[:max_results]
+                ]
+        else:
+            print(f"⚠️ [Serper News] Error {news_resp.status_code}: {news_resp.text[:240]}")
+
+    payload = {"q": query, "num": max_results, "hl": "zh-cn", "gl": "cn"}
+    if prefer_fresh:
+        payload["tbs"] = "qdr:d"
+    resp = requests.post("https://google.serper.dev/search", headers=headers, json=payload, timeout=10)
+    if resp.status_code != 200:
+        print(f"⚠️ [Serper] Error {resp.status_code}: {resp.text[:240]}")
+        return []
+    data = resp.json()
+    organic = data.get("organic", [])
+    return [
+        {
+            "title": res.get("title"),
+            "link": res.get("link"),
+            "snippet": res.get("snippet", ""),
+            "provider": "serper-search",
+        }
+        for res in organic[:max_results]
+    ]
+
+
+def _search_with_tavily(query: str, max_results: int) -> List[dict]:
+    if not TAVILY_API_KEY:
+        return []
+    import requests
+
+    payload = {
+        "api_key": TAVILY_API_KEY,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": "advanced",
+    }
+    resp = requests.post("https://api.tavily.com/search", json=payload, timeout=12)
+    if resp.status_code != 200:
+        print(f"⚠️ [Tavily] Error {resp.status_code}: {resp.text[:240]}")
+        return []
+    data = resp.json()
+    rows = data.get("results", [])
+    return [
+        {
+            "title": row.get("title"),
+            "link": row.get("url"),
+            "snippet": row.get("content", ""),
+        }
+        for row in rows[:max_results]
+    ]
+
+
 # ------------------------------------------------------------
 # 天气工具API
 # ------------------------------------------------------------
 def tool_get_weather(city_name: str) -> List[dict]:
-    """Get weather information from wttr.in."""
+    """Get realtime weather from Moji only."""
     import requests
-    results = []
-    print(f"☁️ [Weather Tool] Getting weather for: {city_name}")
+    import json as _json
+    from bs4 import BeautifulSoup
+
+    results: List[dict] = []
+    print(f"☁️ [Weather Tool/Moji] Getting weather for: {city_name}")
+
     try:
-        # format=3: 简单的一行天气 (e.g., "Beijing: ☀️ +25°C")
-        # lang=zh-cn: 中文
-        url = f"https://wttr.in/{urllib.parse.quote(city_name)}?format=3&lang=zh-cn"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            weather_str = resp.text.strip()
-            results.append({
-                "title": f"{city_name} 实时天气",
-                "link": f"https://wttr.in/{urllib.parse.quote(city_name)}",
-                "snippet": f"当前天气状况: {weather_str}"
-            })
+        raw_city = str(city_name or "").strip()
+        if not raw_city:
+            raw_city = "北京"
+
+        normalized_city = _normalize_weather_city_name(raw_city, default="北京")
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        city_search_url = f"https://tianqi.moji.com/api/citysearch/{urllib.parse.quote(normalized_city)}"
+        city_resp = requests.get(city_search_url, headers=headers, timeout=8)
+        if city_resp.status_code != 200:
+            return results
+
+        data = _json.loads(city_resp.text or "{}")
+        city_rows = data.get("city_list", []) or []
+        if not city_rows:
+            return results
+
+        def _is_poi_row(row: Dict[str, Any]) -> bool:
+            labels = row.get("city_lable") or []
+            for lb in labels:
+                if isinstance(lb, dict) and "景点" in str(lb.get("name") or ""):
+                    return True
+            return False
+
+        def _is_city_like_name(name: str) -> bool:
+            n = str(name or "").strip()
+            if not n:
+                return False
+            return any(n.endswith(suffix) for suffix in ("市", "区", "县", "州", "旗", "自治州", "特别行政区"))
+
+        preferred_rows = [
+            row for row in city_rows
+            if isinstance(row, dict)
+            and not _is_poi_row(row)
+            and _is_city_like_name(row.get("localName") or row.get("name"))
+        ]
+        candidate_rows = preferred_rows if preferred_rows else [r for r in city_rows if isinstance(r, dict)]
+
+        query_terms = _extract_query_terms(normalized_city, max_terms=8)
+        query_norm = _normalize_match_text(normalized_city)
+
+        def _score_city(row: Dict[str, Any], index: int) -> int:
+            name = str(row.get("localName") or row.get("name") or "").strip()
+            pname = str(row.get("localPname") or row.get("pname") or "").strip()
+            full = f"{pname}{name}"
+            full_norm = _normalize_match_text(full)
+            score = max(0, 40 - index)
+            if name in {normalized_city, f"{normalized_city}市", f"{normalized_city}区", f"{normalized_city}县"}:
+                score += 160
+            if query_norm and query_norm in full_norm:
+                score += 90
+            if query_norm and full_norm in query_norm:
+                score += 50
+            for term in query_terms:
+                t_norm = _normalize_match_text(term)
+                if t_norm and t_norm in full_norm:
+                    score += 12
+            if _is_poi_row(row):
+                score -= 60
+            return score
+
+        best = max(
+            enumerate(candidate_rows[:40]),
+            key=lambda x: _score_city(x[1] if isinstance(x[1], dict) else {}, x[0]),
+        )[1]
+
+        local_name = str(best.get("localName") or best.get("name") or normalized_city).strip()
+        city_id = str(best.get("cityId") or "").strip()
+        if not city_id:
+            return results
+
+        redirect_url = f"https://tianqi.moji.com/api/redirect/{city_id}"
+        page_resp = requests.get(redirect_url, headers=headers, timeout=10, allow_redirects=True)
+        if page_resp.status_code != 200:
+            return results
+        moji_url = str(page_resp.url or redirect_url)
+
+        soup = BeautifulSoup(page_resp.text, "html.parser")
+        temp_node = soup.select_one(".wea_weather em")
+        condition_node = soup.select_one(".wea_weather b")
+        update_node = soup.select_one(".info_uptime")
+        humidity_node = None
+        for span in soup.select(".wea_about span"):
+            txt = span.get_text(" ", strip=True)
+            if "湿度" in txt:
+                humidity_node = txt
+                break
+        aqi_node = soup.select_one(".wea_alert em")
+
+        temp_text = temp_node.get_text(" ", strip=True) if temp_node else ""
+        condition_text = condition_node.get_text(" ", strip=True) if condition_node else ""
+        update_text = update_node.get_text(" ", strip=True) if update_node else ""
+        aqi_text = aqi_node.get_text(" ", strip=True) if aqi_node else ""
+
+        if not (temp_text or condition_text):
+            return results
+
+        snippet_parts: List[str] = []
+        if temp_text:
+            snippet_parts.append(f"温度: {temp_text}°C")
+        if condition_text:
+            snippet_parts.append(f"天气: {condition_text}")
+        if humidity_node:
+            snippet_parts.append(humidity_node)
+        if aqi_text:
+            snippet_parts.append(f"AQI: {aqi_text}")
+        if update_text:
+            snippet_parts.append(update_text)
+
+        results.append({
+            "type": "web",
+            "title": f"{local_name} 实时天气",
+            "link": moji_url,
+            "snippet": " | ".join(snippet_parts),
+            "source": "墨迹天气",
+            "date": update_text.replace("更新", "").strip(),
+            "provider": "moji",
+        })
     except Exception as e:
-        print(f"⚠️ [Weather Tool] Failed: {e}")
+        print(f"⚠️ [Weather Tool/Moji] Failed: {e}")
+
     return results
 
 
@@ -1134,73 +1505,288 @@ def tool_get_stock(query: str) -> List[dict]:
     results = []
     print(f"📈 [Stock Tool] Analyzing query: {query}")
     try:
-        # 1. 简单的正则匹配股票代码 (支持 sh/sz/hk/us)
-        # 如果用户输入 "贵州茅台股价"，这里需要先有一个 Search 步骤去换取代码，
-        # 如果缺少市场前缀，先通过 suggest 接口补全
-        # 这里做一个简化策略：如果包含中文，先去 suggest 接口拿代码
+        headers = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"}
+        raw_query = str(query or "").strip()
+        cleaned_query = re.sub(
+            r"(现在|当前|今日|最新|实时|公司|股价|股票|行情|价格|是多少|多少|呢|请问|想知道|查一下|看一下|一下|一下子)",
+            " ",
+            raw_query,
+        )
+        cleaned_query = re.sub(r"[，,。.!！?？;；:：]", " ", cleaned_query)
+        cleaned_query = re.sub(r"\s{2,}", " ", cleaned_query).strip()
+        if not cleaned_query:
+            cleaned_query = raw_query
 
-        stock_code = ""
-        market = ""
+        direct_code = ""
+        direct_name = cleaned_query
+        direct_market = ""
 
-        # 匹配股票代码（例如sh600519 / sz000001 / 600519 / AAPL）
-        code_match = re.search(r"\b(?:sh|sz|hk|us)?\d{5,6}\b", query.lower())
-        ticker_match = re.search(r"\b[A-Z]{2,6}\b", query)
+        code_match = re.search(r"\b(?:sh|sz|hk)?\d{5,6}\b", raw_query.lower())
+        us_match = re.search(r"\b[A-Za-z]{1,6}\b", raw_query)
         if code_match:
-            code = code_match.group(0)
-            if code.startswith(("sh", "sz", "hk", "us")):
-                stock_code = code
-            else:
-                stock_code = f"sh{code}" if code.startswith("6") else f"sz{code}"
-        elif ticker_match and len(query) <= 10:
-            stock_code = ticker_match.group(0).lower()
+            direct_code = code_match.group(0).lower()
+            if direct_code.isdigit():
+                if len(direct_code) == 6:
+                    direct_code = ("sh" if direct_code.startswith("6") else "sz") + direct_code
+                elif len(direct_code) == 5:
+                    direct_code = "hk" + direct_code
+        elif us_match and len(raw_query.strip()) <= 16:
+            token = us_match.group(0).lower()
+            if token not in {"price", "stock", "quote", "today", "now"}:
+                direct_code = f"gb_{token}"
+                direct_name = us_match.group(0).upper()
+                direct_market = "41"
 
-        # 使用新浪 Suggest 接口获取代码
-        suggest_url = f"https://suggest3.sinajs.cn/suggest/type=&key={urllib.parse.quote(query)}&name=suggestdata_{int(uuid4().int % 10000)}"
-        # headers = {"Referer": "https://finance.sina.com.cn/"} # 这里的 Referer 不是必须的，但加上更好
-        resp = requests.get(suggest_url, timeout=5)
+        def _normalize_stock_code(raw_code: str, market_hint: str = "") -> str:
+            code = str(raw_code or "").strip().lower()
+            if not code:
+                return ""
+            if code.startswith(("sh", "sz", "hk", "gb_", "hf_", "nf_")):
+                return code
+            if code.startswith("us") and len(code) > 2:
+                return f"gb_{code[2:]}"
+            if code.isdigit():
+                if len(code) == 6:
+                    return ("sh" if code.startswith("6") else "sz") + code
+                if len(code) == 5:
+                    return "hk" + code
+            if re.fullmatch(r"[a-z]{1,6}", code):
+                if market_hint in {"41", "103"}:
+                    return f"gb_{code}"
+                return code
+            return code
 
-        if resp.status_code == 200:
-            # 格式: var suggestdata_xxx="贵州茅台,11,600519,sh600519,..."
+        candidates: List[Dict[str, Any]] = []
+        if direct_code:
+            candidates.append({"code": _normalize_stock_code(direct_code, direct_market), "name": direct_name, "score": 999})
+
+        query_candidates = [cleaned_query]
+        if cleaned_query != raw_query:
+            query_candidates.append(raw_query)
+
+        for q in query_candidates:
+            suggest_url = (
+                "https://suggest3.sinajs.cn/suggest/type=&key="
+                f"{urllib.parse.quote(q)}&name=suggestdata_{int(uuid4().int % 10000)}"
+            )
+            resp = requests.get(suggest_url, headers=headers, timeout=6)
+            if resp.status_code != 200:
+                continue
             match = re.search(r'="(.*?)"', resp.text)
-            if match and len(match.group(1)) > 5:
-        # 这里做一个简化策略：如果包含中文，先去 suggest 接口拿代码
-                data = match.group(1).split(',')
-                # data[3] 通常是带市场前缀的代码 (e.g. sh600519)
-                stock_code = data[3]
-                stock_name = data[0]
+            payload = match.group(1) if match else ""
+            if not payload:
+                continue
+            entries = [e for e in payload.split(";") if e.strip()]
+            query_terms = _extract_query_terms(cleaned_query, max_terms=8)
+            query_norm = _normalize_match_text(cleaned_query)
 
-        if stock_code:
-            # 2. 根据代码获取实时行情数据
-            hq_url = f"http://hq.sinajs.cn/list={stock_code}"
-            headers = {"Referer": "https://finance.sina.com.cn/"}
-            hq_resp = requests.get(hq_url, headers=headers, timeout=5)
-            # 格式: var hq_str_sh600519="贵州茅台,1788.00,..."
-            if hq_resp.status_code == 200:
-                content = hq_resp.text
-                val_match = re.search(r'="(.*?)"', content)
-                if val_match:
-                    vals = val_match.group(1).split(',')
-                    if len(vals) > 30:  # A股格式
-                        open_p, prev_close, price, high, low = vals[1], vals[2], vals[3], vals[4], vals[5]
-                        date, time = vals[30], vals[31]
-                        change = float(price) - float(prev_close)
-                        percent = (change / float(prev_close)) * 100
+            for idx, entry in enumerate(entries[:40]):
+                cols = entry.split(",")
+                if len(cols) < 4:
+                    continue
+                market = str(cols[1] if len(cols) > 1 else "").strip()
+                raw_code = str(cols[3] if len(cols) > 3 else cols[2]).strip()
+                primary_name = str(cols[0] if len(cols) > 0 else "").strip()
+                display_name = str(cols[4] if len(cols) > 4 else primary_name).strip() or primary_name
+                code = _normalize_stock_code(raw_code, market)
+                if not code:
+                    continue
 
-                        results.append({
-                            "title": f"{stock_name} ({stock_code}) Realtime Quote",
-                            "link": f"https://finance.sina.com.cn/realstock/company/{stock_code}/nc.shtml",
-                            "snippet": f"当前价格: ¥{price}\n涨跌幅: {percent:.2f}%\n涨跌额: {change:.2f}\n今开: {open_p} | 最高: {high} | 最低: {low}\n时间: {date} {time}"
-                        })
-                    elif len(vals) > 5:  # 美股/港股格式略有不同，做简单容错
-                        price = vals[1] if len(vals) > 1 else "N/A"
-                        results.append({
-                            "title": f"{stock_name} ({stock_code}) Realtime Quote",
-                            "link": f"https://finance.sina.com.cn",
-                            "snippet": f"最新价: {price} (fallback quote)"
-                        })
+                hay = _normalize_match_text(f"{primary_name} {display_name} {code}")
+                score = max(0, 50 - idx)
+                if query_norm and query_norm in hay:
+                    score += 90
+                for t in query_terms:
+                    tn = _normalize_match_text(t)
+                    if tn and tn in hay:
+                        score += 10
+                if "指数" in (primary_name + display_name) and "指数" not in cleaned_query:
+                    score -= 45
+                if "etf" in (primary_name + display_name).lower() and "etf" not in cleaned_query.lower():
+                    score -= 20
+                if market in {"11", "12", "31", "41", "71", "73", "103"}:
+                    score += 6
+
+                candidates.append({
+                    "code": code,
+                    "name": display_name or primary_name or code,
+                    "score": score,
+                })
+
+        if not candidates:
+            return results
+
+        best = max(candidates, key=lambda x: float(x.get("score", 0)))
+        stock_code = str(best.get("code") or "").strip()
+        stock_name = str(best.get("name") or stock_code).strip()
+        if not stock_code:
+            return results
+
+        query_codes = [stock_code]
+        if stock_code.startswith("hk"):
+            query_codes.append(f"rt_{stock_code}")
+
+        content = ""
+        for c in query_codes:
+            hq_url = f"http://hq.sinajs.cn/list={c}"
+            hq_resp = requests.get(hq_url, headers=headers, timeout=6)
+            if hq_resp.status_code != 200:
+                continue
+            val_match = re.search(r'="(.*?)"', hq_resp.text)
+            if val_match and val_match.group(1).strip():
+                content = val_match.group(1).strip()
+                stock_code = c
+                break
+
+        if not content:
+            return results
+
+        vals = content.split(",")
+        source_link = "https://finance.sina.com.cn/"
+        source_date = ""
+        snippet = ""
+
+        if stock_code.startswith(("sh", "sz")) and len(vals) > 31:
+            open_p = vals[1]
+            prev_close = vals[2]
+            price = vals[3]
+            high = vals[4]
+            low = vals[5]
+            date = vals[30]
+            tm = vals[31]
+            source_date = f"{date} {tm}".strip()
+            try:
+                change = float(price) - float(prev_close)
+                percent = (change / float(prev_close)) * 100 if float(prev_close) else 0.0
+                snippet = (
+                    f"最新价: {price} | 涨跌: {change:.3f} ({percent:.2f}%) | "
+                    f"今开: {open_p} | 高/低: {high}/{low} | 时间: {source_date}"
+                )
+            except Exception:
+                snippet = f"最新价: {price} | 今开: {open_p} | 高/低: {high}/{low} | 时间: {source_date}"
+            source_link = f"https://finance.sina.com.cn/realstock/company/{stock_code}/nc.shtml"
+        elif stock_code.startswith("rt_hk") and len(vals) > 18:
+            name_cn = vals[1] or stock_name
+            open_p = vals[2]
+            prev_close = vals[3]
+            high = vals[4]
+            low = vals[5]
+            price = vals[6]
+            change = vals[7]
+            pct = vals[8]
+            date = vals[17] if len(vals) > 17 else ""
+            tm = vals[18] if len(vals) > 18 else ""
+            source_date = f"{date} {tm}".strip()
+            snippet = (
+                f"最新价: {price} HKD | 涨跌: {change} ({pct}%) | "
+                f"今开: {open_p} | 高/低: {high}/{low} | 时间: {source_date}"
+            )
+            stock_name = name_cn
+            source_link = f"https://stock.finance.sina.com.cn/hkstock/quotes/{stock_code.replace('rt_hk', '')}.html"
+        elif stock_code.startswith("hk") and len(vals) > 17:
+            name_cn = vals[1] or stock_name
+            open_p = vals[2]
+            prev_close = vals[3]
+            high = vals[4]
+            low = vals[5]
+            price = vals[6]
+            change = vals[7]
+            pct = vals[8]
+            date = vals[17] if len(vals) > 17 else ""
+            tm = vals[18] if len(vals) > 18 else ""
+            source_date = f"{date} {tm}".strip()
+            snippet = (
+                f"最新价: {price} HKD | 涨跌: {change} ({pct}%) | "
+                f"今开: {open_p} | 高/低: {high}/{low} | 时间: {source_date}"
+            )
+            stock_name = name_cn
+            source_link = f"https://stock.finance.sina.com.cn/hkstock/quotes/{stock_code.replace('hk', '')}.html"
+        elif stock_code.startswith("gb_") and len(vals) > 7:
+            name_cn = vals[0] or stock_name
+            price = vals[1] if len(vals) > 1 else ""
+            pct = vals[2] if len(vals) > 2 else ""
+            dt = vals[3] if len(vals) > 3 else ""
+            change = vals[4] if len(vals) > 4 else ""
+            high = vals[5] if len(vals) > 5 else ""
+            low = vals[6] if len(vals) > 6 else ""
+            source_date = dt
+            snippet = (
+                f"最新价: {price} USD | 涨跌: {change} ({pct}%) | "
+                f"高/低: {high}/{low} | 时间: {source_date}"
+            )
+            stock_name = name_cn
+            source_link = f"https://finance.sina.com.cn/stock/usstock/c/{stock_code}.html"
+        else:
+            # 兜底格式
+            price = vals[1] if len(vals) > 1 else (vals[0] if vals else "N/A")
+            snippet = f"最新价: {price}"
+
+        results.append({
+            "type": "web",
+            "title": f"{stock_name} 实时报价",
+            "link": source_link,
+            "snippet": snippet,
+            "source": "新浪财经",
+            "date": source_date,
+            "provider": "sina-stock",
+        })
 
     except Exception as e:
         print(f"⚠️ [Stock Tool] Failed: {e}")
+
+    return results
+
+
+def tool_get_gold_price(query: str = "") -> List[dict]:
+    """
+    Get realtime gold quote from Sina futures interface.
+    Returns direct quote snippets with source timestamp.
+    """
+    import requests
+
+    results: List[dict] = []
+    print(f"🥇 [Gold Tool] Query: {query}")
+    try:
+        headers = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"}
+        # 伦敦金（现货）+ 纽约黄金（期货）双源，提高稳定性。
+        codes = ["hf_XAU", "hf_GC"]
+        for code in codes:
+            resp = requests.get(f"https://hq.sinajs.cn/list={code}", headers=headers, timeout=6)
+            if resp.status_code != 200:
+                continue
+            match = re.search(r'="(.*?)"', resp.text)
+            if not match or not match.group(1):
+                continue
+            vals = match.group(1).split(",")
+            if len(vals) < 14:
+                continue
+            latest = (vals[0] or "").strip()
+            previous = (vals[1] or "").strip()
+            high = (vals[4] or "").strip() if len(vals) > 4 else ""
+            low = (vals[5] or "").strip() if len(vals) > 5 else ""
+            quote_time = (vals[6] or "").strip() if len(vals) > 6 else ""
+            quote_date = (vals[12] or "").strip() if len(vals) > 12 else ""
+            name = (vals[13] or code).strip() if len(vals) > 13 else code
+            if not latest:
+                continue
+            snippet_parts = [f"最新报价: {latest}"]
+            if previous:
+                snippet_parts.append(f"前收: {previous}")
+            if high and low:
+                snippet_parts.append(f"高/低: {high}/{low}")
+            if quote_date or quote_time:
+                snippet_parts.append(f"时间: {quote_date} {quote_time}".strip())
+            results.append({
+                "type": "web",
+                "title": f"{name} 实时报价",
+                "link": f"https://finance.sina.com.cn/futures/quotes/{code}.shtml",
+                "snippet": " | ".join(snippet_parts),
+                "date": f"{quote_date} {quote_time}".strip(),
+                "source": "新浪财经",
+                "provider": "sina-gold",
+            })
+    except Exception as e:
+        print(f"⚠️ [Gold Tool] Failed: {e}")
 
     return results
 
@@ -1212,85 +1798,52 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
     """
     Smart web search routing:
     1. Intent tools (weather/stock) when applicable
-    2. Bing API (if key exists)
-    3. SerpAPI (if key exists)
-    4. Fallback scraping
+    2. Serper API only
     """
-    results = []
+    # 先清理“写作指令/字数约束”噪声，提升检索命中。
+    raw_query = str(query or "")
+    query = re.sub(r"(至少|不少于|不低于|最多|不超过|不多于|不高于)?\s*\d{2,5}\s*字", " ", raw_query)
+    query = re.sub(r"(请|帮我|麻烦)?(介绍一下|介绍|总结一下|总结|写一篇|写一段|分析一下|分析)", " ", query)
+    query = re.sub(r"[，,。.!！?？;；:：]+", " ", query)
+    query = re.sub(r"\s{2,}", " ", query).strip() or raw_query
 
     # --- 1. 首先尝试直接工具（天气/股票）---
     q_lower = query.lower()
     if "天气" in q_lower or "weather" in q_lower or "气温" in q_lower:
-        # 调用注册的工具（tool）
-        # 解析之前规范化查询
-        city = query.replace("天气", "").replace("气温", "").replace("weather", "").strip()
-        if not city: city = "Shanghai"  # 默认
-
+        city = _normalize_weather_city_name(query, default="北京")
         weather_res = tool_get_weather(city)
-        if weather_res:
-            return weather_res  # 如果命中结构化数据，直接返回，不再搜索网页
+        # 用户要求天气仅用墨迹来源：无论是否命中，都不回退其他天气来源。
+        return weather_res
 
     if any(k in q_lower for k in ["股价", "股票", "行情", "stock", "price"]):
         stock_res = tool_get_stock(query)
         if stock_res:
             return stock_res
 
-    # --- 2. 官方 API 搜索 ---
+    if any(k in q_lower for k in ["金价", "黄金", "现货金", "伦敦金", "comex gold", "gold"]):
+        gold_res = tool_get_gold_price(query)
+        if gold_res:
+            return gold_res
 
-    # [选项 A] Bing 网页搜索 API
-    if BING_SUBSCRIPTION_KEY:
-        print(f"🔍 [Search] Using Official Bing API for: {query}")
-        try:
-            import requests
-            endpoint = "https://api.bing.microsoft.com/v7.0/search"
-            headers = {"Ocp-Apim-Subscription-Key": BING_SUBSCRIPTION_KEY}
-            params = {"q": query, "count": max_results, "mkt": "zh-CN"}
+    print(f"🔍 [Search] Trying provider=serper query={query}")
+    try:
+        freshness_keywords = ["现在", "当前", "实时", "最新", "today", "now", "今日", "刚刚", "近况"]
+        prefer_fresh = any(k in q_lower for k in freshness_keywords)
+        effective_query = query
+        if prefer_fresh:
+            now_stamp = datetime.now().strftime("%Y-%m-%d")
+            effective_query = f"{query} {now_stamp} 最新"
 
-            resp = requests.get(endpoint, headers=headers, params=params, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                web_pages = data.get("webPages", {}).get("value", [])
-                for page in web_pages:
-                    results.append({
-                        "title": page.get("name"),
-                        "link": page.get("url"),
-                        "snippet": page.get("snippet", "")
-                    })
-                return results  # Success: return immediately
-            else:
-                print(f"⚠️ [Bing API] Error {resp.status_code}: {resp.text}")
-        except Exception as e:
-            print(f"⚠️ [Bing API] Exception: {e}")
+        provider_rows = _search_with_serper(effective_query, max_results=max_results * 2, prefer_fresh=prefer_fresh)
+        picked = _post_process_search_results(provider_rows, query, max_results=max_results)
+        if picked:
+            print(f"✅ [Search] provider=serper results={len(picked)}")
+            return picked
+    except Exception as e:
+        print(f"⚠️ [Search] provider=serper failed: {e}")
 
-    # [选项B] SerpAPI
-    elif SERPAPI_API_KEY:
-        print(f"🔍 [Search] Using SerpAPI (Bing Engine) for: {query}")
-        try:
-            import requests
-            # 优先使用 Bing 引擎，因为国内内容更全
-            params = {
-                "engine": "bing",
-                "q": query,
-                "api_key": SERPAPI_API_KEY,
-                "cc": "CN"  # Country Code
-            }
-            resp = requests.get("https://serpapi.com/search", params=params, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                organic = data.get("organic_results", [])
-                for res in organic[:max_results]:
-                    results.append({
-                        "title": res.get("title"),
-                        "link": res.get("link"),
-                        "snippet": res.get("snippet", "")
-                    })
-                return results
-        except Exception as e:
-            print(f"⚠️ [SerpAPI] Exception: {e}")
-
-    # --- 3. 爬虫兜底 (Fallback) ---
-    print(f"🔍 [Search] Fallback to Web Scraping (Bing/Sogou)...")
-    return _perform_web_search_scraping(query, max_results)
+    print("⚠️ [Search] Serper returned no usable results.")
+    return []
 
 
 def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
@@ -1858,7 +2411,21 @@ async def chat(
 
     def _is_stock_query(text: str) -> bool:
         t = (text or "").lower()
-        return any(k in t for k in ["股票", "股价", "行情", "stock", "price", "涨跌"])
+        if any(k in t for k in ["股票", "股价", "行情", "stock", "ticker", "涨跌"]):
+            return True
+        if "price" in t and re.search(r"\b(?:sh|sz|hk|us)?\d{5,6}\b|\b[a-z]{1,5}\b", t):
+            return True
+        return False
+
+    def _is_gold_query(text: str) -> bool:
+        t = (text or "").lower()
+        return any(k in t for k in ["金价", "黄金", "伦敦金", "现货金", "comex gold", "gold"])
+
+    def _is_realtime_sensitive_query(text: str) -> bool:
+        t = (text or "").lower()
+        freshness_words = ["现在", "当前", "实时", "最新", "today", "now", "今日", "刚刚", "最新价格", "现价"]
+        domain_words = ["天气", "气温", "温度", "股票", "股价", "行情", "黄金", "金价", "汇率", "油价", "指数"]
+        return any(k in t for k in freshness_words) and any(k in t for k in domain_words)
 
     def _is_report_write_prompt(text: str) -> bool:
         t = text or ""
@@ -1875,13 +2442,158 @@ async def chat(
             m2 = re.search(r"在([\u4e00-\u9fa5]{2,6})", src)
             if m2:
                 candidates.append(m2.group(1))
-        return candidates[0] if candidates else "北京"
+        for cand in candidates:
+            normalized = _normalize_weather_city_name(cand)
+            if normalized:
+                return normalized
+        fallback = _normalize_weather_city_name(text, default="北京")
+        return fallback or "北京"
 
     def _normalize_stock_query(text: str) -> str:
         if not text:
             return ""
         q = text.replace("股票", "").replace("股价", "").replace("行情", "").replace("价格", "").strip()
         return q or text
+
+    def _extract_length_requirement(text: str) -> Optional[Dict[str, int]]:
+        src = str(text or "")
+        if not src:
+            return None
+
+        # 至少/不低于 N 字
+        m_min = re.search(r"(至少|不少于|不低于)\s*(\d{2,5})\s*字", src)
+        if m_min:
+            return {"kind": 1, "value": int(m_min.group(2))}
+
+        # 最多/不超过 N 字
+        m_max = re.search(r"(最多|不超过|不多于|不高于)\s*(\d{2,5})\s*字", src)
+        if m_max:
+            return {"kind": 2, "value": int(m_max.group(2))}
+
+        # N字（默认视为目标字数）
+        m_exact = re.search(r"(\d{2,5})\s*字", src)
+        if m_exact:
+            return {"kind": 3, "value": int(m_exact.group(1))}
+
+        return None
+
+    def _count_visible_chars(text: str) -> int:
+        # 近似“字数”：去掉空白后计数，兼容中英文混排。
+        return len(re.sub(r"\s+", "", str(text or "")))
+
+    def _is_length_requirement_satisfied(text: str, req: Optional[Dict[str, int]]) -> bool:
+        if not req:
+            return True
+        n = _count_visible_chars(text)
+        val = int(req.get("value", 0))
+        kind = int(req.get("kind", 0))
+        if kind == 1:  # min
+            return n >= val
+        if kind == 2:  # max
+            return n <= val
+        if kind == 3:  # exact-ish
+            tolerance = max(30, int(val * 0.12))
+            return (val - tolerance) <= n <= (val + tolerance)
+        return True
+
+    def _build_length_rule_text(req: Optional[Dict[str, int]]) -> str:
+        if not req:
+            return ""
+        val = int(req.get("value", 0))
+        kind = int(req.get("kind", 0))
+        if kind == 1:
+            return f"必须不少于{val}字。"
+        if kind == 2:
+            return f"必须不超过{val}字。"
+        if kind == 3:
+            return f"目标字数约{val}字（允许±12%）。"
+        return ""
+
+    def _sanitize_search_query(text: str) -> str:
+        q = str(text or "")
+        if not q:
+            return q
+        # 移除常见生成约束（字数、语气类）避免污染检索词。
+        q = re.sub(r"(至少|不少于|不低于|最多|不超过|不多于|不高于)?\s*\d{2,5}\s*字", " ", q)
+        q = re.sub(r"(请|帮我|麻烦)?(介绍一下|介绍|总结一下|总结|写一篇|写一段|分析一下|分析)", " ", q)
+        q = re.sub(r"[，,。.!！?？;；:：]+", " ", q)
+        q = re.sub(r"\s{2,}", " ", q).strip()
+        return q or str(text or "")
+
+    def _extract_recent_user_queries(history_text: str, limit: int = 6) -> List[str]:
+        rows: List[str] = []
+        for line in str(history_text or "").splitlines():
+            raw = line.strip()
+            if not raw.lower().startswith("user:"):
+                continue
+            content = _sanitize_history_content(raw[5:].strip())
+            if content:
+                rows.append(content)
+        if len(rows) > limit:
+            rows = rows[-limit:]
+        return rows
+
+    def _detect_query_domain(text: str) -> str:
+        if _is_weather_query(text):
+            return "weather"
+        if _is_stock_query(text):
+            return "stock"
+        if _is_gold_query(text):
+            return "gold"
+        return ""
+
+    def _is_explicit_followup_query(text: str) -> bool:
+        if _looks_like_followup_turn(text):
+            return True
+        t = _normalize_match_text(text)
+        if not t:
+            return False
+        if re.search(r"(呢|那呢|然后呢|继续|接着|再说|再讲|再来点|同上|上一条|上面)$", t):
+            return True
+        return t in {"今天呢", "现在呢", "然后", "继续", "还有呢", "那这个呢"}
+
+    def _build_contextual_search_query(user_text: str, history_text: str) -> str:
+        current = _sanitize_search_query(user_text)
+        if not current:
+            return str(user_text or "").strip()
+
+        current_norm = _normalize_match_text(current)
+        current_domain = _detect_query_domain(current)
+        explicit_followup = _is_explicit_followup_query(current)
+        short_ambiguous = (
+            len(current_norm) <= 8
+            and any(k in current_norm for k in ["呢", "如何", "怎么样", "多少", "几个", "多大", "几点"])
+            and not current_domain
+        )
+        needs_context = explicit_followup or short_ambiguous
+        if not needs_context:
+            return current
+
+        recent_users = _extract_recent_user_queries(history_text, limit=8)
+        anchor = ""
+        for candidate in reversed(recent_users):
+            if _normalize_match_text(candidate) == _normalize_match_text(current):
+                continue
+            if _looks_like_followup_turn(candidate):
+                continue
+            anchor = _sanitize_search_query(candidate)
+            if anchor:
+                break
+
+        if not anchor:
+            return current
+
+        anchor_domain = _detect_query_domain(anchor)
+        if current_domain and anchor_domain and current_domain != anchor_domain:
+            return current
+
+        if current_domain and not explicit_followup:
+            return current
+
+        merged_query = f"{anchor} {current}"
+        merged_query = re.sub(r"\s{2,}", " ", merged_query).strip()
+        # 仅在追问场景拼接，且保留长度上限，避免污染跨主题检索。
+        return merged_query[:160] if merged_query else current
     async def search_response_generator():
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
@@ -1891,22 +2603,39 @@ async def chat(
         try:
             shared_ctx = await _get_shared_context_async("search", history_limit=FAST_CHAT_HISTORY_LIMIT)
             history_text = shared_ctx.get("history_text", "")
+            now_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            contextual_user_query = _build_contextual_search_query(message, history_text)
 
-            is_weather_intent = _is_weather_query(message)
-            is_stock_intent = _is_stock_query(message)
+            intent_probe = f"{message} {contextual_user_query}".strip()
+            message_domain = _detect_query_domain(message)
+            probe_domain = _detect_query_domain(intent_probe)
+            intent_domain = message_domain or probe_domain
+
+            is_weather_intent = intent_domain == "weather"
+            is_stock_intent = intent_domain == "stock"
+            is_gold_intent = intent_domain == "gold"
+            is_realtime_query = _is_realtime_sensitive_query(message) or (
+                _is_explicit_followup_query(message) and _is_realtime_sensitive_query(intent_probe)
+            )
+            length_req = _extract_length_requirement(message)
 
             if is_weather_intent:
-                city = _extract_city(message, history_text)
+                city_probe = message if message_domain == "weather" else intent_probe
+                city = _extract_city(city_probe, history_text)
                 search_query = f"{city} 天气"
             elif is_stock_intent:
-                search_query = _normalize_stock_query(message)
+                search_query = contextual_user_query or message
+            elif is_gold_intent:
+                search_query = "黄金 实时价格"
             else:
-                search_query = message
+                search_query = contextual_user_query or message
+
+            search_query = _sanitize_search_query(search_query)
 
             yield json.dumps({"t": "c", "v": f"> 正在搜索：{search_query}\n\n"}, ensure_ascii=False) + "\n"
 
             raw_results = await asyncio.to_thread(perform_web_search, search_query)
-            search_results = [r for r in raw_results if r.get("link") != "#"][:6]
+            search_results = _post_process_search_results(raw_results, search_query, max_results=6)
 
             if _is_cancelled():
                 return
@@ -1916,45 +2645,128 @@ async def chat(
                 full_reply_clean = no_result_text
                 yield json.dumps({"t": "c", "v": no_result_text}, ensure_ascii=False) + "\n"
             else:
-                context_lines = []
-                for i, item in enumerate(search_results[:5], start=1):
-                    title = str(item.get("title") or "").strip()
-                    snippet = str(item.get("snippet") or "").strip()
-                    link = str(item.get("link") or "").strip()
-                    context_lines.append(f"[{i}] {title}\n{snippet}\n来源: {link}")
+                skip_llm_generation = False
+                search_sources = []
+                for item in search_results[:5]:
+                    source_date = str(item.get("date") or "").strip()
+                    source_name = str(item.get("source") or "").strip()
+                    search_sources.append({
+                        "type": "web",
+                        "title": str(item.get("title") or "").strip(),
+                        "link": str(item.get("link") or "").strip(),
+                        "snippet": str(item.get("snippet") or "").strip(),
+                        "date": source_date,
+                        "source": source_name,
+                    })
+                if search_sources:
+                    yield json.dumps({"t": "m", "sid": session_id, "src": search_sources}, ensure_ascii=False) + "\n"
 
-                search_context = "\n\n".join(context_lines)
-                response_prompt = (
-                    "请基于以下检索结果，给出准确、简洁、可执行的回答。"
-                    "如果结果不足，请明确说明不确定性，不要编造。\n\n"
-                    f"用户问题:\n{message}\n\n"
-                    f"检索结果:\n{search_context}"
-                )
-                response_prompt = _wrap_prompt_with_shared_context(
-                    response_prompt,
-                    shared_ctx,
-                    user_message=message,
-                )
-
-                async for chunk in ask_llm_stream_async(
-                    response_prompt,
-                    model_type=model_backend,
-                    stop_checker=_is_cancelled,
-                ):
-                    if chunk:
-                        full_reply_clean += chunk
-                        out = push_chunk(chunk)
-                        if out:
-                            yield json.dumps({"t": "c", "v": out}, ensure_ascii=False) + "\n"
-                            await asyncio.sleep(0)
-
-                out = flush_chunk()
-                if out:
-                    for part in _split_text(out):
+                # 对“实时数值型短问”直接返回工具结果，避免 LLM 二次改写数值。
+                needs_analysis = any(k in (message or "") for k in ["分析", "原因", "预测", "趋势", "影响", "解读", "建议", "展望"])
+                if (is_weather_intent or is_stock_intent or is_gold_intent) and not needs_analysis:
+                    lines = ["以下为实时检索结果："]
+                    for i, item in enumerate(search_results[:3], start=1):
+                        title = str(item.get("title") or "").strip()
+                        snippet = str(item.get("snippet") or "").strip()
+                        source_name = str(item.get("source") or "").strip()
+                        source_date = str(item.get("date") or "").strip()
+                        link = str(item.get("link") or "").strip()
+                        meta = " | ".join([m for m in [source_name, source_date] if m])
+                        lines.append(f"{i}. {title}")
+                        if snippet:
+                            lines.append(f"   {snippet}")
+                        if meta:
+                            lines.append(f"   {meta}")
+                        if link:
+                            lines.append(f"   来源: {link}")
+                    full_reply_clean = "\n".join(lines).strip()
+                    for part in _split_text(full_reply_clean):
                         if _is_cancelled():
                             return
                         yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
                         await asyncio.sleep(0)
+                    if _is_cancelled():
+                        return
+                    skip_llm_generation = True
+
+                if not skip_llm_generation:
+                    context_lines = []
+                    for i, item in enumerate(search_results[:5], start=1):
+                        title = str(item.get("title") or "").strip()
+                        snippet = str(item.get("snippet") or "").strip()
+                        link = str(item.get("link") or "").strip()
+                        source_date = str(item.get("date") or "").strip()
+                        source_name = str(item.get("source") or "").strip()
+                        extra_tags = []
+                        if source_name:
+                            extra_tags.append(f"来源机构: {source_name}")
+                        if source_date:
+                            extra_tags.append(f"发布时间: {source_date}")
+                        extra_line = ("\n" + " | ".join(extra_tags)) if extra_tags else ""
+                        context_lines.append(f"[{i}] {title}\n{snippet}\n来源: {link}{extra_line}")
+
+                    search_context = "\n\n".join(context_lines)
+                    length_rule_text = _build_length_rule_text(length_req)
+                    response_prompt = (
+                        "你是企业联网检索助手。"
+                        "只能基于下方“检索结果”回答，不要使用未提供的事实。\n"
+                        "回答规则：\n"
+                        "1) 先给结论，再给2-5条关键依据；\n"
+                        "2) 每条关键事实后标注来源编号，如[1][3]；\n"
+                        "3) 若证据不足或互相冲突，明确写“信息不足/信息冲突”；\n"
+                        "4) 不要编造来源，不要输出与问题无关内容；\n"
+                        "5) 必须完整满足用户原问题里的硬性要求（字数、格式、语气、输出结构）。\n"
+                        f"当前本地时间: {now_local}\n"
+                        f"字数要求: {length_rule_text or '未指定'}\n"
+                        f"时效性要求: {'高（优先最新信息）' if is_realtime_query else '普通'}\n\n"
+                        f"用户问题:\n{message}\n\n"
+                        f"检索结果:\n{search_context}\n\n"
+                        "请使用中文回答。"
+                    )
+                    if personalization_system_prompt:
+                        response_prompt = f"{personalization_system_prompt}\n\n{response_prompt}"
+                    # 若用户明确给出字数约束，改为“先整段生成 -> 校验 -> 必要时重写”，减少忽略约束的概率。
+                    if length_req:
+                        draft = await asyncio.to_thread(ask_llm, response_prompt, model_backend)
+                        final_answer = draft
+                        if not _is_length_requirement_satisfied(draft, length_req):
+                            revise_prompt = (
+                                "你上一版回答没有满足字数要求。请严格按要求重写，不要丢失关键信息。\n"
+                                f"字数要求: {length_rule_text}\n"
+                                "要求：保留引用编号格式 [1][2]，不要编造新来源。\n\n"
+                                f"用户问题:\n{message}\n\n"
+                                f"检索结果:\n{search_context}\n\n"
+                                f"上一版回答:\n{draft}\n\n"
+                                "请直接输出重写后的最终答案。"
+                            )
+                            final_answer = await asyncio.to_thread(ask_llm, revise_prompt, model_backend)
+
+                        full_reply_clean = str(final_answer or "")
+                        for part in _split_text(full_reply_clean):
+                            if _is_cancelled():
+                                return
+                            yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
+                            await asyncio.sleep(0)
+                    else:
+                        async for chunk in ask_llm_stream_async(
+                            response_prompt,
+                            model_type=model_backend,
+                            stop_checker=_is_cancelled,
+                        ):
+                            if chunk:
+                                full_reply_clean += chunk
+                                out = push_chunk(chunk)
+                                if out:
+                                    yield json.dumps({"t": "c", "v": out}, ensure_ascii=False) + "\n"
+                                    await asyncio.sleep(0)
+
+                        out = flush_chunk()
+                        if out:
+                            for part in _split_text(out):
+                                if _is_cancelled():
+                                    return
+                                yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
+                                await asyncio.sleep(0)
 
             if _is_cancelled():
                 return

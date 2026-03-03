@@ -3,7 +3,7 @@ import ThemeProvider from './context/ThemeContext';
 import GlobalStyles from './components/GlobalStyles';
 import LoadingScreen from './components/LoadingScreen';
 import ErrorBoundary from './components/ErrorBoundary';
-import { AUTH_TOKEN_KEY } from './api/apiClient';
+import { AUTH_TOKEN_KEY, AUTH_REFRESH_TOKEN_KEY } from './api/apiClient';
 
 const loadLandingPage = () => import('./pages/LandingPage');
 const loadCapabilitiesPage = () => import('./pages/CapabilitiesPage');
@@ -65,22 +65,34 @@ export default function App() {
       const { data } = supabase.auth.onAuthStateChange((event, session) => {
         const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
         if (!rememberUntil) return;
+        const localToken = String(localStorage.getItem(AUTH_TOKEN_KEY) || '');
+        const isSmsSessionToken = localToken.startsWith('sms-token-');
 
         if (rememberUntil <= Date.now()) {
           void supabase.auth.signOut();
           localStorage.removeItem(REMEMBER_UNTIL_KEY);
           localStorage.removeItem(AUTH_TOKEN_KEY);
+          localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
           setIsAuthenticated(false);
+          return;
+        }
+
+        // 验证码登录使用的是后端 sms-token，不应被 Supabase 事件覆盖或清空。
+        if (isSmsSessionToken) {
           return;
         }
 
         if (session?.access_token) {
           localStorage.setItem(AUTH_TOKEN_KEY, session.access_token);
+          if (session.refresh_token) {
+            localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, session.refresh_token);
+          }
           return;
         }
 
         if (event === 'SIGNED_OUT') {
           localStorage.removeItem(AUTH_TOKEN_KEY);
+          localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
           localStorage.removeItem(REMEMBER_UNTIL_KEY);
           setIsAuthenticated(false);
         }
@@ -120,6 +132,9 @@ export default function App() {
       const applySessionToken = (session) => {
         if (session?.access_token) {
           localStorage.setItem(AUTH_TOKEN_KEY, session.access_token);
+          if (session.refresh_token) {
+            localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, session.refresh_token);
+          }
           return true;
         }
         return false;
@@ -129,6 +144,8 @@ export default function App() {
         const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
         const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY);
         const hasAuthHint = rememberUntil > 0 || hasStoredToken;
+        const localTokenHint = String(localStorage.getItem(AUTH_TOKEN_KEY) || '');
+        const isSmsSessionToken = localTokenHint.startsWith('sms-token-');
 
         if (!hasAuthHint) {
           preloadPublicPage();
@@ -136,12 +153,13 @@ export default function App() {
           return;
         }
 
-        if (rememberUntil) {
+        if (rememberUntil && !isSmsSessionToken) {
           const supabase = await getSupabaseClient();
           if (rememberUntil <= Date.now()) {
             await supabase.auth.signOut();
             localStorage.removeItem(REMEMBER_UNTIL_KEY);
             localStorage.removeItem(AUTH_TOKEN_KEY);
+            localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
           } else {
             const { data } = await supabase.auth.getSession();
             const hasSessionToken = applySessionToken(data?.session);
@@ -169,6 +187,7 @@ export default function App() {
               }
             } else {
               localStorage.removeItem(AUTH_TOKEN_KEY);
+              localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
             }
           } catch (err) {
             console.warn('Token validation failed:', err);
@@ -176,6 +195,7 @@ export default function App() {
             const isAuthError = /401|not logged in|invalid session|missing token|jwt/i.test(message);
             if (isAuthError) {
               localStorage.removeItem(AUTH_TOKEN_KEY);
+              localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
             }
           }
         }
@@ -245,6 +265,7 @@ export default function App() {
 
   const handleLogout = () => {
     localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
     localStorage.removeItem(REMEMBER_UNTIL_KEY);
     void getSupabaseClient().then((supabase) => supabase.auth.signOut());
     setIsAuthenticated(false);

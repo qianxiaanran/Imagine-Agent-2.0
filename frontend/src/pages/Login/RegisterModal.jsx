@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { PartyPopper, Eye, EyeOff } from 'lucide-react';
 import Button from '../../components/Button';
 import authApi from '../../api/auth';
-import { AUTH_TOKEN_KEY } from '../../api/apiClient';
+import { AUTH_TOKEN_KEY, AUTH_REFRESH_TOKEN_KEY } from '../../api/apiClient';
 
 const RegisterModal = ({ isOpen, onClose, onSwitchToLogin, onRegisterSuccess }) => {
   const [showPassword, setShowPassword] = useState(false);
@@ -77,6 +77,11 @@ const RegisterModal = ({ isOpen, onClose, onSwitchToLogin, onRegisterSuccess }) 
       if (result.success) {
         if (result.token) {
           localStorage.setItem(AUTH_TOKEN_KEY, result.token);
+        }
+        if (result.refresh_token) {
+          localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, result.refresh_token);
+        } else {
+          localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
         }
         onRegisterSuccess();
       } else {
