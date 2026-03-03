@@ -4508,7 +4508,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   <div className="text-xs text-gray-400 dark:text-gray-500">未检测到可识别文本</div>
                 )}
                 {editingOcrLine !== null && ocrLines[editingOcrLine] && (
-                  <div className="flex flex-wrap items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+                  <div className="sticky top-0 z-20 flex flex-wrap items-center gap-2 p-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-800/95 backdrop-blur shadow-sm">
                     <span className="text-xs text-gray-400 dark:text-gray-500">纠正文本</span>
                     <input
                       value={editingOcrValue}
