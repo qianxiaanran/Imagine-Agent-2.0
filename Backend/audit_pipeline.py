@@ -63,6 +63,8 @@ AUDIT_HISTORY_LIMIT = int(os.getenv("AUDIT_HISTORY_LIMIT", "200"))
 AUDIT_FEEDBACK_LIMIT = int(os.getenv("AUDIT_FEEDBACK_LIMIT", "120"))
 ANOMALY_MIN_SAMPLES = int(os.getenv("AUDIT_ANOMALY_MIN_SAMPLES", "5"))
 ERP_PROVIDER = os.getenv("AUDIT_ERP_PROVIDER", "mock")
+AUDIT_ERP_SYNC_MODE = os.getenv("AUDIT_ERP_SYNC_MODE", "queue").strip().lower() or "queue"
+ERP_SYNC_MAX_RETRY = int(os.getenv("ERP_SYNC_MAX_RETRY", "3"))
 ERP_ACTION_TABLES = ["audit_erp_actions", "erp_audit_actions"]
 ERP_ACTIONS = {"approved", "rejected", "need_more"}
 RISK_WEIGHT = {"high": 25, "medium": 12, "low": 5}
@@ -74,29 +76,116 @@ AUDIT_INLINE_FALLBACK = os.getenv("AUDIT_INLINE_FALLBACK", "true").lower() not i
     "no",
     "off",
 }
+AUDIT_SELF_ORG_NAMES = [
+    str(item or "").strip()
+    for item in os.getenv(
+        "AUDIT_SELF_ORG_NAMES",
+        "天津纺织集团进出口股份有限公司,TIANJIN TEXTILE GROUP IMPORT AND EXPORT INC.",
+    ).split(",")
+    if str(item or "").strip()
+]
 
 DOC_TYPE_ALIASES = {
     "auto": "auto",
+    "trade_case": "trade_case",
     "invoice": "invoice",
     "contract": "contract",
     "payment": "payment",
     "expense": "expense",
+    "import_declaration": "import_declaration",
+    "export_declaration": "export_declaration",
+    "packing_list": "packing_list",
+    "bill_of_lading": "bill_of_lading",
+    "air_waybill": "air_waybill",
+    "certificate_of_origin": "certificate_of_origin",
     "\u81ea\u52a8\u8bc6\u522b": "auto",
+    "\u8d38\u6613\u5355\u636e\u5305": "trade_case",
     "\u53d1\u7968": "invoice",
     "\u5408\u540c": "contract",
     "\u4ed8\u6b3e\u5355": "payment",
     "\u62a5\u9500\u5355": "expense",
+    "\u62a5\u5173\u5355": "import_declaration",
+    "\u88c5\u7bb1\u5355": "packing_list",
+    "\u63d0\u5355": "bill_of_lading",
+    "\u8fd0\u5355": "air_waybill",
+    "\u539f\u4ea7\u5730\u8bc1": "certificate_of_origin",
+}
+DOC_TYPE_DISPLAY_NAMES = {
+    "auto": "自动识别",
+    "trade_case": "贸易单据包",
+    "invoice": "发票",
+    "contract": "合同",
+    "payment": "付款单",
+    "expense": "报销单",
+    "import_declaration": "进口报关单",
+    "export_declaration": "出口报关单",
+    "packing_list": "装箱单",
+    "bill_of_lading": "提单",
+    "air_waybill": "空运运单",
+    "certificate_of_origin": "原产地证",
+}
+DOC_SUBTYPE_DISPLAY_NAMES = {
+    "trade_case_generic": "贸易单据包",
+    "sales_contract": "销售合同",
+    "purchase_contract": "采购合同",
+    "sale_purchase_contract": "购销合同",
+    "framework_contract": "框架合同",
+    "service_contract": "服务合同",
+    "labor_contract": "劳务合同",
+    "lease_contract": "租赁合同",
+    "nda_agreement": "保密协议",
+    "contract_generic": "普通合同",
+    "vat_special_invoice": "增值税专用发票",
+    "vat_general_invoice": "增值税普通发票",
+    "proforma_invoice": "形式发票",
+    "sales_invoice": "销项发票",
+    "purchase_invoice": "进项发票",
+    "invoice_generic": "普通发票",
+    "import_customs_declaration": "进口报关单",
+    "export_customs_declaration": "出口报关单",
+    "import_packing_list": "进口装箱单",
+    "export_packing_list": "出口装箱单",
+    "packing_list_generic": "装箱单",
+    "master_bill_of_lading": "主提单",
+    "house_bill_of_lading": "分提单",
+    "ocean_bill_of_lading": "海运提单",
+    "bill_of_lading_generic": "提单",
+    "master_air_waybill": "主空运单",
+    "house_air_waybill": "分空运单",
+    "air_waybill_generic": "空运运单",
+    "coo_form_e": "原产地证（Form E）",
+    "coo_form_a": "原产地证（Form A）",
+    "certificate_of_origin_generic": "原产地证",
+    "advance_payment": "预付款",
+    "final_payment": "尾款",
+    "payment_generic": "付款单",
+    "travel_expense": "差旅报销",
+    "marketing_expense": "营销报销",
+    "expense_generic": "报销单",
 }
 
 STAGE_PROGRESS = {
     "pending": 0,
+    "pending_docs": 8,
     "ocr": 30,
     "extract": 55,
     "rules": 70,
     "ai": 85,
+    "review": 92,
+    "erp_pending_sync": 97,
     "report": 95,
     "done": 100,
     "failed": 100,
+}
+AUDIT_JOB_DB_UPDATE_FIELDS = {
+    "doc_type",
+    "model_type",
+    "status",
+    "progress",
+    "stage",
+    "error_message",
+    "file_url",
+    "file_name",
 }
 
 AUDIT_MODEL_ALIASES = {
@@ -106,8 +195,8 @@ AUDIT_MODEL_ALIASES = {
     "auto": "local",
 }
 
-OCR_REQUIRED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".pdf"}
-DIRECT_PARSE_EXTENSIONS = {".doc", ".docx", ".txt"}
+OCR_REQUIRED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+DIRECT_PARSE_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 AUDIT_PDF_FAST_PARSE_ENABLED = os.getenv("AUDIT_PDF_FAST_PARSE_ENABLED", "true").lower() not in {
     "0",
     "false",
@@ -122,18 +211,36 @@ AMOUNT_TOKEN_PATTERN = rf"(?<![\dA-Za-z])({AMOUNT_CAPTURE_PATTERN})(?![\dA-Za-z]
 
 AUDIT_JOBS: Dict[str, Dict[str, Any]] = {}
 AUDIT_LOCK = threading.Lock()
+AUDIT_CASES: Dict[str, Dict[str, Any]] = {}
+AUDIT_CASE_LOCK = threading.Lock()
+ERP_SYNC_QUEUE: Dict[str, Dict[str, Any]] = {}
+ERP_SYNC_LOCK = threading.Lock()
 _OCR_ENGINE: Optional[OCRManager] = None
 _OCR_ENGINE_LOCK = threading.Lock()
 
 
 class AuditFields(BaseModel):
     doc_type: Optional[str] = None
+    doc_subtype: Optional[str] = None
     total_amount: Optional[float] = None
     currency: Optional[str] = None
+    exchange_rate: Optional[float] = None
     invoice_no: Optional[str] = None
     tax_no: Optional[str] = None
     vendor: Optional[str] = None
     contract_no: Optional[str] = None
+    po_no: Optional[str] = None
+    declaration_no: Optional[str] = None
+    packing_list_no: Optional[str] = None
+    bl_awb_no: Optional[str] = None
+    hs_code: Optional[str] = None
+    incoterm: Optional[str] = None
+    origin_country: Optional[str] = None
+    destination_country: Optional[str] = None
+    port_loading: Optional[str] = None
+    port_discharge: Optional[str] = None
+    customs_duty_amount: Optional[float] = None
+    vat_amount: Optional[float] = None
     contract_date: Optional[str] = None
     invoice_date: Optional[str] = None
     payment_date: Optional[str] = None
@@ -170,6 +277,41 @@ def normalize_doc_type(doc_type: Optional[str]) -> str:
     if not key:
         return "auto"
     return DOC_TYPE_ALIASES.get(key, DOC_TYPE_ALIASES.get(key.lower(), "auto"))
+
+
+def _doc_type_display_name(doc_type: Optional[str]) -> str:
+    normalized = normalize_doc_type(doc_type)
+    return DOC_TYPE_DISPLAY_NAMES.get(normalized, normalized or "未知类型")
+
+
+def _doc_subtype_display_name(doc_subtype: Optional[str]) -> str:
+    code = _safe_text(doc_subtype)
+    if not code:
+        return ""
+    return DOC_SUBTYPE_DISPLAY_NAMES.get(code, code)
+
+
+def _append_doc_type_to_summary(summary: Optional[str], doc_type: Optional[str], doc_subtype: Optional[str] = None) -> str:
+    normalized = normalize_doc_type(doc_type)
+    label = _doc_type_display_name(normalized)
+    head = f"识别单据类型：{label}（{normalized}）" if normalized and normalized != "auto" else f"识别单据类型：{label}"
+    subtype_code = _safe_text(doc_subtype)
+    subtype_label = _doc_subtype_display_name(subtype_code)
+    if subtype_code:
+        head = f"{head}；细分类：{subtype_label}（{subtype_code}）" if subtype_label != subtype_code else f"{head}；细分类：{subtype_code}"
+    text = _safe_text(summary)
+    if not text:
+        return head
+    if "识别单据类型" in text:
+        if subtype_code and "细分类" not in text:
+            subtype_line = f"细分类：{subtype_label}（{subtype_code}）" if subtype_label != subtype_code else f"细分类：{subtype_code}"
+            return f"{text}\n{subtype_line}"
+        return text
+    if normalized and normalized != "auto" and normalized in text[:160]:
+        return text
+    if label and label in text[:160]:
+        return text
+    return f"{head}。\n{text}"
 
 
 def normalize_model_type(model_type: Optional[str]) -> str:
@@ -263,6 +405,218 @@ def _ensure_storage_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _normalize_case_id(case_id: Optional[str]) -> Optional[str]:
+    text = _safe_text(case_id)
+    if not text:
+        return None
+    # Keep case id URL-safe and deterministic for storage/indexing.
+    if re.fullmatch(r"[A-Za-z0-9_\-]{8,80}", text):
+        return text
+    return None
+
+
+def _ensure_case(case_id: str, user_id: str, doc_type: str = "auto") -> Dict[str, Any]:
+    now = _now_iso()
+    with AUDIT_CASE_LOCK:
+        case = AUDIT_CASES.get(case_id)
+        if case is None:
+            case = {
+                "case_id": case_id,
+                "user_id": user_id or "anonymous",
+                "doc_type_hint": normalize_doc_type(doc_type),
+                "created_at": now,
+                "updated_at": now,
+                "documents": [],
+                "latest_job_id": None,
+            }
+            AUDIT_CASES[case_id] = case
+        else:
+            case["updated_at"] = now
+            if user_id:
+                case["user_id"] = user_id
+            if doc_type:
+                case["doc_type_hint"] = normalize_doc_type(doc_type)
+        return case
+
+
+def _case_public_documents(case_id: Optional[str]) -> List[Dict[str, Any]]:
+    if not case_id:
+        return []
+    with AUDIT_CASE_LOCK:
+        case = AUDIT_CASES.get(case_id) or {}
+        documents = case.get("documents") or []
+        output: List[Dict[str, Any]] = []
+        for doc in documents:
+            if not isinstance(doc, dict):
+                continue
+            output.append(
+                {
+                    "job_id": doc.get("job_id"),
+                    "doc_id": doc.get("doc_id"),
+                    "file_name": doc.get("file_name"),
+                    "file_url": doc.get("file_url"),
+                    "doc_type": doc.get("doc_type"),
+                    "tag": doc.get("tag"),
+                    "extract_mode": doc.get("extract_mode"),
+                    "ocr_confidence": doc.get("ocr_confidence"),
+                    "status": doc.get("status"),
+                    "updated_at": doc.get("updated_at"),
+                }
+            )
+        return output
+
+
+def _detect_case_doc_tag(file_name: str, doc_type: str) -> str:
+    normalized_type = normalize_doc_type(doc_type)
+    direct_map = {
+        "contract": "contract",
+        "invoice": "invoice",
+        "payment": "payment",
+        "expense": "expense",
+        "packing_list": "packing_list",
+        "bill_of_lading": "bill_of_lading",
+        "air_waybill": "air_waybill",
+        "certificate_of_origin": "certificate_of_origin",
+        "import_declaration": "customs_declaration",
+        "export_declaration": "customs_declaration",
+    }
+    if normalized_type in direct_map:
+        return direct_map[normalized_type]
+
+    name = _safe_text(file_name).lower()
+    patterns = [
+        (("contract", "合同"), "contract"),
+        (("invoice", "发票"), "invoice"),
+        (("packing", "装箱"), "packing_list"),
+        (("bill of lading", "提单", "b/l"), "bill_of_lading"),
+        (("air waybill", "airwaybill", "awb", "运单"), "air_waybill"),
+        (("origin", "原产地"), "certificate_of_origin"),
+        (("declaration", "报关"), "customs_declaration"),
+        (("po", "purchase order", "采购单"), "purchase_order"),
+    ]
+    for keys, tag in patterns:
+        if any(k in name for k in keys):
+            return tag
+    return "other"
+
+
+def _add_case_document_entry(
+    *,
+    case_id: Optional[str],
+    job_id: str,
+    doc_id: str,
+    file_name: str,
+    file_url: str,
+    doc_type: str,
+) -> None:
+    if not case_id:
+        return
+    now = _now_iso()
+    with AUDIT_CASE_LOCK:
+        case = AUDIT_CASES.get(case_id)
+        if not case:
+            return
+        docs = case.setdefault("documents", [])
+        docs.append(
+            {
+                "job_id": job_id,
+                "doc_id": doc_id,
+                "file_name": file_name,
+                "file_url": file_url,
+                "doc_type": normalize_doc_type(doc_type),
+                "tag": _detect_case_doc_tag(file_name, doc_type),
+                "status": "uploaded",
+                "extract_mode": None,
+                "ocr_confidence": None,
+                "raw_text": "",
+                "updated_at": now,
+            }
+        )
+        case["updated_at"] = now
+        case["latest_job_id"] = job_id
+
+
+def _update_case_document_entry(
+    *,
+    case_id: Optional[str],
+    job_id: str,
+    doc_type: Optional[str] = None,
+    status: Optional[str] = None,
+    extract_mode: Optional[str] = None,
+    ocr_confidence: Optional[float] = None,
+    raw_text: Optional[str] = None,
+) -> None:
+    if not case_id:
+        return
+    now = _now_iso()
+    with AUDIT_CASE_LOCK:
+        case = AUDIT_CASES.get(case_id)
+        if not case:
+            return
+        docs = case.get("documents") or []
+        for doc in docs:
+            if not isinstance(doc, dict) or _safe_text(doc.get("job_id")) != _safe_text(job_id):
+                continue
+            if doc_type:
+                normalized_doc_type = normalize_doc_type(doc_type)
+                doc["doc_type"] = normalized_doc_type
+                doc["tag"] = _detect_case_doc_tag(doc.get("file_name") or "", normalized_doc_type)
+            if status:
+                doc["status"] = status
+            if extract_mode:
+                doc["extract_mode"] = extract_mode
+            if ocr_confidence is not None:
+                doc["ocr_confidence"] = ocr_confidence
+            if raw_text is not None:
+                doc["raw_text"] = raw_text
+            doc["updated_at"] = now
+            break
+        case["updated_at"] = now
+        case["latest_job_id"] = job_id
+
+
+def _build_case_combined_text(case_id: Optional[str], current_job_id: str, current_text: str) -> str:
+    if not case_id:
+        return current_text
+    segments: List[str] = []
+    current_included = False
+    with AUDIT_CASE_LOCK:
+        case = AUDIT_CASES.get(case_id) or {}
+        docs = case.get("documents") or []
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            text = _safe_text(doc.get("raw_text"))
+            if not text:
+                continue
+            title = _safe_text(doc.get("file_name")) or _safe_text(doc.get("doc_type")) or "document"
+            if _safe_text(doc.get("job_id")) == _safe_text(current_job_id):
+                current_included = True
+            segments.append(f"[文档]{title}\n{text}")
+    if current_text and _safe_text(current_text) and not current_included:
+        current_title = f"[当前上传] job={current_job_id}"
+        segments.append(f"{current_title}\n{current_text}")
+    if not segments:
+        return current_text
+    merged = "\n\n".join(segments)
+    # Keep extraction context bounded for latency and token budget.
+    return merged[-18000:]
+
+
+def _evaluate_case_completeness(case_documents: List[Dict[str, Any]]) -> Dict[str, Any]:
+    tags = {str(doc.get("tag") or "") for doc in (case_documents or [])}
+    required = ["contract", "invoice", "packing_list", "bill_of_lading"]
+    present = [tag for tag in required if tag in tags]
+    missing = [tag for tag in required if tag not in tags]
+    return {
+        "required": required,
+        "present": present,
+        "missing": missing,
+        "complete": len(missing) == 0,
+        "total_documents": len(case_documents or []),
+    }
+
+
 def _save_local_file(file_bytes: bytes, user_id: str, job_id: str, filename: str) -> Tuple[str, str]:
     safe_name = filename.replace("\\", "_").replace("/", "_")
     target_dir = os.path.join(LOCAL_STORAGE_ROOT, user_id, job_id)
@@ -309,6 +663,11 @@ def _load_job_from_db(job_id: str) -> Optional[Dict[str, Any]]:
             file_name = os.path.basename(str(file_url))
         result_resp = sb.table("audit_results").select("result_json").eq("job_id", job_id).limit(1).execute()
         result = result_resp.data[0]["result_json"] if result_resp.data else None
+        result_case_summary = result.get("case_summary") if isinstance(result, dict) else {}
+        case_id = _safe_text(result_case_summary.get("case_id")) if isinstance(result_case_summary, dict) else ""
+        case_documents = result_case_summary.get("documents") if isinstance(result_case_summary, dict) else []
+        if not isinstance(case_documents, list):
+            case_documents = []
         return {
             "job_id": job.get("job_id"),
             "user_id": job.get("user_id"),
@@ -317,9 +676,12 @@ def _load_job_from_db(job_id: str) -> Optional[Dict[str, Any]]:
             "status": job.get("status"),
             "progress": job.get("progress", 0),
             "stage": job.get("stage"),
+            "workflow_state": job.get("workflow_state"),
             "error_message": job.get("error_message"),
             "file_url": file_url,
             "file_name": file_name,
+            "case_id": case_id or None,
+            "case_documents": case_documents,
             "result": result,
             "created_at": job.get("created_at"),
             "updated_at": job.get("updated_at"),
@@ -334,6 +696,7 @@ def create_job(
     filename: str,
     user_id: str,
     doc_type: Optional[str],
+    case_id: Optional[str] = None,
     model_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     job_id = str(uuid.uuid4())
@@ -341,6 +704,8 @@ def create_job(
     normalized_doc_type = normalize_doc_type(doc_type)
     normalized_model_type = normalize_model_type(model_type)
     safe_user_id = user_id or "anonymous"
+    normalized_case_id = _normalize_case_id(case_id) or str(uuid.uuid4())
+    _ensure_case(normalized_case_id, safe_user_id, normalized_doc_type)
 
     _, file_url = _save_local_file(file_bytes, safe_user_id, job_id, filename)
     file_url = file_url.replace("\\", "/")
@@ -350,10 +715,12 @@ def create_job(
         "doc_id": doc_id,
         "user_id": safe_user_id,
         "doc_type": normalized_doc_type,
+        "case_id": normalized_case_id,
         "model_type": normalized_model_type,
         "status": "pending",
         "progress": 0,
-        "stage": "pending",
+        "stage": "pending_docs",
+        "workflow_state": "pending_docs",
         "error_message": None,
         "file_url": file_url,
         "file_name": filename,
@@ -372,7 +739,7 @@ def create_job(
         "model_type": normalized_model_type,
         "status": "pending",
         "progress": 0,
-        "stage": "pending",
+        "stage": "pending_docs",
         "error_message": None,
         "file_url": file_url,
         "created_at": job["created_at"],
@@ -385,6 +752,14 @@ def create_job(
         "file_url": file_url,
         "created_at": job["created_at"],
     })
+    _add_case_document_entry(
+        case_id=normalized_case_id,
+        job_id=job_id,
+        doc_id=doc_id,
+        file_name=filename,
+        file_url=file_url,
+        doc_type=normalized_doc_type,
+    )
 
     return job
 
@@ -397,7 +772,7 @@ def update_job(job_id: str, **updates: Any) -> None:
             job.update(updates)
             job["updated_at"] = now_iso
 
-    payload = {k: v for k, v in updates.items() if k not in {"result"}}
+    payload = {k: v for k, v in updates.items() if k in AUDIT_JOB_DB_UPDATE_FIELDS}
     if payload:
         payload["updated_at"] = now_iso
         _update_db("audit_jobs", payload, job_id)
@@ -467,6 +842,7 @@ def retry_audit_job(job_id: str) -> Tuple[bool, Optional[str]]:
             file_name,
             user_id,
             job.get("doc_type", "auto"),
+            case_id=job.get("case_id"),
             model_type=job.get("model_type"),
         )
         return True, None
@@ -476,25 +852,36 @@ def retry_audit_job(job_id: str) -> Tuple[bool, Optional[str]]:
 
 def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
     snapshot = _load_job_from_db(job_id)
-    if snapshot:
-        return snapshot
-
     with AUDIT_LOCK:
-        job = AUDIT_JOBS.get(job_id)
-        if job:
-            return {
-                "job_id": job["job_id"],
-                "user_id": job.get("user_id"),
-                "status": job["status"],
-                "progress": job.get("progress", 0),
-                "stage": job.get("stage"),
-                "error_message": job.get("error_message"),
-                "result": job.get("result"),
-                "doc_type": job.get("doc_type"),
-                "model_type": job.get("model_type"),
-                "file_url": job.get("file_url"),
-                "file_name": job.get("file_name"),
-            }
+        local_job = AUDIT_JOBS.get(job_id)
+    if snapshot:
+        if local_job:
+            if not snapshot.get("case_id"):
+                snapshot["case_id"] = local_job.get("case_id")
+            snapshot["workflow_state"] = local_job.get("workflow_state") or snapshot.get("workflow_state")
+            if not snapshot.get("case_documents"):
+                snapshot["case_documents"] = _case_public_documents(local_job.get("case_id"))
+            if not snapshot.get("result") and local_job.get("result"):
+                snapshot["result"] = local_job.get("result")
+        return snapshot
+    job = local_job
+    if job:
+        return {
+            "job_id": job["job_id"],
+            "user_id": job.get("user_id"),
+            "status": job["status"],
+            "progress": job.get("progress", 0),
+            "stage": job.get("stage"),
+            "workflow_state": job.get("workflow_state"),
+            "error_message": job.get("error_message"),
+            "result": job.get("result"),
+            "doc_type": job.get("doc_type"),
+            "model_type": job.get("model_type"),
+            "file_url": job.get("file_url"),
+            "file_name": job.get("file_name"),
+            "case_id": job.get("case_id"),
+            "case_documents": _case_public_documents(job.get("case_id")),
+        }
     return None
 
 
@@ -680,14 +1067,40 @@ def _find_amount_by_keywords(text: str, keywords: List[str]) -> Optional[float]:
     return candidates[0][0]
 
 
-AUDIT_DOC_TYPES = ["invoice", "contract", "payment", "expense"]
+AUDIT_DOC_TYPES = [
+    "invoice",
+    "contract",
+    "payment",
+    "expense",
+    "trade_case",
+    "import_declaration",
+    "export_declaration",
+    "packing_list",
+    "bill_of_lading",
+    "air_waybill",
+    "certificate_of_origin",
+]
 AUDIT_FIELD_KEYS = [
+    "doc_subtype",
     "total_amount",
     "currency",
+    "exchange_rate",
     "invoice_no",
     "tax_no",
     "vendor",
     "contract_no",
+    "po_no",
+    "declaration_no",
+    "packing_list_no",
+    "bl_awb_no",
+    "hs_code",
+    "incoterm",
+    "origin_country",
+    "destination_country",
+    "port_loading",
+    "port_discharge",
+    "customs_duty_amount",
+    "vat_amount",
     "contract_date",
     "invoice_date",
     "payment_date",
@@ -847,7 +1260,7 @@ def _merge_llm_fields(base_fields: Dict[str, Any], llm_result: Optional[Dict[str
         if key not in llm_fields:
             continue
         value = llm_fields.get(key)
-        if key == "total_amount":
+        if key in {"total_amount", "exchange_rate", "customs_duty_amount", "vat_amount"}:
             amount = _normalize_amount_value(value)
             if amount is not None:
                 merged[key] = amount
@@ -873,6 +1286,7 @@ def _merge_llm_fields(base_fields: Dict[str, Any], llm_result: Optional[Dict[str
 def _post_process_fields(fields: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
     normalized = dict(fields or {})
     text = raw_text or ""
+    doc_type = normalize_doc_type(normalized.get("doc_type"))
 
     for date_key in ("contract_date", "invoice_date", "payment_date"):
         date_val = _normalize_date_value(normalized.get(date_key))
@@ -900,7 +1314,154 @@ def _post_process_fields(fields: Dict[str, Any], raw_text: str) -> Dict[str, Any
         normalized.pop("total_amount", None)
     else:
         normalized["total_amount"] = amount
+
+    for numeric_key in ("exchange_rate", "customs_duty_amount", "vat_amount"):
+        value = _normalize_amount_value(normalized.get(numeric_key))
+        if value is None:
+            normalized.pop(numeric_key, None)
+        else:
+            normalized[numeric_key] = value
+
+    if doc_type == "contract":
+        counterparty = _infer_contract_counterparty(text, fallback_vendor=normalized.get("vendor"))
+        if counterparty:
+            normalized["vendor"] = counterparty
+        else:
+            current_vendor = _safe_text(normalized.get("vendor"))
+            if current_vendor and not _looks_like_org_name(current_vendor):
+                normalized.pop("vendor", None)
     return normalized
+
+
+def _trim_value_by_stop_tokens(value: Any, stop_tokens: List[str]) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    for token in stop_tokens:
+        idx = text.find(token)
+        if idx > 0:
+            text = text[:idx].strip()
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
+
+def _extract_party_by_labels(text: str, labels: List[str]) -> List[str]:
+    source = text or ""
+    if not source:
+        return []
+    stop_tokens = [
+        "地址",
+        "电话",
+        "邮箱",
+        "邮编",
+        "E-MAIL",
+        "EMAIL",
+        "TEL",
+        "PHONE",
+        "ADD:",
+        "ADDRESS",
+    ]
+    values: List[str] = []
+    for label in labels:
+        pattern = rf"(?:{label})\s*[:：]\s*([^\n\r]{{2,120}})"
+        for m in re.finditer(pattern, source, flags=re.IGNORECASE):
+            value = _trim_value_by_stop_tokens(m.group(1), stop_tokens)
+            if len(value) < 2:
+                continue
+            if value not in values:
+                values.append(value)
+    return values
+
+
+def _looks_like_org_name(name: str) -> bool:
+    text = _safe_text(name)
+    if len(text) < 2 or len(text) > 80:
+        return False
+    if re.search(r"[。；;!?！？]", text):
+        return False
+    upper = text.upper()
+    org_tokens = [
+        "公司",
+        "集团",
+        "股份",
+        "有限",
+        "贸易",
+        "实业",
+        "工厂",
+        "INC",
+        "LTD",
+        "LLC",
+        "CO.",
+        "COMPANY",
+        "CORP",
+        "TRADING",
+    ]
+    if any(tok in text for tok in org_tokens[:6]) or any(tok in upper for tok in org_tokens[6:]):
+        return True
+    if re.search(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}", text) and len(text) <= 60:
+        return True
+    return False
+
+
+def _is_self_org_name(name: str) -> bool:
+    candidate = _normalize_text(name)
+    if not candidate:
+        return False
+    for item in AUDIT_SELF_ORG_NAMES:
+        normalized = _normalize_text(item)
+        if not normalized:
+            continue
+        if normalized in candidate or candidate in normalized:
+            return True
+    return False
+
+
+def _self_org_display_name() -> str:
+    for item in AUDIT_SELF_ORG_NAMES:
+        text = _safe_text(item)
+        if re.search(r"[\u4e00-\u9fff]", text):
+            return text
+    return _safe_text(AUDIT_SELF_ORG_NAMES[0]) if AUDIT_SELF_ORG_NAMES else ""
+
+
+def _infer_contract_counterparty(text: str, fallback_vendor: Optional[str] = None) -> str:
+    source = text or ""
+    if not source:
+        return _safe_text(fallback_vendor)
+
+    seller_values = _extract_party_by_labels(source, [r"THE\s+SELLER", r"\bSELLER\b", r"卖方", r"供方", r"乙方"])
+    buyer_values = _extract_party_by_labels(source, [r"THE\s+BUYER", r"\bBUYER\b", r"买方", r"需方", r"甲方"])
+
+    sales_hint = _text_contains_any(source, ["销售合同", "销售合同书", "SALES CONTRACT"])
+    purchase_hint = _text_contains_any(source, ["采购合同", "PURCHASE CONTRACT"])
+
+    # 合同场景里 vendor 定义为“供应方/卖方”。
+    preferred: List[str] = list(seller_values)
+    backup: List[str] = list(buyer_values)
+    if not preferred and purchase_hint:
+        preferred = _extract_party_by_labels(source, [r"乙方", r"供方", r"卖方"])
+    if not preferred and sales_hint:
+        preferred = _extract_party_by_labels(source, [r"卖方", r"甲方", r"THE\s+SELLER", r"\bSELLER\b"])
+    if not backup:
+        backup = _extract_party_by_labels(source, [r"买方", r"需方", r"甲方", r"THE\s+BUYER", r"\bBUYER\b"])
+
+    for name in preferred:
+        if not _looks_like_org_name(name):
+            continue
+        if _is_self_org_name(name):
+            return _self_org_display_name() or name
+        return name
+    for name in backup:
+        if not _looks_like_org_name(name):
+            continue
+        if _is_self_org_name(name):
+            return _self_org_display_name() or name
+        return name
+
+    fallback = _safe_text(fallback_vendor)
+    if fallback and _looks_like_org_name(fallback):
+        return fallback
+    return ""
 
 
 def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = None) -> Dict[str, Any]:
@@ -940,6 +1501,25 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     if m:
         fields["contract_no"] = m.group(1)
 
+    fields["po_no"] = None
+    m = re.search(
+        r"\bPO[-_/]?(?=[A-Za-z0-9\-]{3,40}\b)(?=[A-Za-z0-9\-]*\d)[A-Za-z0-9\-]{3,40}\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["po_no"] = m.group(0).upper()
+    if not fields.get("po_no"):
+        m = re.search(
+            r"(?:\bPO\b\s*(?:NO\.?|NUMBER|#)?|\u91c7\u8d2d(?:\u5355|\u8ba2\u5355)(?:\u53f7|\u7f16\u53f7)?)\s*[:\uFF1A]?\s*([A-Za-z0-9][A-Za-z0-9\-]{3,40})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            value = _safe_text(m.group(1))
+            if value:
+                fields["po_no"] = value
+
     fields["vendor"] = None
     m = re.search(
         r"(?:\u4f9b\u5e94\u5546|\u9500\u552e\u65b9|\u5356\u65b9|\u4e59\u65b9|\u6536\u6b3e\u65b9)\s*[:\uFF1A]?\s*([^\n\r:]{2,40})",
@@ -947,6 +1527,102 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     )
     if m:
         fields["vendor"] = m.group(1).strip()
+
+    m = re.search(
+        r"(?:\u62a5\u5173(?:\u5355|\u53f7|\u7f16\u53f7)?|declaration\s*no\.?)\s*[:\uFF1A]?\s*([A-Za-z0-9\-]{6,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["declaration_no"] = m.group(1)
+
+    m = re.search(
+        r"(?:\u88c5\u7bb1\u5355(?:\u53f7|\u7f16\u53f7)?|packing\s*list(?:\s*no\.?)?)\s*[:\uFF1A]?\s*([A-Za-z0-9\-]{4,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["packing_list_no"] = m.group(1)
+
+    m = re.search(
+        r"(?:B\/L|BOL|BL|AWB|bill\s*of\s*lading|air\s*waybill|\u63d0\u5355(?:\u53f7)?|\u8fd0\u5355(?:\u53f7)?)\s*[:\uFF1A#]?\s*([A-Za-z0-9\-]{4,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["bl_awb_no"] = m.group(1)
+
+    m = re.search(
+        r"(?:HS\s*CODE|HS\u7f16\u7801|HS\u53f7)\s*[:\uFF1A]?\s*([0-9]{6,12})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["hs_code"] = m.group(1)
+
+    m = re.search(
+        r"(?:incoterms?|trade\s*term|\u8d38\u6613\u672f\u8bed)\s*[:\uFF1A]?\s*(EXW|FCA|FAS|FOB|CFR|CIF|CPT|CIP|DAP|DPU|DDP)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["incoterm"] = m.group(1).upper()
+
+    m = re.search(
+        r"(?:country\s*of\s*origin|\u539f\u4ea7\u5730(?:\u56fd)?|\u539f\u4ea7\u56fd)\s*[:\uFF1A]?\s*([A-Za-z\u4e00-\u9fff ]{2,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["origin_country"] = m.group(1).strip()
+
+    m = re.search(
+        r"(?:destination\s*country|\u76ee\u7684\u56fd)\s*[:\uFF1A]?\s*([A-Za-z\u4e00-\u9fff ]{2,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["destination_country"] = m.group(1).strip()
+
+    m = re.search(
+        r"(?:port\s*of\s*loading|\u8d77\u8fd0\u6e2f|\u88c5\u8fd0\u6e2f)\s*[:\uFF1A]?\s*([A-Za-z\u4e00-\u9fff ]{2,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["port_loading"] = m.group(1).strip()
+
+    m = re.search(
+        r"(?:port\s*of\s*discharge|\u76ee\u7684\u6e2f|\u5378\u8d27\u6e2f)\s*[:\uFF1A]?\s*([A-Za-z\u4e00-\u9fff ]{2,40})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["port_discharge"] = m.group(1).strip()
+
+    m = re.search(
+        r"(?:exchange\s*rate|\u6c47\u7387)\s*[:\uFF1A]?\s*([0-9]+(?:\.[0-9]+)?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["exchange_rate"] = _normalize_amount_value(m.group(1))
+
+    m = re.search(
+        r"(?:customs\s*duty|\u5173\u7a0e)\s*[:\uFF1A]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["customs_duty_amount"] = _normalize_amount_value(m.group(1))
+
+    m = re.search(
+        r"(?:VAT|\u589e\u503c\u7a0e)\s*[:\uFF1A]?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        fields["vat_amount"] = _normalize_amount_value(m.group(1))
 
     total_amount = _find_amount_by_keywords(text, AUDIT_AMOUNT_KEYWORDS)
     if total_amount is None:
@@ -958,16 +1634,41 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
             total_amount = None
     fields["total_amount"] = total_amount
 
+    payee_stop_tokens = [
+        "\u4ed8\u6b3e\u65b9\u5f0f",
+        "\u7533\u8bf7\u91d1\u989d",
+        "\u6536\u6b3e\u94f6\u884c",
+        "\u94f6\u884c\u8d26\u53f7",
+        "\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f",
+        "\u4ed8\u6b3e\u7c7b\u578b",
+        "\u9879\u76ee",
+        "\u5907\u6ce8",
+        "\u7ecf\u529e\u4eba",
+        "\u90e8\u95e8",
+        "PAYMENT",
+        "BANK",
+        "ACCOUNT",
+    ]
     m = re.search(
-        r"(?:\u6536\u6b3e\u65b9|\u6536\u6b3e\u5355\u4f4d|\u6536\u6b3e\u8d26\u6237\u540d|\u6536\u6b3e\u4eba)\s*[:\uFF1A]?\s*([^\n\r:]{2,40})",
+        r"(?:\u6536\s*\u6b3e\s*(?:\u65b9|\u5355\u4f4d|\u8d26\u6237\u540d|\u8d26\s*\u6237\s*\u540d|\u4eba|\u6237\u540d|\u540d\u79f0)|payee|beneficiary)\s*[:\uFF1A]?\s*([^\n\r:\uFF1A]{2,80}?)\s*(?=(?:\u4ed8\u6b3e\u65b9\u5f0f|\u7533\u8bf7\u91d1\u989d|\u6536\u6b3e\u94f6\u884c|\u94f6\u884c\u8d26\u53f7|\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f|\u4ed8\u6b3e\u7c7b\u578b|\u9879\u76ee|\u5907\u6ce8|\u7ecf\u529e\u4eba|\u90e8\u95e8|$))",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        payee_value = _trim_value_by_stop_tokens(m.group(1), payee_stop_tokens)
+        if len(payee_value) >= 2:
+            fields["payee"] = payee_value
+
+    m = re.search(
+        r"(?:\u94f6\s*\u884c\s*\u8d26\s*\u53f7|\u8d26\s*\u53f7|\u5f00\s*\u6237\s*\u8d26\s*\u53f7|\u6536\s*\u6b3e\s*\u8d26\s*\u53f7)\s*[:\uFF1A]?\s*([0-9\s-]{8,40})",
         text,
     )
     if m:
-        fields["payee"] = m.group(1).strip()
-
-    m = re.search(r"(?:\u94f6\u884c\u8d26\u53f7|\u8d26\u53f7|\u5f00\u6237\u8d26\u53f7)\s*[:\uFF1A]?\s*([0-9\s]{8,30})", text)
-    if m:
         fields["bank_account"] = re.sub(r"\s+", "", m.group(1))
+
+    if doc_type == "payment" and not _safe_text(fields.get("payee")) and _safe_text(fields.get("vendor")):
+        # 付款单中兜底：未识别收款人时，借助已识别的供应商字段补全。
+        fields["payee"] = _safe_text(fields.get("vendor"))
 
     m = re.search(r"(?:\u62a5\u9500\u4eba|\u7533\u8bf7\u4eba|\u62a5\u9500\u7533\u8bf7\u4eba)\s*[:\uFF1A]?\s*([^\n\r:]{2,20})", text)
     if m:
@@ -1005,16 +1706,261 @@ def _infer_doc_type_llm(raw_text: str, llm_backend: Optional[str] = None) -> Opt
 
 
 def _infer_doc_type(raw_text: str) -> str:
-    text = (raw_text or "").lower()
-    if any(k in text for k in ["\u53d1\u7968", "\u7a0e\u53f7", "\u5f00\u7968", "invoice"]):
-        return "invoice"
-    if any(k in text for k in ["\u5408\u540c", "\u534f\u8bae", "\u7b7e\u7f72", "\u7b7e\u8ba2", "contract"]):
-        return "contract"
-    if any(k in text for k in ["\u4ed8\u6b3e", "\u6536\u6b3e", "\u94f6\u884c\u8d26\u53f7", "payment"]):
+    text = raw_text or ""
+    lower_text = text.lower()
+
+    payment_form_hits = 0
+    payment_form_clues = [
+        ["\u9884\u4ed8\u6b3e\u652f\u4ed8\u7533\u8bf7\u5355", "\u4ed8\u6b3e\u7533\u8bf7\u5355", "\u652f\u4ed8\u7533\u8bf7\u5355"],
+        ["\u7533\u8bf7\u5355\u7f16\u53f7", "\u4ed8\u6b3e\u7c7b\u578b", "\u652f\u4ed8\u72b6\u6001"],
+        ["\u6536\u6b3e\u94f6\u884c", "\u94f6\u884c\u8d26\u53f7", "\u8981\u6c42\u4ed8\u6b3e\u65e5\u671f", "\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f"],
+        ["\u9884\u4ed8\u6b3e\u660e\u7ec6\u4fe1\u606f", "\u652f\u4ed8\u5355\u660e\u7ec6\u4fe1\u606f"],
+    ]
+    for group in payment_form_clues:
+        if _text_contains_any(text, group):
+            payment_form_hits += 1
+    if payment_form_hits >= 2:
         return "payment"
-    if any(k in text for k in ["\u62a5\u9500", "\u8d39\u7528", "\u5dee\u65c5", "expense"]):
+
+    # Contract signals come first to avoid采购/销售合同被"发票/提单"类词汇误判.
+    if _text_contains_any(
+        text,
+        [
+            "\u9500\u552e\u5408\u540c\u4e66",
+            "\u9500\u552e\u5408\u540c",
+            "\u91c7\u8d2d\u5408\u540c",
+            "\u8d2d\u9500\u5408\u540c",
+            "\u5408\u540c\u53f7",
+            "\u5408\u540c\u7f16\u53f7",
+            "\u5408\u540c\u7b7e\u8ba2",
+            "\u5408\u540c\u7b7e\u7f72",
+        ],
+    ) or _text_contains_any(lower_text, ["sales contract", "purchase contract", "contract no", "cont.no", "the seller", "the buyer"]):
+        return "contract"
+
+    if _text_contains_any(text, ["\u62a5\u5173\u5355", "customs declaration", "declaration no"]):
+        if _text_contains_any(text, ["\u51fa\u53e3", "export"]):
+            return "export_declaration"
+        return "import_declaration"
+
+    if _text_contains_any(text, ["\u539f\u4ea7\u5730\u8bc1", "certificate of origin"]):
+        return "certificate_of_origin"
+
+    packing_title = _text_contains_any(text, ["packing list", "\u88c5\u7bb1\u5355"])
+    packing_structure = _text_contains_any(
+        text,
+        ["gross weight", "net weight", "measurement", "carton", "\u6bdb\u91cd", "\u51c0\u91cd", "\u4ef6\u6570", "\u7bb1\u6570"],
+    )
+    if packing_title and packing_structure:
+        return "packing_list"
+
+    bill_title = _text_contains_any(text, ["bill of lading", "\u63d0\u5355"])
+    bill_structure = _text_contains_any(
+        text,
+        [
+            "shipper",
+            "consignee",
+            "notify party",
+            "vessel",
+            "voyage",
+            "port of loading",
+            "port of discharge",
+            "bl no",
+            "\u627f\u8fd0\u4eba",
+            "\u6258\u8fd0\u4eba",
+            "\u6536\u8d27\u4eba",
+            "\u901a\u77e5\u4eba",
+            "\u8239\u540d",
+            "\u822a\u6b21",
+            "\u63d0\u5355\u53f7",
+        ],
+    )
+    if bill_title and bill_structure:
+        return "bill_of_lading"
+
+    awb_title = _text_contains_any(text, ["air waybill", "airway bill", "\u7a7a\u8fd0\u8fd0\u5355", "\u822a\u7a7a\u8fd0\u5355"])
+    awb_structure = _text_contains_any(
+        text,
+        [
+            "mawb",
+            "hawb",
+            "airport of departure",
+            "airport of destination",
+            "airline",
+            "flight",
+            "\u822a\u73ed",
+            "\u542f\u8fd0\u673a\u573a",
+            "\u76ee\u7684\u5730\u673a\u573a",
+            "\u8fd0\u5355\u53f7",
+        ],
+    )
+    if awb_title and awb_structure:
+        return "air_waybill"
+
+    invoice_hit = 0
+    invoice_clues = [
+        ["\u53d1\u7968\u4ee3\u7801", "\u53d1\u7968\u53f7\u7801", "\u6821\u9a8c\u7801", "\u5f00\u7968\u65e5\u671f"],
+        ["\u9500\u65b9", "\u8d2d\u65b9", "\u7eb3\u7a0e\u4eba\u8bc6\u522b\u53f7", "\u7a0e\u7387"],
+        ["invoice no", "tax invoice", "invoice date"],
+    ]
+    for group in invoice_clues:
+        if _text_contains_any(text, group) or _text_contains_any(lower_text, group):
+            invoice_hit += 1
+
+    if invoice_hit >= 2:
+        return "invoice"
+    if _text_contains_any(text, ["\u53d1\u7968", "\u5f00\u7968", "invoice"]) and not _text_contains_any(text, ["\u5408\u540c", "contract"]):
+        return "invoice"
+
+    if _text_contains_any(text, ["\u5408\u540c", "\u534f\u8bae", "\u7b7e\u7f72", "\u7b7e\u8ba2"]) or _text_contains_any(lower_text, ["contract"]):
+        return "contract"
+    if _text_contains_any(text, ["\u4ed8\u6b3e", "\u6536\u6b3e", "\u94f6\u884c\u8d26\u53f7", "payment"]):
+        return "payment"
+    if _text_contains_any(text, ["\u62a5\u9500", "\u8d39\u7528", "\u5dee\u65c5", "expense"]):
         return "expense"
     return "invoice"
+
+
+def _text_contains_any(text: str, keywords: List[str]) -> bool:
+    source = text or ""
+    if any(kw and kw in source for kw in keywords):
+        return True
+    normalized_source = _normalize_text(source)
+    if not normalized_source:
+        return False
+    for kw in keywords:
+        if not kw:
+            continue
+        normalized_kw = _normalize_text(kw)
+        if normalized_kw and normalized_kw in normalized_source:
+            return True
+    return False
+
+
+def _infer_doc_subtype(
+    raw_text: str,
+    doc_type: str,
+    fields: Optional[Dict[str, Any]] = None,
+    file_name: Optional[str] = None,
+) -> str:
+    base_type = normalize_doc_type(doc_type)
+    text = raw_text or ""
+    file_text = _safe_text(file_name)
+    if file_text:
+        text = f"{file_text}\n{text}"
+    lower_text = text.lower()
+    fields = fields or {}
+    vendor = _safe_text(fields.get("vendor"))
+    contract_no = _safe_text(fields.get("contract_no")).upper()
+    po_no = _safe_text(fields.get("po_no")).upper()
+
+    if base_type == "trade_case":
+        return "trade_case_generic"
+
+    if base_type == "contract":
+        if _text_contains_any(text, ["销售合同", "销货合同", "销售协议"]) or _text_contains_any(lower_text, ["sales contract", "sale contract"]):
+            return "sales_contract"
+        if _text_contains_any(text, ["采购合同", "购货合同", "采购协议"]) or _text_contains_any(lower_text, ["purchase contract", "procurement contract"]):
+            return "purchase_contract"
+        if _text_contains_any(text, ["购销合同"]) or _text_contains_any(lower_text, ["sale and purchase contract"]):
+            return "sale_purchase_contract"
+        if _text_contains_any(text, ["框架合同", "框架协议"]) or _text_contains_any(lower_text, ["framework agreement", "master agreement"]):
+            return "framework_contract"
+        if _text_contains_any(text, ["服务合同", "技术服务", "咨询服务", "运维服务"]) or _text_contains_any(lower_text, ["service contract", "services agreement"]):
+            return "service_contract"
+        if _text_contains_any(text, ["劳务合同", "劳务协议"]) or _text_contains_any(lower_text, ["labor contract", "labour contract"]):
+            return "labor_contract"
+        if _text_contains_any(text, ["租赁合同", "租赁协议"]) or _text_contains_any(lower_text, ["lease agreement", "rental contract"]):
+            return "lease_contract"
+        if _text_contains_any(text, ["保密协议"]) or _text_contains_any(lower_text, ["nondisclosure agreement", "nda"]):
+            return "nda_agreement"
+
+        purchase_role = bool(re.search(r"甲方[^\n\r]{0,24}(?:买方|采购方|需方)", text)) or bool(
+            re.search(r"乙方[^\n\r]{0,24}(?:卖方|供方|供应方)", text)
+        )
+        sales_role = bool(re.search(r"甲方[^\n\r]{0,24}(?:卖方|供方|供应方)", text)) or bool(
+            re.search(r"乙方[^\n\r]{0,24}(?:买方|采购方|需方)", text)
+        )
+        if purchase_role and sales_role:
+            return "sale_purchase_contract"
+        if purchase_role:
+            return "purchase_contract"
+        if sales_role:
+            return "sales_contract"
+        if contract_no.startswith("PO-") or contract_no.startswith("PO"):
+            return "purchase_contract"
+        if po_no:
+            return "purchase_contract"
+        if contract_no.startswith("SO-") or contract_no.startswith("SO"):
+            return "sales_contract"
+        return "contract_generic"
+
+    if base_type == "invoice":
+        if _text_contains_any(text, ["增值税专用发票", "专票"]) or _text_contains_any(lower_text, ["vat special invoice"]):
+            return "vat_special_invoice"
+        if _text_contains_any(text, ["增值税普通发票", "普票"]) or _text_contains_any(lower_text, ["vat invoice", "vat general invoice"]):
+            return "vat_general_invoice"
+        if _text_contains_any(text, ["形式发票"]) or _text_contains_any(lower_text, ["proforma invoice", "pro forma invoice"]):
+            return "proforma_invoice"
+        if _text_contains_any(text, ["销项发票", "销售发票", "开票方"]) or _text_contains_any(lower_text, ["sales invoice", "output invoice"]):
+            return "sales_invoice"
+        if _text_contains_any(text, ["进项发票", "采购发票", "受票方"]) or _text_contains_any(lower_text, ["purchase invoice", "input invoice"]):
+            return "purchase_invoice"
+        if vendor and _text_contains_any(text, ["购买方", "购方"]):
+            return "purchase_invoice"
+        return "invoice_generic"
+
+    if base_type == "import_declaration":
+        return "import_customs_declaration"
+
+    if base_type == "export_declaration":
+        return "export_customs_declaration"
+
+    if base_type == "packing_list":
+        if _text_contains_any(text, ["出口", "出境"]) or _text_contains_any(lower_text, ["export"]):
+            return "export_packing_list"
+        if _text_contains_any(text, ["进口", "入境"]) or _text_contains_any(lower_text, ["import"]):
+            return "import_packing_list"
+        return "packing_list_generic"
+
+    if base_type == "bill_of_lading":
+        if _text_contains_any(text, ["主提单"]) or _text_contains_any(lower_text, ["master bill of lading", "mbl"]):
+            return "master_bill_of_lading"
+        if _text_contains_any(text, ["分提单"]) or _text_contains_any(lower_text, ["house bill of lading", "hbl"]):
+            return "house_bill_of_lading"
+        if _text_contains_any(text, ["海运", "船名"]) or _text_contains_any(lower_text, ["ocean bill of lading", "vessel"]):
+            return "ocean_bill_of_lading"
+        return "bill_of_lading_generic"
+
+    if base_type == "air_waybill":
+        if _text_contains_any(text, ["主运单"]) or _text_contains_any(lower_text, ["master air waybill", "mawb"]):
+            return "master_air_waybill"
+        if _text_contains_any(text, ["分运单"]) or _text_contains_any(lower_text, ["house air waybill", "hawb"]):
+            return "house_air_waybill"
+        return "air_waybill_generic"
+
+    if base_type == "certificate_of_origin":
+        if _text_contains_any(lower_text, ["form e"]):
+            return "coo_form_e"
+        if _text_contains_any(lower_text, ["form a"]):
+            return "coo_form_a"
+        return "certificate_of_origin_generic"
+
+    if base_type == "payment":
+        if _text_contains_any(text, ["预付款", "定金"]) or _text_contains_any(lower_text, ["advance payment", "down payment"]):
+            return "advance_payment"
+        if _text_contains_any(text, ["尾款", "余款"]) or _text_contains_any(lower_text, ["final payment", "balance payment"]):
+            return "final_payment"
+        return "payment_generic"
+
+    if base_type == "expense":
+        if _text_contains_any(text, ["差旅", "机票", "酒店"]) or _text_contains_any(lower_text, ["travel expense", "business trip"]):
+            return "travel_expense"
+        if _text_contains_any(text, ["推广", "投放", "市场活动"]) or _text_contains_any(lower_text, ["marketing expense"]):
+            return "marketing_expense"
+        return "expense_generic"
+
+    return ""
 
 
 def _validate_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -2288,6 +3234,64 @@ def _update_job_result_in_memory(job_id: str, result: Dict[str, Any]) -> None:
         job["updated_at"] = _now_iso()
 
 
+def _queue_erp_sync_task(
+    *,
+    job_id: str,
+    user_id: str,
+    action: str,
+    operator_id: str,
+    comment: Optional[str],
+    provider: str,
+    result: Dict[str, Any],
+    last_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    queue_id = str(uuid.uuid4())
+    now = _now_iso()
+    task = {
+        "queue_id": queue_id,
+        "job_id": job_id,
+        "user_id": user_id or "anonymous",
+        "provider": provider,
+        "action": action,
+        "operator_id": operator_id or "system",
+        "comment": comment,
+        "status": "queued",
+        "retry_count": 0,
+        "max_retry": ERP_SYNC_MAX_RETRY,
+        "last_error": last_error,
+        "created_at": now,
+        "updated_at": now,
+        "payload": {
+            "risk_level": result.get("risk_level"),
+            "audit_score": result.get("audit_score"),
+        },
+    }
+    with ERP_SYNC_LOCK:
+        ERP_SYNC_QUEUE[queue_id] = task
+    return task
+
+
+def _sync_erp_action_direct(
+    *,
+    job_id: str,
+    user_id: str,
+    action: str,
+    operator_id: str,
+    result: Dict[str, Any],
+    comment: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not callable(get_erp_adapter):
+        raise RuntimeError("ERP adapter unavailable")
+    adapter = get_erp_adapter(ERP_PROVIDER, user_id=user_id)
+    return adapter.writeback_audit_action(
+        job_id=job_id,
+        action=action,
+        operator_id=operator_id or "system",
+        result=result,
+        comment=comment,
+    )
+
+
 def push_audit_action_to_erp(
     job_id: str,
     action: str,
@@ -2307,19 +3311,57 @@ def push_audit_action_to_erp(
         result = {}
 
     user_id = _safe_text(snapshot.get("user_id")) or "anonymous"
-    if not callable(get_erp_adapter):
-        return False, {"error": "ERP adapter unavailable"}
-    try:
-        adapter = get_erp_adapter(ERP_PROVIDER, user_id=user_id)
-        sync_payload = adapter.writeback_audit_action(
+    sync_payload: Dict[str, Any] = {}
+    queue_task: Optional[Dict[str, Any]] = None
+    sync_error: Optional[str] = None
+
+    # queue 模式用于“先保留 ERP 接口语义，后接真实 ERP”。
+    if AUDIT_ERP_SYNC_MODE == "direct":
+        try:
+            sync_payload = _sync_erp_action_direct(
+                job_id=job_id,
+                user_id=user_id,
+                action=action_norm,
+                operator_id=operator_id or "system",
+                result=result,
+                comment=comment,
+            )
+        except Exception as e:
+            sync_error = str(e)
+            queue_task = _queue_erp_sync_task(
+                job_id=job_id,
+                user_id=user_id,
+                action=action_norm,
+                operator_id=operator_id or "system",
+                comment=comment,
+                provider=ERP_PROVIDER,
+                result=result,
+                last_error=sync_error,
+            )
+            sync_payload = {
+                "trace_id": f"ERPQ-{queue_task['queue_id'][:8]}",
+                "provider": ERP_PROVIDER,
+                "status": "queued",
+                "stored": False,
+                "queue_id": queue_task["queue_id"],
+            }
+    else:
+        queue_task = _queue_erp_sync_task(
             job_id=job_id,
+            user_id=user_id,
             action=action_norm,
             operator_id=operator_id or "system",
-            result=result,
             comment=comment,
+            provider=ERP_PROVIDER,
+            result=result,
         )
-    except Exception as e:
-        return False, {"error": f"ERP writeback failed: {e}"}
+        sync_payload = {
+            "trace_id": f"ERPQ-{queue_task['queue_id'][:8]}",
+            "provider": ERP_PROVIDER,
+            "status": "queued",
+            "stored": False,
+            "queue_id": queue_task["queue_id"],
+        }
 
     erp_action = {
         "action": action_norm,
@@ -2329,6 +3371,8 @@ def push_audit_action_to_erp(
         "provider": sync_payload.get("provider"),
         "status": sync_payload.get("status"),
         "stored": sync_payload.get("stored"),
+        "queue_id": sync_payload.get("queue_id"),
+        "sync_error": sync_error,
         "at": _now_iso(),
     }
     result["erp_action"] = erp_action
@@ -2343,6 +3387,7 @@ def push_audit_action_to_erp(
             "trace_id": sync_payload.get("trace_id"),
             "provider": sync_payload.get("provider"),
             "status": sync_payload.get("status"),
+            "queue_id": sync_payload.get("queue_id"),
             "at": _now_iso(),
         }
     )
@@ -2350,7 +3395,14 @@ def push_audit_action_to_erp(
 
     _persist_audit_result(job_id, result)
     _update_job_result_in_memory(job_id, result)
-    _update_db("audit_jobs", {"updated_at": _now_iso()}, job_id)
+    _update_db(
+        "audit_jobs",
+        {
+            "updated_at": _now_iso(),
+            "stage": "erp_pending_sync" if sync_payload.get("status") == "queued" else "done",
+        },
+        job_id,
+    )
     return True, {"job_id": job_id, "erp_action": erp_action, "result": result}
 
 
@@ -2392,20 +3444,29 @@ def _parse_with_ocr(file_bytes: bytes, filename: str) -> Tuple[str, List[str], O
 def _extract_text(file_bytes: bytes, filename: str) -> Tuple[str, List[str], Optional[float], str]:
     ext = os.path.splitext(filename)[1].lower()
 
-    if ext == ".pdf" and AUDIT_PDF_FAST_PARSE_ENABLED:
+    # 审单场景：PDF/Word 始终优先走文本解析链路，不进入 OCR。
+    if ext in {".pdf", ".doc", ".docx"}:
         raw_text, page_texts = _parse_with_loader(file_bytes, filename)
-        if len((raw_text or "").strip()) >= AUDIT_PDF_FAST_PARSE_MIN_CHARS:
-            return raw_text, page_texts, None, "loader_pdf_fast"
+        if raw_text:
+            if ext == ".pdf":
+                mode = "loader_pdf_fast" if (
+                    AUDIT_PDF_FAST_PARSE_ENABLED
+                    and len((raw_text or "").strip()) >= AUDIT_PDF_FAST_PARSE_MIN_CHARS
+                ) else "loader_pdf_direct"
+                return raw_text, page_texts, None, mode
+            if ext in {".doc", ".docx"}:
+                return raw_text, page_texts, None, "loader_word_direct"
+            return raw_text, page_texts, None, "loader_direct"
+        if ext == ".pdf":
+            return "", page_texts, None, "loader_pdf_empty"
+        return "", page_texts, None, "loader_word_empty"
 
     if ext in OCR_REQUIRED_EXTENSIONS:
         try:
             raw_text, page_texts, confidence = _parse_with_ocr(file_bytes, filename)
             return raw_text, page_texts, confidence, "ocr"
         except Exception:
-            # OCR 是图像/PDF 的首选。回退使管道保持可用。
-            if ext == ".pdf":
-                raw_text, page_texts = _parse_with_loader(file_bytes, filename)
-                return raw_text, page_texts, None, "loader_fallback"
+            # 图像类文件以 OCR 为主路径。
             raise
 
     if ext in DIRECT_PARSE_EXTENSIONS:
@@ -2427,7 +3488,11 @@ def _extract_text(file_bytes: bytes, filename: str) -> Tuple[str, List[str], Opt
         return "", [], None, "empty"
 
 
-def run_audit_job_from_job_id(job_id: str, model_type: Optional[str] = None) -> None:
+def run_audit_job_from_job_id(
+    job_id: str,
+    model_type: Optional[str] = None,
+    case_id: Optional[str] = None,
+) -> None:
     local_job: Dict[str, Any] = {}
     with AUDIT_LOCK:
         if AUDIT_JOBS.get(job_id):
@@ -2456,14 +3521,28 @@ def run_audit_job_from_job_id(job_id: str, model_type: Optional[str] = None) -> 
     user_id = job.get("user_id") or "anonymous"
     doc_type = job.get("doc_type") or "auto"
     selected_model = normalize_model_type(model_type or job.get("model_type"))
-    run_audit_job(job_id, file_bytes, filename, user_id, doc_type, model_type=selected_model)
+    effective_case_id = _normalize_case_id(case_id) or _normalize_case_id(job.get("case_id"))
+    run_audit_job(
+        job_id,
+        file_bytes,
+        filename,
+        user_id,
+        doc_type,
+        case_id=effective_case_id,
+        file_url=file_url,
+        model_type=selected_model,
+    )
 
 
-def _run_audit_job_inline_async(job_id: str, model_type: Optional[str] = None) -> None:
+def _run_audit_job_inline_async(
+    job_id: str,
+    model_type: Optional[str] = None,
+    case_id: Optional[str] = None,
+) -> None:
     """Fallback path when Redis/RQ is unavailable."""
     def _target() -> None:
         try:
-            run_audit_job_from_job_id(job_id, model_type=model_type)
+            run_audit_job_from_job_id(job_id, model_type=model_type, case_id=case_id)
         except Exception as e:
             print(f"[Audit Queue Fallback] job {job_id} failed: {e}")
 
@@ -2480,24 +3559,25 @@ def enqueue_audit_job(
     filename: str,
     user_id: str,
     doc_type: Optional[str],
+    case_id: Optional[str] = None,
     model_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     selected_model = normalize_model_type(model_type)
-    job = create_job(file_bytes, filename, user_id, doc_type, model_type=selected_model)
+    job = create_job(file_bytes, filename, user_id, doc_type, case_id=case_id, model_type=selected_model)
     queue_job_id = f"audit:{job['job_id']}"
 
     if enqueue_job is None:
         if not AUDIT_INLINE_FALLBACK:
             raise RuntimeError("Audit queue is unavailable, check Redis/RQ dependencies")
         print("[Audit Queue] RQ unavailable, fallback to inline worker thread")
-        _run_audit_job_inline_async(job["job_id"], model_type=selected_model)
+        _run_audit_job_inline_async(job["job_id"], model_type=selected_model, case_id=job.get("case_id"))
         return job
 
     try:
         enqueue_job(
             queue_name=AUDIT_QUEUE_NAME,
             func=run_audit_job_from_job_id,
-            kwargs={"job_id": job["job_id"], "model_type": selected_model},
+            kwargs={"job_id": job["job_id"], "model_type": selected_model, "case_id": job.get("case_id")},
             job_id=queue_job_id,
             retry_max=AUDIT_JOB_RETRY_MAX,
             timeout=AUDIT_JOB_TIMEOUT_SECONDS,
@@ -2505,7 +3585,7 @@ def enqueue_audit_job(
     except Exception as e:
         if AUDIT_INLINE_FALLBACK:
             print(f"[Audit Queue] enqueue failed ({e}), fallback to inline worker thread")
-            _run_audit_job_inline_async(job["job_id"], model_type=selected_model)
+            _run_audit_job_inline_async(job["job_id"], model_type=selected_model, case_id=job.get("case_id"))
             return job
         update_job(
             job["job_id"],
@@ -2525,18 +3605,49 @@ def run_audit_job(
     filename: str,
     user_id: str,
     doc_type: str,
+    case_id: Optional[str] = None,
+    file_url: Optional[str] = None,
     model_type: Optional[str] = None,
 ) -> None:
     try:
         t_start = time.perf_counter()
         selected_model = normalize_model_type(model_type)
+        normalized_case_id = _normalize_case_id(case_id)
+        with AUDIT_LOCK:
+            existing_job = AUDIT_JOBS.get(job_id) or {}
+            if not normalized_case_id:
+                normalized_case_id = _normalize_case_id(existing_job.get("case_id"))
+        if not normalized_case_id:
+            normalized_case_id = str(uuid.uuid4())
+        _ensure_case(normalized_case_id, user_id, doc_type)
+
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
+            _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, status="cancelled")
             return
-        update_job(job_id, status="running", progress=10, stage="ocr", model_type=selected_model)
+        update_job(
+            job_id,
+            status="running",
+            progress=STAGE_PROGRESS["pending_docs"],
+            stage="pending_docs",
+            workflow_state="pending_docs",
+            model_type=selected_model,
+            case_id=normalized_case_id,
+        )
+        _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, status="running")
+
+        update_job(job_id, progress=10, stage="ocr", workflow_state="extracting")
 
         raw_text, page_texts, ocr_confidence, extract_mode = _extract_text(file_bytes, filename)
         t_after_ocr = time.perf_counter()
+        _update_case_document_entry(
+            case_id=normalized_case_id,
+            job_id=job_id,
+            status="parsed",
+            extract_mode=extract_mode,
+            ocr_confidence=ocr_confidence,
+            raw_text=raw_text,
+        )
         _update_db("audit_docs", {
             "raw_text": raw_text,
             "page_texts": page_texts,
@@ -2545,6 +3656,7 @@ def run_audit_job(
 
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
+            _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, status="cancelled")
             return
 
         effective_doc_type = doc_type
@@ -2553,24 +3665,30 @@ def run_audit_job(
             effective_doc_type = llm_doc_type or _infer_doc_type(raw_text)
             update_job(job_id, doc_type=effective_doc_type)
             _update_db("audit_docs", {"doc_type": effective_doc_type}, job_id, key="job_id")
+        _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, doc_type=effective_doc_type)
 
         update_job(job_id, progress=STAGE_PROGRESS["ocr"], stage="extract")
 
-        fields = _extract_fields(raw_text, effective_doc_type, llm_backend=selected_model)
+        extraction_text = _build_case_combined_text(normalized_case_id, job_id, raw_text)
+        fields = _extract_fields(extraction_text, effective_doc_type, llm_backend=selected_model)
         fields = _validate_fields(fields)
+        doc_subtype = _infer_doc_subtype(raw_text, effective_doc_type, fields, file_name=filename)
+        if doc_subtype:
+            fields["doc_subtype"] = doc_subtype
         t_after_extract = time.perf_counter()
 
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
+            _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, status="cancelled")
             return
 
         history_records = _collect_history_records(user_id)
         feedback_ctx = _collect_review_feedback(user_id, effective_doc_type, history_records)
         erp_ctx = _fetch_erp_context(fields, user_id, effective_doc_type, history_records)
 
-        update_job(job_id, progress=STAGE_PROGRESS["extract"], stage="rules")
+        update_job(job_id, progress=STAGE_PROGRESS["extract"], stage="rules", workflow_state="rule_checking")
 
-        rule_findings = _run_rules(effective_doc_type, fields, raw_text, erp_ctx)
+        rule_findings = _run_rules(effective_doc_type, fields, extraction_text, erp_ctx)
         cross_findings, erp_checks = _run_cross_document_checks(effective_doc_type, fields, erp_ctx, history_records)
         anomaly_findings, anomaly_stats = _run_anomaly_detection(effective_doc_type, fields, history_records)
         deterministic_findings = list(rule_findings) + list(cross_findings) + list(anomaly_findings)
@@ -2592,11 +3710,11 @@ def run_audit_job(
 
         high_risk_gate = _has_high_risk(deterministic_findings)
 
-        update_job(job_id, progress=STAGE_PROGRESS["rules"], stage="ai")
+        update_job(job_id, progress=STAGE_PROGRESS["rules"], stage="ai", workflow_state="ai_review")
         ai_assessment = _run_ai_review(
             effective_doc_type,
             fields,
-            raw_text,
+            extraction_text,
             deterministic_findings,
             high_risk_gate,
             selected_model,
@@ -2608,9 +3726,10 @@ def run_audit_job(
 
         if _is_cancelled(job_id):
             update_job(job_id, status="cancelled", progress=100, stage="cancelled")
+            _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, status="cancelled")
             return
 
-        update_job(job_id, progress=STAGE_PROGRESS["ai"], stage="report")
+        update_job(job_id, progress=STAGE_PROGRESS["ai"], stage="report", workflow_state="aggregating")
 
         combined_findings = list(deterministic_findings)
         if ai_assessment and ai_assessment.get("findings"):
@@ -2631,6 +3750,37 @@ def run_audit_job(
             is_pass = risk_level == "low"
             summary = _build_summary(deterministic_findings)
 
+        recognized_doc_subtype = _safe_text(fields.get("doc_subtype")) or _infer_doc_subtype(
+            raw_text,
+            effective_doc_type,
+            fields,
+            file_name=filename,
+        )
+        if recognized_doc_subtype:
+            fields["doc_subtype"] = recognized_doc_subtype
+
+        summary = _append_doc_type_to_summary(summary, effective_doc_type, recognized_doc_subtype)
+        recognized_doc_type = normalize_doc_type(effective_doc_type)
+        recognized_doc_type_label = _doc_type_display_name(recognized_doc_type)
+        recognized_doc_subtype_label = _doc_subtype_display_name(recognized_doc_subtype)
+
+        case_documents = _case_public_documents(normalized_case_id)
+        case_completeness = _evaluate_case_completeness(case_documents)
+        if case_completeness.get("missing"):
+            workflow_state = "pending_docs"
+            next_action = "请补齐缺失单据后再完成终审。"
+        elif risk_level == "high":
+            workflow_state = "review_required"
+            next_action = "建议转人工复核。"
+        elif risk_level == "medium":
+            workflow_state = "review_optional"
+            next_action = "建议人工抽样复核。"
+        else:
+            workflow_state = "ready_for_erp"
+            next_action = "可进入 ERP 回写队列。"
+
+        update_job(job_id, stage="review", progress=STAGE_PROGRESS["review"], workflow_state=workflow_state)
+
         audit_score = _compute_audit_score(combined_findings, ai_assessment, erp_ctx)
         finding_breakdown = _build_finding_breakdown(combined_findings)
         decision_trace = _build_decision_trace(
@@ -2650,6 +3800,10 @@ def run_audit_job(
             "risk_level": risk_level,
             "pass": is_pass,
             "summary": summary,
+            "recognized_doc_type": recognized_doc_type,
+            "recognized_doc_type_label": recognized_doc_type_label,
+            "recognized_doc_subtype": recognized_doc_subtype,
+            "recognized_doc_subtype_label": recognized_doc_subtype_label,
             "findings": combined_findings,
             "extracted_fields": fields,
             "rule_findings": rule_findings,
@@ -2677,11 +3831,26 @@ def run_audit_job(
             "text_extract_mode": extract_mode,
             "erp_action": None,
             "erp_trace_id": None,
+            "workflow_state": workflow_state,
+            "next_action": next_action,
+            "case_summary": {
+                "case_id": normalized_case_id,
+                "documents": case_documents,
+                "completeness": case_completeness,
+            },
         }
 
         _persist_audit_result(job_id, result)
+        _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, status="done", doc_type=effective_doc_type)
 
-        update_job(job_id, status="done", progress=STAGE_PROGRESS["done"], stage="done", result=result)
+        update_job(
+            job_id,
+            status="done",
+            progress=STAGE_PROGRESS["done"],
+            stage="done",
+            workflow_state=workflow_state,
+            result=result,
+        )
         t_done = time.perf_counter()
         print(
             "[Audit Perf] "
@@ -2696,7 +3865,15 @@ def run_audit_job(
         )
 
     except Exception as e:
-        update_job(job_id, status="failed", progress=STAGE_PROGRESS["failed"], stage="failed", error_message=str(e))
+        update_job(
+            job_id,
+            status="failed",
+            progress=STAGE_PROGRESS["failed"],
+            stage="failed",
+            workflow_state="failed",
+            error_message=str(e),
+        )
+        _update_case_document_entry(case_id=normalized_case_id if "normalized_case_id" in locals() else None, job_id=job_id, status="failed")
         raise
 
 

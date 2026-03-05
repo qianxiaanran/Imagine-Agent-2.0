@@ -62,12 +62,6 @@ OLLAMA_HTTP_CONNECT_TIMEOUT = float(os.getenv("OLLAMA_HTTP_CONNECT_TIMEOUT", "8"
 OLLAMA_HTTP_READ_TIMEOUT = float(os.getenv("OLLAMA_HTTP_READ_TIMEOUT", "120"))
 OLLAMA_HTTP_WRITE_TIMEOUT = float(os.getenv("OLLAMA_HTTP_WRITE_TIMEOUT", "30"))
 OLLAMA_HTTP_POOL_TIMEOUT = float(os.getenv("OLLAMA_HTTP_POOL_TIMEOUT", "30"))
-# 本地路由器（小）型号配置
-ROUTER_MODEL_NAME = os.getenv("ROUTER_MODEL_NAME", "deepseek-r1:1.5b")
-ROUTER_NUM_CTX = int(os.getenv("ROUTER_NUM_CTX", "2048"))
-ROUTER_TEMPERATURE = float(os.getenv("ROUTER_TEMPERATURE", "0.1"))
-ROUTER_TOP_P = float(os.getenv("ROUTER_TOP_P", "0.9"))
-ROUTER_KEEP_ALIVE = os.getenv("ROUTER_KEEP_ALIVE", "1h")
 
 # 云端 DeepSeek 配置（按用户需求补充）
 DEEPSEEK_URL = "https://api.deepseek.com"
@@ -106,26 +100,8 @@ except Exception as e:
     print(f"❌ [LLM Init Error] Failed to initialize ChatOllama: {e}")
     llm_local = None
 
-# 初始化本地路由器模型（小型、低延迟）
-try:
-    if ChatOllama:
-        router_llm = ChatOllama(
-            model=ROUTER_MODEL_NAME,
-            base_url=OLLAMA_BASE_URL,
-            temperature=ROUTER_TEMPERATURE,
-            top_p=ROUTER_TOP_P,
-            num_gpu=OLLAMA_NUM_GPU,
-            # 流=假，
-            num_ctx=ROUTER_NUM_CTX,
-            keep_alive=ROUTER_KEEP_ALIVE,
-            repeat_penalty=1.05
-        )
-        print(f"🧭 [Router Init] Local Router: {ROUTER_MODEL_NAME} @ {OLLAMA_BASE_URL}")
-    else:
-        router_llm = None
-except Exception as e:
-    print(f"⚠️ [Router Init] Failed to initialize router model: {e}")
-    router_llm = None
+# 路由小模型已禁用：避免额外模型常驻与启动预热。
+router_llm = None
 
 
 def get_llm_instance(model_type: str = "local", temperature: float = 0.7) -> Any:
@@ -601,39 +577,21 @@ def ask_llm(prompt: str, model_type: str = "local") -> str:
 # 导出旧调用者的默认实例（首选 get_llm_instance）
 def ask_router(prompt: str, system_prompt: Optional[str] = None) -> str:
     """
-    Local small-model router for intent classification.
-    Returns raw text (expected JSON).
+    Router model is disabled in this build.
     """
-    if not router_llm:
-        print("⚠️ Router model not initialized, returning empty.")
-        return ""
-    if not prompt or not prompt.strip():
-        return ""
-    messages = _build_router_messages(prompt, system_prompt)
-    try:
-        resp = router_llm.invoke(messages)
-        return resp.content if hasattr(resp, "content") else str(resp)
-    except Exception as e:
-         print(f"❌ Router invoke failed: {e}")
-         return ""
+    return ""
 
 
 def warmup_models():
-    """Warm up local and router models to reduce first-token latency."""
+    """Warm up local model to reduce first-token latency."""
     try:
         if llm_local:
             if HumanMessage:
                 llm_local.invoke([HumanMessage(content="ping")])
             else:
-                 llm_local.invoke("ping")
+                llm_local.invoke("ping")
     except Exception as e:
         print(f" [Warmup] Local LLM warmup failed: {e}")
-    try:
-        if router_llm:
-            if HumanMessage:
-                router_llm.invoke(_build_router_messages("ping", "You are a router. Output JSON only."))
-    except Exception as e:
-        print(f" [Warmup] Router warmup failed: {e}")
 
 llm = llm_local
 

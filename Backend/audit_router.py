@@ -17,6 +17,7 @@ async def audit_start(
     file: UploadFile = File(...),
     doc_type: str = Form(None),
     user_id: str = Form(None),
+    case_id: str = Form(None),
     model_type: str = Form(None),
 ):
     if not file:
@@ -32,11 +33,19 @@ async def audit_start(
             file.filename,
             user_id or "anonymous",
             doc_type,
+            case_id=case_id,
             model_type=model_type,
         )
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Audit queue unavailable: {e}")
-    return {"job_id": job["job_id"], "status": job["status"]}
+    snapshot = get_job_snapshot(job["job_id"]) or {}
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "case_id": job.get("case_id"),
+        "stage": job.get("stage"),
+        "case_documents": snapshot.get("case_documents", []),
+    }
 
 
 @router.get("/api/audit/{job_id}")

@@ -327,10 +327,24 @@ def get_embeddings():
         else:
             print("[Model] embedding fallback to CPU", flush=True)
 
-        _embeddings = HuggingFaceEmbeddings(
-            model_name=local_model_path,
-            model_kwargs={"device": device}
-        )
+        def _build_embeddings(target_device: str):
+            return HuggingFaceEmbeddings(
+                model_name=local_model_path,
+                model_kwargs={"device": target_device}
+            )
+
+        try:
+            _embeddings = _build_embeddings(device)
+        except Exception as e:
+            # 部分 torch/transformers 组合在 CUDA 路径会触发 meta tensor 迁移异常。
+            # 失败时自动回退到 CPU，避免文档上传直接中断。
+            err_text = str(e)
+            if device == "cuda" and "meta tensor" in err_text.lower():
+                print(f"[Model] embedding CUDA init failed, fallback to CPU: {e}", flush=True)
+                _embeddings = _build_embeddings("cpu")
+            else:
+                raise
+
         print("[Model] BGE-Small (512d) loaded", flush=True)
     return _embeddings
 
@@ -483,9 +497,24 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
                 return False, "Legacy .doc parsing unavailable. Convert to .docx or install antiword/catdoc.", None
             return False, "Empty or unreadable document", None
         chunks = _adaptive_split_documents(docs, filename)
-        print(f"[Logic] split into {len(chunks)} chunks", flush=True)
+        ext = os.path.splitext(filename)[1].lower()
+        total_pages = len(docs)
+        non_empty_pages = sum(
+            1 for d in docs if (getattr(d, "page_content", "") or "").strip()
+        )
+        print(
+            f"[Logic] split into {len(chunks)} chunks "
+            f"(pages={total_pages}, non_empty_pages={non_empty_pages})",
+            flush=True,
+        )
 
         if not chunks:
+            if ext == ".pdf":
+                return (
+                    False,
+                    "PDF 未提取到可用文本（可能是扫描件/图片型PDF或加密PDF）。请先做OCR后再上传。",
+                    None,
+                )
             return False, "Unable to split document", None
 
         # 使用前几个块作为直接上下文的预览文本。

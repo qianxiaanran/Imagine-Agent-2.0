@@ -49,6 +49,7 @@ const HISTORY_FIRST_PAINT_COUNT = 6;
 // 常量 STREAM_UI_THROTTLE_MS = 24; // 已删除：不再使用油门
 const STREAM_UI_FLUSH_MS = 12;
 const MAX_CONTEXT_CHARS = 6000;
+const OCR_SUMMARY_MAX_CONTEXT_CHARS = 32000;
 const OCR_SUMMARY_STREAM_TIMEOUT_MS = 180000;
 const OCR_SUMMARY_IDLE_TIMEOUT_MS = 90000;
 const OCR_SUMMARY_RETRY_LIMIT = 1;
@@ -377,8 +378,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [auditState, setAuditState] = useState({
     status: 'idle',
     jobId: null,
+    caseId: null,
+    caseDocuments: [],
     progress: 0,
     stage: null,
+    workflow_state: null,
     result: null,
     error: null,
     error_message: null
@@ -449,6 +453,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const ocrSummaryTimeoutRef = useRef(null);
   const ocrSummaryLastFlushRef = useRef(0);
   const ocrSummaryRequestLockRef = useRef(false);
+  const ocrSummarySessionIdRef = useRef(null);
 
   // ✨ 交互状态
   const [copiedIdx, setCopiedIdx] = useState(null);
@@ -1095,6 +1100,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           status: nextStatus,
           progress: Number.isFinite(progressValue) ? progressValue : prev.progress,
           stage: data.stage || prev.stage,
+          workflow_state: data.workflow_state || prev.workflow_state,
+          caseId: data.case_id || prev.caseId,
+          caseDocuments: Array.isArray(data.case_documents) ? data.case_documents : prev.caseDocuments,
           result: data.result || prev.result,
           error_message: data.error_message || prev.error_message,
           error: data.error_message ? data.error_message : prev.error
@@ -1592,8 +1600,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setAuditState({
           status: 'idle',
           jobId: null,
+          caseId: null,
+          caseDocuments: [],
           progress: 0,
           stage: null,
+          workflow_state: null,
           result: null,
           error: null,
           error_message: null
@@ -1633,15 +1644,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       setAuditNotice('');
       setAuditFile({ name: file.name, size: file.size, sizeLabel: formatFileSize(file.size) });
-      setAuditState({
+      setAuditState((prev) => ({
+          ...prev,
           status: 'uploading',
           jobId: null,
           progress: 0,
-          stage: 'pending',
+          stage: 'pending_docs',
+          workflow_state: 'pending_docs',
           result: null,
           error: null,
           error_message: null
-      });
+      }));
 
       try {
           const formData = new FormData();
@@ -1650,6 +1663,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           const effectiveAuditBackend = auditModelBackend === 'cloud' ? 'cloud' : 'local';
           formData.append('model_type', effectiveAuditBackend);
           formData.append('user_id', userProfile.id || 'anonymous');
+          if (auditState.caseId) formData.append('case_id', auditState.caseId);
 
           const token = localStorage.getItem(AUTH_TOKEN_KEY);
           const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
@@ -1665,32 +1679,41 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               throw new Error(data.detail || data.error || '审单启动失败');
           }
 
-          setAuditState({
+          setAuditState((prev) => ({
+              ...prev,
               status: data.status || 'pending',
               jobId: data.job_id,
+              caseId: data.case_id || prev.caseId,
+              caseDocuments: Array.isArray(data.case_documents) ? data.case_documents : prev.caseDocuments,
               progress: 0,
-              stage: 'pending',
+              stage: data.stage || 'pending_docs',
+              workflow_state: data.stage || 'pending_docs',
               result: null,
               error: null,
               error_message: null
-          });
+          }));
       } catch (error) {
           const message = error?.message || '审单启动失败';
-          setAuditState({
+          setAuditState((prev) => ({
+              ...prev,
               status: 'failed',
               jobId: null,
               progress: 0,
               stage: 'failed',
+              workflow_state: 'failed',
               result: null,
               error: message,
               error_message: message
-          });
+          }));
       }
   };
 
   const handleAuditFileSelect = async (e) => {
       const files = Array.from(e?.target?.files || []);
       if (!files.length) return;
+      if (files.length > 1) {
+          showAuditNotice('当前按顺序处理单据包，请逐个上传。');
+      }
       await startAuditJob(files[0]);
       if (e?.target) e.target.value = '';
   };
@@ -1775,6 +1798,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setOcrSummaryFileId(null);
       setOcrSummaryBackend('local');
       setOcrSummaryFirstDone(false);
+      ocrSummarySessionIdRef.current = null;
       ocrSummaryContextRef.current = '';
       ocrSummaryBufferRef.current = [];
       ocrSummaryDisplayRef.current = '';
@@ -3480,12 +3504,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const headers = { 'Content-Type': 'application/json' };
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const contextContent = (ocrSummaryContextRef.current || '').slice(0, MAX_CONTEXT_CHARS);
+      const contextContent = (ocrSummaryContextRef.current || '').slice(0, OCR_SUMMARY_MAX_CONTEXT_CHARS);
+      let ocrSummarySessionId = ocrSummarySessionIdRef.current;
+      if (resetConversation || !ocrSummarySessionId) {
+          ocrSummarySessionId = crypto.randomUUID
+              ? crypto.randomUUID()
+              : `sid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          ocrSummarySessionIdRef.current = ocrSummarySessionId;
+      }
       const payload = {
           message: trimmed,
           modelId: String(selectedModel || 0),
-          session_id: `ocr-summary-${Date.now()}`,
-          user_id: 'anonymous',
+          session_id: ocrSummarySessionId,
+          user_id: userProfile.id || 'anonymous',
           mode: 'ocr_summary',
           context_content: contextContent,
           model_backend: backendToUse,
@@ -3647,6 +3678,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           setOcrSummaryFirstDone(false);
           setOcrSummaryMessages([]);
           setOcrSummaryInput('');
+          ocrSummarySessionIdRef.current = null;
           setIsOcrSummaryOpen(true);
           setTimeout(() => {
               sendOcrSummaryMessage(OCR_SUMMARY_DEFAULT_PROMPT, {

@@ -254,6 +254,66 @@ const AuditPanel = ({
   const isPass = typeof result.pass === "boolean" ? result.pass : riskLevel === "low";
 
   const extracted = result.extracted_fields || {};
+  const detectedDocType = String(result.recognized_doc_type || extracted.doc_type || "").trim();
+  const docTypeLabelMap = {
+    auto: "自动识别",
+    trade_case: "贸易单据包",
+    invoice: "发票",
+    contract: "合同",
+    payment: "付款单",
+    expense: "报销单",
+    import_declaration: "进口报关单",
+    export_declaration: "出口报关单",
+    packing_list: "装箱单",
+    bill_of_lading: "提单",
+    air_waybill: "空运运单",
+    certificate_of_origin: "原产地证",
+  };
+  const detectedDocTypeLabel = String(
+    result.recognized_doc_type_label || docTypeLabelMap[detectedDocType] || detectedDocType || ""
+  ).trim();
+  const detectedDocSubtype = String(result.recognized_doc_subtype || extracted.doc_subtype || "").trim();
+  const docSubtypeLabelMap = {
+    sales_contract: "销售合同",
+    purchase_contract: "采购合同",
+    sale_purchase_contract: "购销合同",
+    framework_contract: "框架合同",
+    service_contract: "服务合同",
+    labor_contract: "劳务合同",
+    lease_contract: "租赁合同",
+    nda_agreement: "保密协议",
+    contract_generic: "普通合同",
+    vat_special_invoice: "增值税专用发票",
+    vat_general_invoice: "增值税普通发票",
+    proforma_invoice: "形式发票",
+    sales_invoice: "销项发票",
+    purchase_invoice: "进项发票",
+    invoice_generic: "普通发票",
+    import_customs_declaration: "进口报关单",
+    export_customs_declaration: "出口报关单",
+    import_packing_list: "进口装箱单",
+    export_packing_list: "出口装箱单",
+    packing_list_generic: "装箱单",
+    master_bill_of_lading: "主提单",
+    house_bill_of_lading: "分提单",
+    ocean_bill_of_lading: "海运提单",
+    bill_of_lading_generic: "提单",
+    master_air_waybill: "主空运单",
+    house_air_waybill: "分空运单",
+    air_waybill_generic: "空运运单",
+    coo_form_e: "原产地证（Form E）",
+    coo_form_a: "原产地证（Form A）",
+    certificate_of_origin_generic: "原产地证",
+    advance_payment: "预付款",
+    final_payment: "尾款",
+    payment_generic: "付款单",
+    travel_expense: "差旅报销",
+    marketing_expense: "营销报销",
+    expense_generic: "报销单",
+  };
+  const detectedDocSubtypeLabel = String(
+    result.recognized_doc_subtype_label || docSubtypeLabelMap[detectedDocSubtype] || detectedDocSubtype || ""
+  ).trim();
   const fieldPreview = [
     { key: "total_amount", label: "金额" },
     { key: "invoice_no", label: "发票号" },
@@ -290,25 +350,91 @@ const AuditPanel = ({
     { value: "local", label: "本地" },
     { value: "cloud", label: "云端" },
   ];
+  const caseSummary = (result && typeof result.case_summary === "object") ? result.case_summary : {};
+  const caseDocuments = Array.isArray(caseSummary.documents)
+    ? caseSummary.documents
+    : (Array.isArray(auditState?.caseDocuments) ? auditState.caseDocuments : []);
+  const caseCompleteness = caseSummary && typeof caseSummary.completeness === "object" ? caseSummary.completeness : null;
+  const workflowState = String(result.workflow_state || auditState?.workflow_state || status || "idle").toLowerCase();
+  const workflowLabels = {
+    pending_docs: "待补件",
+    extracting: "提取中",
+    rule_checking: "规则校验中",
+    ai_review: "AI审查中",
+    aggregating: "汇总中",
+    review_required: "需人工复核",
+    review_optional: "建议抽检",
+    ready_for_erp: "可回写ERP",
+    failed: "失败",
+    done: "完成",
+  };
+  const workflowLabel = workflowLabels[workflowState] || workflowState || "处理中";
+  const missingTags = Array.isArray(caseCompleteness?.missing) ? caseCompleteness.missing : [];
+  const caseBadgeStyle = missingTags.length
+    ? "bg-amber-50 text-amber-700 border-amber-200"
+    : "bg-emerald-50 text-emerald-700 border-emerald-200";
 
   return (
     <div className={`w-full ${widthClass} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
-      <div className={`px-4 py-3 border-b flex justify-between items-center ${panelStyle.headerBg} ${panelStyle.border}`}>
-        <div className={`flex items-center gap-2 font-medium ${panelStyle.headerText}`}>
-          <ClipboardCheck size={18} />
-          <span className="truncate">智能审单</span>
+      <div className={`px-4 py-3 border-b flex justify-between items-center bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-slate-700`}>
+        <div className="flex items-center gap-2 font-medium text-slate-50">
+          <div className="w-8 h-8 rounded-xl bg-white/10 border border-white/15 flex items-center justify-center">
+            <ClipboardCheck size={16} />
+          </div>
+          <div>
+            <div className="truncate text-sm font-semibold">智能审单中台</div>
+            <div className="text-[11px] text-slate-300">规则 + 跨单据 + AI + ERP回写占位</div>
+          </div>
         </div>
-        {isBusy && (
-          <span className={`text-xs flex items-center gap-1 ${panelStyle.headerText}`}>
-            <Loader2 size={12} className="animate-spin" /> {statusLabel}
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] px-2 py-1 rounded-full border border-white/20 bg-white/10 text-slate-100">
+            {workflowLabel}
           </span>
-        )}
+          {isBusy && (
+            <span className="text-xs flex items-center gap-1 text-slate-100">
+              <Loader2 size={12} className="animate-spin" /> {statusLabel}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 p-4 overflow-y-auto space-y-4 custom-scrollbar">
         {notice && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 text-amber-700 text-xs px-3 py-2">
             {notice}
+          </div>
+        )}
+
+        {(auditState?.caseId || caseDocuments.length > 0) && (
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-gradient-to-br from-white via-slate-50 to-white dark:from-slate-900 dark:via-slate-900 dark:to-slate-800 p-4 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs font-medium text-slate-500 dark:text-slate-300">审单包 Case</div>
+              <span className={`text-[11px] px-2 py-1 rounded-full border ${caseBadgeStyle}`}>
+                {missingTags.length ? `缺少 ${missingTags.length} 项` : "单据齐套"}
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 break-all">
+              {auditState?.caseId || caseSummary?.case_id}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {caseDocuments.slice(0, 10).map((doc, idx) => (
+                <span
+                  key={`${doc?.doc_id || doc?.job_id || idx}`}
+                  className="px-2 py-1 rounded-full text-[11px] border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-200"
+                  title={doc?.file_name || ""}
+                >
+                  {(doc?.tag || doc?.doc_type || "doc").replace(/_/g, " ")}
+                </span>
+              ))}
+              {caseDocuments.length === 0 && (
+                <span className="text-[11px] text-slate-400">尚未添加单据</span>
+              )}
+            </div>
+            {missingTags.length > 0 && (
+              <div className="mt-2 text-[11px] text-amber-700 dark:text-amber-300">
+                缺失：{missingTags.join(" / ")}
+              </div>
+            )}
           </div>
         )}
 
@@ -369,14 +495,16 @@ const AuditPanel = ({
           </div>
         </div>
 
-        <div className="rounded-xl border border-dashed border-gray-200 dark:border-gray-700 p-4 bg-gray-50/60 dark:bg-gray-900/40">
+        <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-600 p-4 bg-gradient-to-r from-slate-50 to-white dark:from-slate-900/70 dark:to-slate-800/60">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-teal-50 text-teal-600 flex items-center justify-center">
+            <div className="w-10 h-10 rounded-xl bg-slate-900 text-white dark:bg-white dark:text-slate-900 flex items-center justify-center shadow-sm">
               <FileUp size={18} />
             </div>
             <div className="flex-1">
-              <div className="text-sm font-medium text-gray-800 dark:text-gray-200">上传审单文件</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">支持图片 / PDF / Word</div>
+              <div className="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                {caseDocuments.length > 0 ? "追加审单单据" : "上传首个审单文件"}
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">支持图片 / PDF / Word，按 Case 累积上下文</div>
             </div>
           </div>
           <div className="mt-3 flex items-center gap-2">
@@ -384,14 +512,14 @@ const AuditPanel = ({
               type="button"
               onClick={() => fileInputRef.current && fileInputRef.current.click()}
               disabled={isBusy}
-              className="px-3 py-1.5 rounded-lg bg-black text-white text-xs font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-black text-white text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
             >
-              选择文件
+              {caseDocuments.length > 0 ? "继续添加" : "选择文件"}
             </button>
-            <span className="text-[11px] text-gray-400">选择后立即开始审单</span>
+            <span className="text-[11px] text-gray-400">上传后自动进入下一轮审单</span>
           </div>
           {auditFile && (
-            <div className="mt-2 px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 text-xs text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-800 flex items-center justify-between gap-3">
+            <div className="mt-2 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-gray-600 dark:text-gray-300 bg-white/90 dark:bg-slate-800 flex items-center justify-between gap-3">
               <span className="truncate">{auditFile.name}</span>
               <span className="text-gray-400">{auditFile.sizeLabel}</span>
             </div>
@@ -470,7 +598,30 @@ const AuditPanel = ({
                   审单评分：<span className="font-semibold text-gray-800 dark:text-gray-200">{auditScore}</span>
                 </div>
               )}
+              {detectedDocType && (
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  识别类型：
+                  <span className="font-semibold text-gray-800 dark:text-gray-200">
+                    {detectedDocTypeLabel}
+                    {detectedDocTypeLabel !== detectedDocType ? `（${detectedDocType}）` : ""}
+                  </span>
+                </div>
+              )}
+              {detectedDocSubtype && (
+                <div className="text-xs text-gray-500 dark:text-gray-400">
+                  细分类型：
+                  <span className="font-semibold text-gray-800 dark:text-gray-200">
+                    {detectedDocSubtypeLabel}
+                    {detectedDocSubtypeLabel !== detectedDocSubtype ? `（${detectedDocSubtype}）` : ""}
+                  </span>
+                </div>
+              )}
               {result.summary && <div className="text-sm text-gray-600 dark:text-gray-300">{result.summary}</div>}
+              {result.next_action && (
+                <div className="text-xs text-slate-500 dark:text-slate-300">
+                  下一步：<span className="font-medium text-slate-700 dark:text-slate-100">{result.next_action}</span>
+                </div>
+              )}
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 建议动作：<span className="text-gray-700 dark:text-gray-200 font-medium">{actionAdvice}</span>
               </div>

@@ -34,6 +34,7 @@ SEARCH_PROVIDER_ORDER = [
     if p.strip()
 ]
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
+OCR_SUMMARY_MAX_CONTEXT_CHARS = int(os.getenv("OCR_SUMMARY_MAX_CONTEXT_CHARS", "32000"))
 RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "2600"))
 RAG_MAX_CHUNK_CHARS = int(os.getenv("RAG_MAX_CHUNK_CHARS", "700"))
 RAG_MAX_CHUNKS = int(os.getenv("RAG_MAX_CHUNKS", "6"))
@@ -51,6 +52,7 @@ CONTEXT_COMPACTION_SCAN_LIMIT = int(os.getenv("CONTEXT_COMPACTION_SCAN_LIMIT", "
 CONTEXT_COMPACTION_TRIGGER_CHARS = int(os.getenv("CONTEXT_COMPACTION_TRIGGER_CHARS", "2500"))
 CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL", "4"))
 HISTORY_TAIL_MIN_RECORDS = int(os.getenv("HISTORY_TAIL_MIN_RECORDS", "10"))
+STREAM_UNTHROTTLED = os.getenv("STREAM_UNTHROTTLED", "true").lower() != "false"
 # -----------------------------------------------------------------------------
 
 from supabase_client import require_supabase
@@ -395,11 +397,16 @@ def _build_cache_friendly_prompt(
         user_message: str,
         session_state: str = "",
         summary_context: str = "",
+        active_context_content: str = "",
         recent_history: str = "",
 ) -> str:
     safe_user_message = _truncate_context(user_message, max_len=PROMPT_USER_MAX_CHARS)
     safe_session_state = _truncate_context(session_state, max_len=PROMPT_SESSION_STATE_MAX_CHARS)
     safe_summary_context = _truncate_context(summary_context, max_len=PROMPT_SUMMARY_MAX_CHARS)
+    safe_active_context = _truncate_context(
+        active_context_content,
+        max_len=max(RAG_MAX_ACTIVE_CONTEXT_CHARS, OCR_SUMMARY_MAX_CONTEXT_CHARS),
+    )
     safe_recent_history = _truncate_context(recent_history, max_len=PROMPT_HISTORY_MAX_CHARS)
 
     def section(name: str, content: str, allow_empty: bool = False) -> str:
@@ -412,10 +419,14 @@ def _build_cache_friendly_prompt(
         section("PromptLayout", f"version={PROMPT_LAYOUT_VERSION}"),
         section("SessionState", safe_session_state),
         section("SummaryContext", safe_summary_context),
+    ]
+    if safe_active_context:
+        blocks.append(section("ActiveContext", safe_active_context))
+    blocks.extend([
         section("RecentHistory", safe_recent_history),
         section("User", safe_user_message),
         section("Assistant", "", allow_empty=True),
-    ]
+    ])
     return "\n\n".join(blocks)
 
 
@@ -893,6 +904,43 @@ def _normalize_mode(mode: Optional[str]) -> str:
     return m
 
 
+_ROUTE_DISABLE_NEGATIVE_WORDS = (
+    "不要", "别", "别再", "不用", "不必", "禁止", "请勿", "勿", "不准", "拒绝",
+)
+
+_ROUTE_DISABLE_TARGET_PATTERNS = {
+    "database": (
+        "数据库", "查数据库", "查库", "sql", "db", "数据表", "查表", "查数据",
+    ),
+    "rag": (
+        "rag", "文档", "文件", "知识库", "附件", "上传文件", "检索文档",
+    ),
+    "search": (
+        "搜索", "联网", "上网", "网页检索", "websearch", "internet", "查网", "在线搜索",
+    ),
+    "audit": (
+        "审计", "风险审查", "风险评估", "合规检查",
+    ),
+}
+
+
+def _extract_disabled_routes(text: Optional[str]) -> set[str]:
+    q = _normalize_match_text(text)
+    if not q:
+        return set()
+
+    blocked: set[str] = set()
+    neg = "|".join(_ROUTE_DISABLE_NEGATIVE_WORDS)
+
+    for route, targets in _ROUTE_DISABLE_TARGET_PATTERNS.items():
+        for target in targets:
+            if re.search(fr"(?:{neg}).{{0,8}}(?:{target})", q) or re.search(fr"(?:{target}).{{0,4}}(?:{neg})", q):
+                blocked.add(route)
+                break
+
+    return blocked
+
+
 _DB_INTENT_ACTION_WORDS = [
     "sql", "database", "table", "select", "where", "join", "groupby", "count", "sum",
     "数据库", "数据表", "表里", "查询", "查", "查下", "查找", "统计", "汇总", "筛选", "排序", "排名", "明细",
@@ -906,6 +954,9 @@ _DB_INTENT_ENTITY_WORDS = [
 
 
 def _looks_like_db_request(text: str) -> bool:
+    if "database" in _extract_disabled_routes(text):
+        return False
+
     q = _normalize_match_text(text)
     if not q:
         return False
@@ -1931,7 +1982,12 @@ _IDENTITY_CN_PATTERNS = [
     r"你是谁",
     r"你是.*(创造|开发|构建|训练).*的",
     r"(谁|谁在).*?(创造|开发|构建|训练).*你",
+    r"你是(哪家|哪个|什么)(公司|厂商|团队)(的)?",
+    r"你(归属|隶属|来自|出自).*(公司|厂商|团队)",
     r"你(用的|是什么|属于)?什么模型",
+    r"你是(哪家|哪家的|哪家公司|哪个厂商|哪一家的).*(模型|大模型|llm)",
+    r"你(来自|出自).*(哪家|哪个公司|哪个厂商)",
+    r"你的(来源|本家|背后).*(模型|大模型|llm|公司|厂商)",
     r"你的模型(是|叫)?什么",
     r"你是(chatgpt|gpt|qwen|deepseek)吗",
 ]
@@ -1956,6 +2012,16 @@ def _is_identity_profile_question(text: str) -> bool:
     for pattern in _IDENTITY_EN_PATTERNS:
         if re.search(pattern, normalized):
             return True
+    # 关键词兜底：来源归属类提问一律视为身份问题。
+    if any(k in normalized for k in ("公司", "厂商", "团队")) and any(
+        k in normalized for k in ("你是", "你来自", "你出自", "你归属", "你隶属")
+    ):
+        return True
+    # 关键词兜底：任何同时包含“模型/llm + 来源归属”的提问都视为身份问题。
+    if ("模型" in normalized or "llm" in normalized) and any(
+        k in normalized for k in ("哪家", "来源", "本家", "厂商", "公司", "来自", "出自")
+    ):
+        return True
     return False
 
 
@@ -2080,6 +2146,17 @@ async def chat(
         return False
 
     def _make_text_buffer(min_chars: int = 8, max_chars: int = 64, immediate: bool = False):
+        if STREAM_UNTHROTTLED:
+            def push(text: str) -> Optional[str]:
+                if not text:
+                    return None
+                return text
+
+            def flush() -> Optional[str]:
+                return None
+
+            return push, flush
+
         buf = ""
 
         def push(text: str) -> Optional[str]:
@@ -2110,6 +2187,8 @@ async def chat(
     def _split_text(text: str, size: int = 32) -> List[str]:
         if not text:
             return []
+        if STREAM_UNTHROTTLED:
+            return [text]
         if len(text) <= size:
             return [text]
         return [text[i:i + size] for i in range(0, len(text), size)]
@@ -2169,7 +2248,17 @@ async def chat(
 
         return _stream(fixed_identity_response_generator())
 
-    context_content = _truncate_context(req.context_content)
+    blocked_routes = _extract_disabled_routes(message)
+    if blocked_routes:
+        print(f"🛑 [Router] User disabled routes: {sorted(blocked_routes)}")
+        if mode in blocked_routes and mode in {"database", "rag", "search", "audit"}:
+            mode = "general"
+            print("🛑 [Router] Requested mode is blocked by user text, fallback -> general")
+
+    context_limit = OCR_SUMMARY_MAX_CONTEXT_CHARS if mode == "ocr_summary" else MAX_CONTEXT_CHARS
+    context_content = _truncate_context(req.context_content, max_len=context_limit)
+    if mode == "ocr_summary":
+        print(f"[OCR Summary] session={session_id} context_chars={len(context_content or '')}")
     requested_source_files = [
         str(name).strip()
         for name in (req.files or [])
@@ -2285,17 +2374,22 @@ async def chat(
                 hub.history_summary = history_text[:1200]
 
             summary_context = hub.get_combined_context(max_len=3600)
-            if summary_context and not _is_context_related(message, summary_context, min_hits=1):
+            if (
+                summary_context
+                and normalized_mode != "ocr_summary"
+                and not _is_context_related(message, summary_context, min_hits=1)
+            ):
                 # 当主题转移时，删除陈旧的摘要上下文。
                 summary_context = ""
         except Exception:
             summary_context = ""
 
+        active_context_limit = OCR_SUMMARY_MAX_CONTEXT_CHARS if normalized_mode == "ocr_summary" else RAG_MAX_ACTIVE_CONTEXT_CHARS
         bundle = {
             "history_text": _truncate_context(history_text or "", max_len=max(PROMPT_HISTORY_MAX_CHARS, 1600)),
             "summary_context": _truncate_context(summary_context or "", max_len=max(PROMPT_SUMMARY_MAX_CHARS, 1800)),
             "session_state": _truncate_context(session_state or "", max_len=max(PROMPT_SESSION_STATE_MAX_CHARS, 1200)),
-            "active_context": _truncate_context(active_context or "", max_len=RAG_MAX_ACTIVE_CONTEXT_CHARS),
+            "active_context": _truncate_context(active_context or "", max_len=active_context_limit),
         }
         shared_context_cache[cache_key] = bundle
         return bundle
@@ -2320,6 +2414,7 @@ async def chat(
             user_message=(user_message if user_message is not None else message),
             session_state=shared_ctx.get("session_state", ""),
             summary_context=merged_summary,
+            active_context_content=shared_ctx.get("active_context", ""),
             recent_history=(recent_history if recent_history is not None else shared_ctx.get("history_text", "")),
         )
 
@@ -3141,7 +3236,9 @@ async def chat(
             "mode": mode,
             "modelId": req.modelId,
             # [新增]将model_backend带入图状态
-            "model_backend": model_backend
+            "model_backend": model_backend,
+            # 用户显式禁用的功能路由（例如“不要查数据库”）。
+            "disabled_routes": sorted(blocked_routes),
         }
 
         full_reply_display = ""
@@ -3245,31 +3342,40 @@ async def chat(
     # 统一流响应退出
     is_report_write_mode = (model_id == "3") or _is_report_write_prompt(message)
     auto_routing_enabled = (mode == "general") and (not is_report_write_mode)
-    is_doc_query = _is_doc_query(message) if auto_routing_enabled else False
+    db_route_blocked = "database" in blocked_routes
+    rag_route_blocked = "rag" in blocked_routes
+    search_route_blocked = "search" in blocked_routes
+    audit_route_blocked = "audit" in blocked_routes
+
+    is_doc_query = _is_doc_query(message) if (auto_routing_enabled and not rag_route_blocked) else False
     is_db_query = False
-    if auto_routing_enabled and _is_db_question_by_tables:
+    if auto_routing_enabled and (not db_route_blocked) and _is_db_question_by_tables:
         try:
             is_db_query = _is_db_question_by_tables(message)[0]
         except Exception:
             is_db_query = False
 
-    if auto_routing_enabled and not is_db_query:
+    if auto_routing_enabled and (not db_route_blocked) and not is_db_query:
         is_db_query = _looks_like_db_request(message)
 
     if auto_routing_enabled and FAST_CHAT_DIRECT and not context_content and not is_doc_query and not is_db_query:
+        return _stream(fast_chat_response_generator())
+
+    # 用户显式禁用某能力时，优先走通用回复，避免进入被禁用能力的自动路由。
+    if auto_routing_enabled and blocked_routes and not is_doc_query and not is_db_query:
         return _stream(fast_chat_response_generator())
 
     # 🚀 快速路径：自动路由的数据库问题直接进入数据库模式（跳过 LangGraph + 额外的 LLM）
     if auto_routing_enabled and is_db_query and not is_doc_query:
         return _stream(database_response_generator())
 
-    if mode == "database":
+    if mode == "database" and not db_route_blocked:
         return _stream(database_response_generator())
-    if mode == "rag":
+    if mode == "rag" and not rag_route_blocked:
         return _stream(rag_response_generator())
-    if mode == "search":
+    if mode == "search" and not search_route_blocked:
         return _stream(search_response_generator())
-    if mode == "audit": # ✅ 新增 Audit 路由
+    if mode == "audit" and not audit_route_blocked: # ✅ 新增 Audit 路由
         return _stream(audit_response_generator())
 
     if auto_routing_enabled:
