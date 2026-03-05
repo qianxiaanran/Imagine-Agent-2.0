@@ -17,6 +17,7 @@ import Suggestions from './Suggestions';
 import { API_BASE_URL, AUTH_TOKEN_KEY, refreshAccessToken as refreshAccessTokenFromApiClient } from '../../api/apiClient';
 import userApi from '../../api/user';
 import historyApi from '../../api/history';
+import presentationApi from '../../api/presentation';
 import { convertWebMToWav } from '../../utils/audio';
 import {
   APP_SETTINGS_UPDATED_EVENT,
@@ -60,52 +61,16 @@ const OCR_SUMMARY_BACKEND_OPTIONS = [
   { value: "cloud", label: "DeepSeek（云端）" },
 ];
 const USER_MARKDOWN_HINT_RE = /```|`[^`]+`|\[[^\]]+\]\([^)]+\)|(^|\n)\s*[-*+]\s|(^|\n)\s*\d+\.\s|(^|\n)\s*>|(^|\n)\s*#|(^|\n)\s*\|.+\|\s*(\n|$)|(^|\n)\s*[-:\s|]{3,}\|[-:\s|]*/;
-const DETAIL_LEVEL_OPTIONS = ["精简", "标准", "详细", "非常详细"];
-const REPORT_STYLE_OPTIONS = ["咨询风", "管理层简报", "数据驱动", "叙事型", "执行导向", "学术/研究型"];
-const PPT_STRUCTURE_OPTIONS = ["问题-分析-方案", "现状-挑战-突破", "数据驱动", "项目汇报", "战略规划", "销售路演"];
-const PPT_VISUAL_OPTIONS = ["商务简洁", "科技感", "品牌一致", "极简黑白", "暖色活力", "深色高对比"];
-const REPORT_SECTION_OPTIONS = [
-  "执行摘要",
-  "背景与范围",
-  "目标与问题定义",
-  "方法与数据来源",
-  "现状分析",
-  "原因/驱动因素",
-  "市场/竞品分析",
-  "用户/客户洞察",
-  "财务/成本分析",
-  "风险与合规",
-  "策略与方案",
-  "实施路径/里程碑",
-  "资源与预算",
-  "指标与评估",
-  "结论与下一步"
-];
-const PPT_SECTION_OPTIONS = [
-  "封面",
-  "目录/议程",
-  "背景/现状",
-  "问题/痛点",
-  "分析/洞察",
-  "方案/策略",
-  "实施计划",
-  "资源/预算",
-  "风险与对策",
-  "案例/对标",
-  "成果预期/KPI",
-  "总结/行动项",
-  "Q&A/致谢"
-];
-const EMAIL_ELEMENT_OPTIONS = [
-  "背景说明",
-  "明确诉求",
-  "时间节点",
-  "所需配合",
-  "行动项列表",
-  "附件说明",
-  "风险/注意事项",
-  "礼貌结束语"
-];
+const WRITING_FORM_AUDIENCE_LIMIT = 10;
+const WRITING_CONTENT_TYPE_OPTIONS = ["营销文案", "功能发布公告", "产品介绍", "活动邀请函", "客户案例故事"];
+const WRITING_PLATFORM_OPTIONS = ["微信公众号", "企业微信", "官网", "小红书", "抖音", "LinkedIn", "邮件触达"];
+const WRITING_AUDIENCE_PRESET = ["外贸业务员", "采购负责人", "运营主管", "财务/合规", "管理层", "跨境电商团队"];
+const WRITING_TONE_OPTIONS = ["专业严谨", "商务简洁", "数据驱动", "亲和易读", "行动导向"];
+const WRITING_ANALYSIS_FRAMEWORK_OPTIONS = ["4P框架", "SWOT", "PEST", "波特五力", "STP"];
+const WRITING_CONSULTING_TYPE_OPTIONS = ["流程优化建议", "合规风控建议", "增长策略咨询", "系统落地方案"];
+const WRITING_CONSULTING_ROLE_OPTIONS = ["管理层", "运营团队", "销售团队", "财务风控团队", "IT实施团队"];
+const WRITING_OUTPUT_FORMAT_OPTIONS = ["执行清单", "分阶段计划", "OKR/KPI方案", "风险-对策矩阵"];
+const WRITING_PROJECT_CONTEXT = "项目是 Enterprise Intelligent Office Agent 2.0，面向进出口企业，核心能力包括：智能对话、会议纪要、OCR识别、智能审单、企业数据库查询、数据决策驾驶舱，以及本地/云模型切换。";
 const ONBOARDING_STORAGE_PREFIX = "onboarding_seen_v1_";
 const ONBOARDING_MESSAGES = [
   "顶部左侧的模式下拉可切换到报告/PPT/邮件写作、会议纪要、OCR、审单等场景。",
@@ -115,7 +80,7 @@ const MODEL_OPTIONS = [
   { id: 0, name: "通用助手", icon: Bot },
   { id: 1, name: "会议纪要", icon: Mic },
   { id: 2, name: "OCR 识别", icon: ScanText },
-  { id: 3, name: "写作助手", icon: PencilLine },
+  { id: 3, name: "智能创作", icon: PencilLine },
   { id: 4, name: "智能审单", icon: ClipboardCheck }
 ];
 
@@ -143,6 +108,26 @@ const extractConversationSessionId = (pathname = '') => {
 const buildConversationPath = (sessionId) => {
     if (!sessionId) return '/';
     return `${CONVERSATION_PATH_PREFIX}${encodeURIComponent(String(sessionId))}`;
+};
+
+const PRESENTON_PROXY_PREFIX = '/api/presentation/presenton/proxy';
+const PRESENTON_LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0', 'host.docker.internal']);
+
+const normalizePresentonEditUrl = (rawUrl) => {
+    const value = String(rawUrl || '').trim();
+    if (!value) return '';
+    if (value.startsWith(PRESENTON_PROXY_PREFIX) || value.startsWith('/')) {
+        return value;
+    }
+    try {
+        const parsed = new URL(value);
+        if (!PRESENTON_LOCAL_HOSTS.has((parsed.hostname || '').toLowerCase())) {
+            return value;
+        }
+        return `${PRESENTON_PROXY_PREFIX}${parsed.pathname}${parsed.search || ''}`;
+    } catch {
+        return value;
+    }
 };
 
 const splitUserMessageContent = (raw = '') => {
@@ -396,6 +381,25 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [reportStep, setReportStep] = useState('selection');
   const [reportType, setReportType] = useState(null);
   const [reportFormData, setReportFormData] = useState({});
+  const [reportAudienceInput, setReportAudienceInput] = useState('');
+  const [writingEntryMode, setWritingEntryMode] = useState('root');
+  const [standalonePptForm, setStandalonePptForm] = useState({
+    analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+    pptSlideCount: 6,
+    analysisInput: "请基于进出口企业协同办公场景，生成可落地的管理汇报PPT，包含现状、问题、方案、计划与风险。",
+    requireMetrics: true,
+    pptFastMode: true,
+    includeImages: true,
+    template: 'general',
+  });
+  const [standalonePptResult, setStandalonePptResult] = useState(null);
+  const [isPresentonGenerating, setIsPresentonGenerating] = useState(false);
+  const [presentonProgress, setPresentonProgress] = useState({
+    taskId: '',
+    status: 'idle',
+    progress: 0,
+    message: '',
+  });
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
@@ -1765,7 +1769,21 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const handleModelChange = (modelId) => {
       if (isProcessing) return;
-      if (selectedModel === modelId) return;
+      if (selectedModel === modelId) {
+          if (modelId === 3) {
+              // Re-enter writing assistant from the mode switch: always return to first-level choices.
+              setWritingEntryMode('root');
+              setReportStep('selection');
+              setReportType(null);
+              setReportFormData({});
+              setReportAudienceInput('');
+              setStandalonePptForm(buildDefaultStandalonePptFormData());
+              setStandalonePptResult(null);
+              setIsPresentonGenerating(false);
+              setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+          }
+          return;
+      }
 
       if (modelId !== 0 && (currentMode === 'database' || currentMode === 'rag' || currentMode === 'search')) {
           onModeChange('general');
@@ -1818,14 +1836,42 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setReportStep('selection');
       setReportType(null);
       setReportFormData({});
+      setReportAudienceInput('');
+      setWritingEntryMode('root');
+      setStandalonePptForm(buildDefaultStandalonePptFormData());
+      setStandalonePptResult(null);
+      setIsPresentonGenerating(false);
+      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
       setSpeakingIdx(null);
       window.speechSynthesis.cancel();
+  };
+
+  const handleOpenDecisionCenter = (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      if (typeof window === 'undefined') return;
+      const popup = window.open('/decision', '_blank', 'noopener,noreferrer');
+      if (!popup) {
+          console.warn('Popup blocked when opening decision center.');
+          return;
+      }
+      try {
+          popup.opener = null;
+      } catch {}
+  };
+
+  const handleMeetingUploadClick = () => {
+      if (fileInputRef.current) {
+          fileInputRef.current.click();
+      }
   };
 
   const handleSessionClick = async (sessionId) => {
     if (isProcessing) return;
     setIsMobileSidebarOpen(false);
     setIsProcessing(true);
+    setIsPresentonGenerating(false);
+    setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
     setAudioFileUrl(null);
     setCurrentAudioPath(null);
     setPendingFiles([]);
@@ -1995,11 +2041,26 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       if (targetModel === 3) {
-        setReportStep('chat');
-      } else {
+        // 写作模式始终先回到一级入口（写作助手 / PPT生成）
+        setWritingEntryMode('root');
         setReportStep('selection');
         setReportType(null);
         setReportFormData({});
+        setReportAudienceInput('');
+        setStandalonePptForm(buildDefaultStandalonePptFormData());
+        setStandalonePptResult(null);
+        setIsPresentonGenerating(false);
+        setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+      } else {
+        setWritingEntryMode('root');
+        setReportStep('selection');
+        setReportType(null);
+        setReportFormData({});
+        setReportAudienceInput('');
+        setStandalonePptForm(buildDefaultStandalonePptFormData());
+        setStandalonePptResult(null);
+        setIsPresentonGenerating(false);
+        setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
       }
     } catch (e) {
       console.error("Failed to load session", e);
@@ -2038,6 +2099,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setReportStep('selection');
       setReportType(null);
       setReportFormData({});
+      setReportAudienceInput('');
+      setWritingEntryMode('root');
+      setStandalonePptForm(buildDefaultStandalonePptFormData());
+      setStandalonePptResult(null);
+      setIsPresentonGenerating(false);
+      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
       setSpeakingIdx(null);
       window.speechSynthesis.cancel();
   };
@@ -3236,13 +3303,123 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       let prompt = "";
       const chosenBackend = reportFormData.modelBackend || llmBackend;
       if (reportType === 'report') {
-          prompt = `[指令:生成报告]\n主题：${reportFormData.topic || '未指定'}\n场景：${reportFormData.scene || '通用'}\n受众：${reportFormData.audience || '通用'}\n时间范围：${reportFormData.timeRange || '未指定'}\n范围/对象：${reportFormData.scope || '未指定'}\n报告目的：${reportFormData.purpose || '未指定'}\n风格/表达：${reportFormData.reportStyle || REPORT_STYLE_OPTIONS[0]}\n详细程度：${reportFormData.detailLevel || DETAIL_LEVEL_OPTIONS[2]}\n必含模块：${listOrNone(reportFormData.reportModules)}\n关键问题/假设：${reportFormData.keyQuestions || '无'}\n数据/指标/素材：${reportFormData.dataMetrics || '无'}\n约束/风险关注：${reportFormData.constraints || '无'}\n预期结论/建议方向：${reportFormData.expectedOutcome || '无'}\n关键内容：${reportFormData.keyPoints || '无'}\n请生成一份“可直接写作”的详细报告大纲：章节不少于 8 个（可根据篇幅增加），覆盖必含模块。每个章节给出：目标/关键结论/分析维度/数据或指标/建议与行动/潜在风险与对策，使用 Markdown 列表组织，内容具体可执行。`;
+          const minWords = Math.max(100, Number(reportFormData.minWords) || 200);
+          prompt = `[指令:创意内容生成]\n项目背景：${WRITING_PROJECT_CONTEXT}\n我要写一个：${reportFormData.contentType || WRITING_CONTENT_TYPE_OPTIONS[0]}\n发布平台：${reportFormData.platform || WRITING_PLATFORM_OPTIONS[0]}\n目标人群：${listOrNone(reportFormData.targetAudiences)}\n语气风格：${reportFormData.tone || WRITING_TONE_OPTIONS[0]}\n字数不少于：${minWords}\n参考内容：${reportFormData.referenceContent || '无'}\n包含关键词：${reportFormData.keywords || '无'}\n是否允许适量emoji：${reportFormData.withEmoji ? '是' : '否'}\n请输出以下内容（使用中文，Markdown结构清晰）：\n1) 标题候选 3 个\n2) 正文 1 篇（至少 ${minWords} 字）\n3) 末尾行动引导（CTA）\n4) 适合该平台的标签/话题建议\n要求：必须结合“进出口企业办公协同”与本项目能力，不要写成泛泛的互联网文案。`;
       } else if (reportType === 'ppt') {
-          prompt = `[指令:生成PPT]\n主题：${reportFormData.topic || '未指定'}\n演示目的：${reportFormData.pptPurpose || '未指定'}\n受众：${reportFormData.audience || '通用'}\n演讲时长：${reportFormData.duration || '未指定'}\n页数：${reportFormData.pages || '10'}页左右\n结构偏好：${reportFormData.structureStyle || PPT_STRUCTURE_OPTIONS[0]}\n视觉风格：${reportFormData.visualStyle || PPT_VISUAL_OPTIONS[0]}\n详细程度：${reportFormData.detailLevel || DETAIL_LEVEL_OPTIONS[2]}\n必含页/模块：${listOrNone(reportFormData.pptModules)}\n核心观点：${reportFormData.keyPoints || '无'}\n数据/图表/素材：${reportFormData.dataAssets || '无'}\n行动号召/期望结果：${reportFormData.cta || '无'}\n请规划一份详细的PPT演示文稿结构：包含封面、目录、背景/问题、分析、方案、实施/里程碑、资源/预算、风险、总结/行动项、Q&A（若页数允许）。每页给出 1 句关键结论 + 3-6 条要点（完整句），并给出明确的可视化建议。`;
+          const minWords = Math.max(200, Number(reportFormData.analysisMinWords) || 350);
+          prompt = `[指令:市场行业分析]\n项目背景：${WRITING_PROJECT_CONTEXT}\n分析框架：${reportFormData.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]}\n字数不少于：${minWords}\n输入信息：${reportFormData.analysisInput || '无'}\n是否要求丰富数据指标：${reportFormData.requireMetrics ? '是' : '否'}\n请输出一份可执行的行业/市场分析（Markdown）：\n1) 执行摘要\n2) 基于所选框架的结构化分析\n3) 关键数据指标（如效率、成本、准确率、时效、人效、ROI）\n4) 竞争格局与差异化优势\n5) 风险与机会\n6) 30/60/90天落地建议\n若缺少关键数据，请明确列出“建议补采的数据字段”。`;
       } else if (reportType === 'email') {
-          prompt = `[指令:起草邮件]\n收件人：${reportFormData.recipient || '未指定'}\n发件人身份：${reportFormData.senderRole || '未指定'}\n主题/意图：${reportFormData.intent || '未指定'}\n语气风格：${reportFormData.tone || '专业正式'}\n详细程度：${reportFormData.detailLevel || DETAIL_LEVEL_OPTIONS[2]}\n背景/上下文：${reportFormData.background || '无'}\n请求/行动：${reportFormData.request || '无'}\n截止时间/期望回复：${reportFormData.deadline || '无'}\n附件/参考：${reportFormData.attachments || '无'}\n必须包含要素：${listOrNone(reportFormData.emailElements)}\n关键信息：${reportFormData.keyPoints || '无'}\n请起草一封详细、可直接发送的邮件：分段清晰，包含背景 -> 诉求 -> 细节 -> 行动项 -> 时间节点 -> 礼貌结束语，并给出明确的行动清单。`;
+          const minWords = Math.max(200, Number(reportFormData.consultingMinWords) || 300);
+          prompt = `[指令:建议咨询]\n项目背景：${WRITING_PROJECT_CONTEXT}\n咨询类型：${reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]}\n面向对象：${reportFormData.consultingRole || WRITING_CONSULTING_ROLE_OPTIONS[0]}\n输出形式偏好：${reportFormData.outputFormat || WRITING_OUTPUT_FORMAT_OPTIONS[0]}\n字数不少于：${minWords}\n业务背景：${reportFormData.consultingContext || '无'}\n约束条件：${reportFormData.consultingConstraints || '无'}\n是否需要分阶段时间表：${reportFormData.includeTimeline ? '是' : '否'}\n请给出一份可执行建议方案（Markdown）：\n1) 问题定义\n2) 方案建议（含优先级）\n3) 风险与应对\n4) 关键指标/KPI\n5) 执行步骤与负责人建议\n${reportFormData.includeTimeline ? '6) 分阶段时间表（周/月）' : ''}\n要求：建议必须贴合进出口企业场景，不要空泛。`;
       }
+      if (!prompt.trim()) return;
       handleSendMessage(prompt, false, { modelBackend: chosenBackend });
+  };
+
+  const handleGeneratePresentonPpt = async () => {
+      if (isPresentonGenerating) return;
+
+      const fastMode = standalonePptForm.pptFastMode !== false;
+      const rawSlides = Number(standalonePptForm.pptSlideCount);
+      const maxSlides = fastMode ? 20 : 40;
+      const defaultSlides = fastMode ? 6 : 10;
+      const slideCount = Math.max(3, Math.min(maxSlides, rawSlides || defaultSlides));
+      const framework = standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0];
+      const analysisInput = String(standalonePptForm.analysisInput || '').trim();
+      const projectPrompt = [
+          `请生成一个 ${slideCount} 页的中文商务汇报 PPT。`,
+          `项目背景：${WRITING_PROJECT_CONTEXT}`,
+          `分析框架：${framework}`,
+          analysisInput ? `业务输入：${analysisInput}` : "业务输入：请围绕进出口企业协同办公痛点与数字化升级方案展开。",
+          standalonePptForm.requireMetrics ? "要求：每个关键章节都给出可量化指标和图表建议。" : "要求：结构清晰、可执行、结论明确。",
+          standalonePptForm.includeImages !== false ? "要求：每个关键页生成贴合内容的配图建议并输出可视化呈现。" : "要求：以文本逻辑和图表结构为主，可不含配图。",
+          fastMode ? "输出要求：每页只保留核心要点，文本精简，减少冗长描述。" : "输出要求：内容完整，适合正式汇报。",
+      ].join('\n');
+
+      setIsPresentonGenerating(true);
+      setStandalonePptResult(null);
+      try {
+          const submitResult = await presentationApi.submitPresentonPptTask({
+              prompt: projectPrompt,
+              n_slides: slideCount,
+              language: "Chinese",
+              template: standalonePptForm.template || "general",
+              export_as: "pptx",
+              verbosity: fastMode ? "concise" : "standard",
+              provider: "cloud_async",
+          });
+          const taskId = String(submitResult?.task_id || "").trim();
+          if (!taskId) {
+              throw new Error("未获取到任务ID");
+          }
+
+          setPresentonProgress({
+              taskId,
+              status: "pending",
+              progress: 8,
+              message: submitResult?.message || "任务已提交，等待生成...",
+          });
+
+          const deadline = Date.now() + 15 * 60 * 1000;
+          let finalResult = null;
+          while (Date.now() < deadline) {
+              const statusResult = await presentationApi.getPresentonPptTaskStatus(taskId);
+              const status = String(statusResult?.status || "pending").toLowerCase();
+              const progressValue = Math.max(0, Math.min(100, Number(statusResult?.progress) || 0));
+              const message = String(statusResult?.message || "");
+
+              setPresentonProgress({
+                  taskId,
+                  status,
+                  progress: progressValue,
+                  message,
+              });
+
+              if (["completed", "done", "success", "succeeded"].includes(status)) {
+                  finalResult = statusResult;
+                  break;
+              }
+              if (["failed", "error", "cancelled", "canceled"].includes(status)) {
+                  throw new Error(message || "PPT 生成失败");
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, 1800));
+          }
+
+          if (!finalResult) {
+              throw new Error("PPT 生成超时，请稍后重试");
+          }
+
+          const provider = finalResult?.provider || "presenton";
+          const downloadUrl = finalResult?.download_url || "";
+          const editUrl = normalizePresentonEditUrl(finalResult?.edit_url || "");
+          setPresentonProgress({
+              taskId,
+              status: "completed",
+              progress: 100,
+              message: "PPT 生成完成",
+          });
+          setStandalonePptResult({
+              provider,
+              slideCount,
+              framework,
+              downloadUrl,
+              editUrl,
+              finishedAt: new Date().toISOString(),
+          });
+      } catch (error) {
+          const errMsg = String(error?.message || "未知错误");
+          setPresentonProgress((prev) => ({
+              ...prev,
+              status: "failed",
+              message: errMsg,
+          }));
+          setStandalonePptResult({
+              error: errMsg,
+          });
+      } finally {
+          setIsPresentonGenerating(false);
+      }
   };
 
   const handleShareClick = () => {
@@ -3394,13 +3571,94 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       // 在这里，您通常会调用 API 来记录反馈
   };
 
-  const toggleFormArrayValue = (field, value) => {
-      setReportFormData(prev => {
-          const current = Array.isArray(prev[field]) ? prev[field] : [];
-          const exists = current.includes(value);
-          const next = exists ? current.filter((item) => item !== value) : [...current, value];
-          return { ...prev, [field]: next };
+  const buildDefaultReportFormData = (type, backend) => {
+      const resolvedBackend = backend || llmBackend;
+      if (type === 'report') {
+          return {
+              modelBackend: resolvedBackend,
+              contentType: WRITING_CONTENT_TYPE_OPTIONS[0],
+              platform: WRITING_PLATFORM_OPTIONS[0],
+              targetAudiences: [WRITING_AUDIENCE_PRESET[0]],
+              tone: WRITING_TONE_OPTIONS[0],
+              minWords: 200,
+              referenceContent: "围绕“企业智能办公助手”场景，突出会议纪要、OCR识别、智能审单、数据决策等能力，强调可在进出口企业真实业务中落地。",
+              keywords: "进出口企业, 智能办公, 会议纪要, OCR识别, 智能审单",
+              withEmoji: true,
+          };
+      }
+      if (type === 'ppt') {
+          return {
+              modelBackend: resolvedBackend,
+              analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+              pptSlideCount: 6,
+              analysisMinWords: 350,
+              analysisInput: "分析对象：进出口企业的单证处理与协同办公。\n现状问题：人工录入效率低、审单风险高、业务数据分散、跨部门协同慢。\n请结合本项目能力（会议纪要、OCR、审单、数据库、数据决策）进行分析。",
+              requireMetrics: false,
+              pptFastMode: true,
+          };
+      }
+      return {
+          modelBackend: resolvedBackend,
+          consultingType: WRITING_CONSULTING_TYPE_OPTIONS[0],
+          consultingRole: WRITING_CONSULTING_ROLE_OPTIONS[0],
+          outputFormat: WRITING_OUTPUT_FORMAT_OPTIONS[0],
+          consultingMinWords: 300,
+          consultingContext: "公司准备将智能办公系统用于进出口业务全流程，需要给出可执行的落地建议。",
+          consultingConstraints: "预算有限；需分阶段实施；合规优先；兼容现有流程。",
+          includeTimeline: true,
+      };
+  };
+
+  const buildDefaultStandalonePptFormData = () => {
+      return {
+          analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+          pptSlideCount: 6,
+          analysisInput: "请基于进出口企业协同办公场景，生成可落地的管理汇报PPT，包含现状、问题、方案、计划与风险。",
+          requireMetrics: true,
+          pptFastMode: true,
+          includeImages: true,
+          template: 'general',
+      };
+  };
+
+  const applyReportType = (nextType) => {
+      if (!nextType) return;
+      setReportType(nextType);
+      setReportFormData((prev) => {
+          const existingBackend = prev?.modelBackend || llmBackend;
+          return buildDefaultReportFormData(nextType, existingBackend);
       });
+      setReportAudienceInput('');
+      setIsPresentonGenerating(false);
+      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+      setReportStep('form');
+  };
+
+  const addAudienceTag = (rawValue) => {
+      const value = String(rawValue || '').trim();
+      if (!value) return;
+      setReportFormData((prev) => {
+          const current = Array.isArray(prev.targetAudiences) ? prev.targetAudiences : [];
+          if (current.includes(value) || current.length >= WRITING_FORM_AUDIENCE_LIMIT) return prev;
+          return { ...prev, targetAudiences: [...current, value] };
+      });
+      setReportAudienceInput('');
+  };
+
+  const removeAudienceTag = (tag) => {
+      setReportFormData((prev) => {
+          const current = Array.isArray(prev.targetAudiences) ? prev.targetAudiences : [];
+          return { ...prev, targetAudiences: current.filter((item) => item !== tag) };
+      });
+  };
+
+  const clearCurrentWritingForm = () => {
+      const activeType = reportType || 'report';
+      const backend = reportFormData?.modelBackend || llmBackend;
+      setReportFormData(buildDefaultReportFormData(activeType, backend));
+      setReportAudienceInput('');
+      setIsPresentonGenerating(false);
+      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
   };
 
   const getActiveOcrText = () => {
@@ -3742,239 +4000,398 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       handleNewChat();
   };
 
+  const renderWritingEntryHub = () => (
+      <div className="h-full w-full overflow-y-auto bg-gradient-to-br from-gray-100 via-white to-blue-50/40 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 px-4 py-6 md:px-8 md:py-8">
+          <div className="max-w-5xl mx-auto">
+              <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-900/85 shadow-sm px-6 py-7 mb-6">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:border-blue-500/40 dark:bg-blue-900/30 dark:text-blue-200">
+                      <Sparkles size={14} /> 智能创作中心
+                  </div>
+                  <h2 className="mt-3 text-2xl font-bold text-gray-900 dark:text-white">请选择一级功能</h2>
+                  <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">先选择“写作助手”或“PPT生成”，再进入对应的二级配置界面。</p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <button
+                      type="button"
+                      onClick={() => {
+                          setWritingEntryMode('assistant');
+                          setReportStep('selection');
+                          setReportType(null);
+                          setReportFormData({});
+                          setReportAudienceInput('');
+                      }}
+                      className="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-900/80 p-6 text-left hover:shadow-lg hover:-translate-y-0.5 transition-all"
+                  >
+                      <div className="inline-flex rounded-xl border border-gray-200 dark:border-gray-700 p-2.5 text-gray-700 dark:text-gray-300">
+                          <PencilLine size={20} />
+                      </div>
+                      <div className="mt-4 text-xl font-semibold text-gray-900 dark:text-white">写作助手</div>
+                      <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">营销文案、行业分析、建议咨询等内容生成</div>
+                      <div className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          进入写作助手 <ArrowRight size={14} />
+                      </div>
+                  </button>
+                  <button
+                      type="button"
+                      onClick={() => {
+                          setWritingEntryMode('ppt');
+                          setStandalonePptForm(buildDefaultStandalonePptFormData());
+                          setStandalonePptResult(null);
+                          setIsPresentonGenerating(false);
+                          setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+                      }}
+                      className="rounded-3xl border border-fuchsia-200 dark:border-fuchsia-800/50 bg-white/95 dark:bg-gray-900/80 p-6 text-left hover:shadow-lg hover:-translate-y-0.5 transition-all"
+                  >
+                      <div className="inline-flex rounded-xl border border-fuchsia-200 dark:border-fuchsia-800/50 p-2.5 text-fuchsia-700 dark:text-fuchsia-300">
+                          <Presentation size={20} />
+                      </div>
+                      <div className="mt-4 text-xl font-semibold text-gray-900 dark:text-white">PPT生成</div>
+                      <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">独立PPT生成页，支持进度展示与文件下载</div>
+                      <div className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300">
+                          进入PPT生成 <ArrowRight size={14} />
+                      </div>
+                  </button>
+              </div>
+          </div>
+      </div>
+  );
+
+  const renderStandalonePptGenerator = () => {
+      const labelClass = 'text-sm font-medium text-gray-700 dark:text-gray-200';
+      const inputClass = 'w-full rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2.5 text-sm text-gray-800 dark:text-gray-100 outline-none focus:border-fuchsia-500 focus:ring-4 focus:ring-fuchsia-500/10';
+      const textareaClass = `${inputClass} min-h-[120px] resize-y`;
+      const fastMode = standalonePptForm.pptFastMode !== false;
+      const progressValue = Math.max(0, Math.min(100, Number(presentonProgress.progress) || 0));
+      const slideCountPreview = Math.max(3, Math.min(fastMode ? 20 : 40, Number(standalonePptForm.pptSlideCount) || 6));
+
+      return (
+          <div className="h-full w-full overflow-y-auto bg-gradient-to-br from-gray-100 via-white to-fuchsia-50/30 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 px-3 py-4 md:px-6 md:py-6">
+              <div className="max-w-[1320px] mx-auto space-y-4">
+                  <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-900/85 shadow-sm p-4 md:p-5">
+                      <div className="flex flex-wrap items-center gap-2 justify-between">
+                          <button
+                              type="button"
+                              onClick={() => {
+                                  setWritingEntryMode('root');
+                                  setStandalonePptResult(null);
+                                  setIsPresentonGenerating(false);
+                                  setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+                              }}
+                              className="inline-flex items-center gap-1 rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                          >
+                              <ArrowLeft size={14} /> 返回一级功能
+                          </button>
+                          <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
+                              固定模型：qwen3:1.7b（生成结束自动恢复 qwen2.5-coder）
+                          </div>
+                      </div>
+                      <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-fuchsia-200 bg-fuchsia-50 px-3 py-1 text-xs font-semibold text-fuchsia-700 dark:border-fuchsia-500/40 dark:bg-fuchsia-900/30 dark:text-fuchsia-200">
+                          <Presentation size={14} /> PPT 生成界面
+                      </div>
+                      <h2 className="mt-3 text-xl md:text-2xl font-bold text-gray-900 dark:text-white">独立 PPT 生成</h2>
+                      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">该界面仅用于 PPT 文件生成、进度跟踪与下载。</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)] gap-4">
+                      <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/90 shadow-sm p-4 md:p-6 space-y-4">
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                              <label className="space-y-1.5"><span className={labelClass}>分析框架</span><select className={inputClass} value={standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisFramework: event.target.value }))}>{WRITING_ANALYSIS_FRAMEWORK_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                              <label className="space-y-1.5"><span className={labelClass}>页数</span><input type="number" min={3} max={fastMode ? 20 : 40} className={inputClass} value={standalonePptForm.pptSlideCount ?? 6} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, pptSlideCount: event.target.value }))} /></label>
+                              <label className="space-y-1.5"><span className={labelClass}>模板</span><select className={inputClass} value={standalonePptForm.template || 'general'} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, template: event.target.value }))}><option value="general">general</option><option value="corporate">corporate</option><option value="minimal">minimal</option></select></label>
+                          </div>
+                          <label className="space-y-1.5 block"><span className={labelClass}>业务输入</span><textarea className={textareaClass} maxLength={2200} value={standalonePptForm.analysisInput || ''} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisInput: event.target.value }))} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(standalonePptForm.analysisInput || '').length} / 2200</span></label>
+                          <div className="flex flex-wrap gap-4">
+                              <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!standalonePptForm.requireMetrics} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, requireMetrics: event.target.checked }))} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />要求数据指标</label>
+                              <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={standalonePptForm.pptFastMode !== false} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, pptFastMode: event.target.checked }))} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />极速生成</label>
+                              <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={standalonePptForm.includeImages !== false} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, includeImages: event.target.checked }))} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />启用配图生成</label>
+                          </div>
+                          <div className="pt-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-end gap-2">
+                              <button type="button" onClick={() => { setStandalonePptForm(buildDefaultStandalonePptFormData()); setStandalonePptResult(null); setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' }); }} className="rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">一键重置</button>
+                              <button type="button" onClick={handleGeneratePresentonPpt} disabled={isPresentonGenerating} className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium text-white bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-60 disabled:cursor-not-allowed">
+                                  {isPresentonGenerating ? <Loader2 size={15} className="animate-spin" /> : <Presentation size={15} />}
+                                  {isPresentonGenerating ? `生成中 ${Math.round(progressValue)}%` : '生成PPT文件'}
+                              </button>
+                          </div>
+                      </div>
+
+                      <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/90 shadow-sm p-4 md:p-5 space-y-4">
+                          <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/60 p-4 space-y-2">
+                              <p className="text-sm font-semibold text-gray-900 dark:text-white">生成概览</p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400">框架：{standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]}</p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400">预计页数：{slideCountPreview} 页</p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400">模式：{standalonePptForm.pptFastMode !== false ? '极速' : '标准'}</p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400">配图：{standalonePptForm.includeImages !== false ? '开启' : '关闭'}</p>
+                          </div>
+
+                          <div className="rounded-2xl border border-fuchsia-100 dark:border-fuchsia-900/40 bg-fuchsia-50/70 dark:bg-fuchsia-900/20 p-4">
+                              <div className="text-sm font-medium text-fuchsia-700 dark:text-fuchsia-200">{presentonProgress.message || '等待生成'}</div>
+                              <div className="mt-2 h-2 w-full rounded-full bg-fuchsia-100 dark:bg-fuchsia-900/40 overflow-hidden">
+                                  <div className="h-full bg-fuchsia-500 transition-all duration-300" style={{ width: `${progressValue}%` }} />
+                              </div>
+                              <div className="mt-2 text-xs text-fuchsia-700/80 dark:text-fuchsia-200/80">{Math.round(progressValue)}%</div>
+                          </div>
+
+                          {standalonePptResult?.downloadUrl && (
+                              <div className="rounded-2xl border border-emerald-200 dark:border-emerald-800/40 bg-emerald-50/70 dark:bg-emerald-900/20 p-4 space-y-2">
+                                  <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-200">PPT 生成完成</p>
+                                  <p className="text-xs text-emerald-700/80 dark:text-emerald-200/80">来源：{standalonePptResult.provider} · 页数：{standalonePptResult.slideCount}</p>
+                                  <div className="flex flex-wrap gap-2">
+                                      <a href={standalonePptResult.downloadUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-2">
+                                          <Download size={13} /> 下载PPT
+                                      </a>
+                                      {standalonePptResult.editUrl && (
+                                          <a href={standalonePptResult.editUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-200 text-xs font-semibold px-3 py-2">
+                                              在线编辑
+                                          </a>
+                                      )}
+                                  </div>
+                              </div>
+                          )}
+
+                          {standalonePptResult?.error && (
+                              <div className="rounded-2xl border border-red-200 dark:border-red-800/40 bg-red-50/80 dark:bg-red-900/20 p-4 text-sm text-red-700 dark:text-red-200">
+                                  {standalonePptResult.error}
+                              </div>
+                          )}
+                      </div>
+                  </div>
+              </div>
+          </div>
+      );
+  };
+
   const renderReportWizard = () => {
+      const activeType = reportType || 'report';
+      const backend = reportFormData.modelBackend || llmBackend;
+      const tabs = [
+          { key: 'report', label: '创意内容生成', desc: '营销文案、功能发布', icon: FileText, activeClass: 'bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-900/30 dark:text-blue-200 dark:border-blue-500/50' },
+          { key: 'ppt', label: '市场/行业分析', desc: '结构化分析与数据建议', icon: Layout, activeClass: 'bg-indigo-50 text-indigo-700 border-indigo-300 dark:bg-indigo-900/30 dark:text-indigo-200 dark:border-indigo-500/50' },
+          { key: 'email', label: '建议/咨询', desc: '面向团队的落地方案', icon: Mail, activeClass: 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-900/30 dark:text-emerald-200 dark:border-emerald-500/50' },
+      ];
+      const activeMeta = tabs.find((item) => item.key === activeType) || tabs[0];
+      const labelClass = 'text-sm font-medium text-gray-700 dark:text-gray-200';
+      const inputClass = 'w-full rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2.5 text-sm text-gray-800 dark:text-gray-100 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10';
+      const textareaClass = `${inputClass} min-h-[110px] resize-y`;
+      const audiences = Array.isArray(reportFormData.targetAudiences) ? reportFormData.targetAudiences : [];
+
+      const updateField = (field, value) => {
+          setReportFormData((prev) => ({ ...prev, [field]: value }));
+      };
+
+      const previewRows = activeType === 'report'
+          ? [
+              ['我要写一个', reportFormData.contentType || WRITING_CONTENT_TYPE_OPTIONS[0]],
+              ['发布平台', reportFormData.platform || WRITING_PLATFORM_OPTIONS[0]],
+              ['目标人群', audiences.length ? audiences.join('、') : '未填写'],
+              ['语气风格', reportFormData.tone || WRITING_TONE_OPTIONS[0]],
+              ['最少字数', `${Math.max(100, Number(reportFormData.minWords) || 200)} 字`],
+            ]
+          : activeType === 'ppt'
+              ? [
+                  ['分析框架', reportFormData.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]],
+                  ['最少字数', `${Math.max(200, Number(reportFormData.analysisMinWords) || 350)} 字`],
+                  ['信息输入', reportFormData.analysisInput ? `已填写 ${String(reportFormData.analysisInput).length} 字` : '未填写'],
+                  ['数据指标', reportFormData.requireMetrics ? '要求丰富指标' : '普通分析'],
+                ]
+              : [
+                  ['咨询类型', reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]],
+                  ['面向角色', reportFormData.consultingRole || WRITING_CONSULTING_ROLE_OPTIONS[0]],
+                  ['输出形式', reportFormData.outputFormat || WRITING_OUTPUT_FORMAT_OPTIONS[0]],
+                  ['最少字数', `${Math.max(200, Number(reportFormData.consultingMinWords) || 300)} 字`],
+                ];
+
       if (reportStep === 'selection') {
-        return (
-            <div className="h-full w-full overflow-y-auto bg-gradient-to-b from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 p-5 md:p-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <div className="max-w-6xl mx-auto">
-                <div className="text-center mb-10 md:mb-12">
-                    <span className="inline-flex items-center rounded-full border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-900/80 px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-300 mb-4">写作助手</span>
-                    <h2 className="text-3xl md:text-4xl font-bold text-gray-900 dark:text-white mb-3">选择写作场景</h2>
-                    <p className="text-gray-500 dark:text-gray-400">选择一个场景，为你生成更完整、更可执行的写作框架</p>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-5 md:gap-6 w-full">
-                    <button onClick={() => { setReportType('report'); setReportStep('form'); }} className="group relative flex h-full flex-col items-start p-7 bg-white/90 dark:bg-gray-900/70 backdrop-blur rounded-3xl border border-gray-200/70 dark:border-gray-700/70 hover:border-blue-400 dark:hover:border-blue-500 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300">
-                        <div className="w-14 h-14 rounded-2xl bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><FileText size={28} className="text-blue-600 dark:text-blue-300" /></div>
-                        <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2 text-left">报告大纲</h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400 text-left leading-relaxed">适用于年度总结、项目汇报、调研报告等长文档规划。</p>
-                        <span className="mt-5 inline-flex items-center gap-1 text-xs font-semibold text-blue-600 dark:text-blue-300">立即开始 <ArrowRight size={13} /></span>
-                    </button>
-                    <button onClick={() => { setReportType('ppt'); setReportStep('form'); }} className="group relative flex h-full flex-col items-start p-7 bg-white/90 dark:bg-gray-900/70 backdrop-blur rounded-3xl border border-gray-200/70 dark:border-gray-700/70 hover:border-purple-400 dark:hover:border-purple-500 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300">
-                        <div className="w-14 h-14 rounded-2xl bg-purple-50 dark:bg-purple-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><Layout size={28} className="text-purple-600 dark:text-purple-300" /></div>
-                        <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2 text-left">PPT 大纲</h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400 text-left leading-relaxed">自动规划演示文稿结构，分配页码，提炼每页核心观点。</p>
-                        <span className="mt-5 inline-flex items-center gap-1 text-xs font-semibold text-purple-600 dark:text-purple-300">立即开始 <ArrowRight size={13} /></span>
-                    </button>
-                    <button onClick={() => { setReportType('email'); setReportStep('form'); }} className="group relative flex h-full flex-col items-start p-7 bg-white/90 dark:bg-gray-900/70 backdrop-blur rounded-3xl border border-gray-200/70 dark:border-gray-700/70 hover:border-green-400 dark:hover:border-green-500 hover:shadow-2xl hover:-translate-y-1 transition-all duration-300">
-                        <div className="w-14 h-14 rounded-2xl bg-green-50 dark:bg-green-900/30 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform"><Mail size={28} className="text-green-600 dark:text-green-300" /></div>
-                        <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2 text-left">邮件起草</h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400 text-left leading-relaxed">根据对象和语气，快速起草正式、得体的职场沟通邮件。</p>
-                        <span className="mt-5 inline-flex items-center gap-1 text-xs font-semibold text-green-600 dark:text-green-300">立即开始 <ArrowRight size={13} /></span>
-                    </button>
-                </div>
-                </div>
-            </div>
-        );
-    }
-    if (reportStep === 'form') {
-        const inputClass = "w-full px-3.5 py-3 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all text-gray-800 dark:text-gray-100 placeholder:text-gray-400";
-        const labelClass = "block text-xs font-semibold tracking-wide uppercase text-gray-600 dark:text-gray-300 mb-1.5";
-        return (
-            <div className="h-full w-full overflow-y-auto px-3 py-4 md:px-6 md:py-6 bg-gradient-to-b from-gray-50 via-white to-gray-100 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 animate-in fade-in zoom-in-95 duration-300">
-                <div className="w-full max-w-6xl mx-auto bg-white/95 dark:bg-gray-900/90 rounded-3xl shadow-xl border border-gray-100 dark:border-gray-800 overflow-hidden flex flex-col backdrop-blur">
-                    <div className="px-5 md:px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center gap-3 bg-white/85 dark:bg-gray-900/80 backdrop-blur sticky top-0 z-10">
-                        <button onClick={() => setReportStep('selection')} className="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 transition-colors"><ArrowLeft size={20} /></button>
-                        <div className="min-w-0">
-                        <h3 className="text-lg font-bold text-gray-800 dark:text-white flex items-center gap-2">
-                           {reportType === 'report' ? '配置报告参数' : (reportType === 'ppt' ? '配置 PPT 大纲' : '配置邮件信息')}
-                        </h3>
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">填写越具体，生成结果越贴近你的业务语境</p>
-                        </div>
-                        <span className="ml-auto hidden md:inline-flex items-center rounded-full border border-gray-200 dark:border-gray-700 px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-300 bg-white dark:bg-gray-900">
-                            {reportType === 'report' ? 'Report' : (reportType === 'ppt' ? 'Slides' : 'Email')}
-                        </span>
-                    </div>
-                    <div className="p-6 md:p-7 custom-scrollbar space-y-5 xl:space-y-0 xl:grid xl:grid-cols-2 xl:gap-x-6 xl:gap-y-5">
-                        <div className="xl:col-span-2 rounded-xl border border-gray-200/80 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/40 px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
-                            建议先填写主题、受众、目标，再补充关键数据与约束条件。
-                        </div>
-                        <div className="xl:col-span-2">
-                            <label className={labelClass}>模型选择</label>
-                            <select
-                                className={inputClass}
-                                value={reportFormData.modelBackend || llmBackend}
-                                onChange={e => setReportFormData({ ...reportFormData, modelBackend: e.target.value })}
-                            >
-                                <option value="local">本地模型（Qwen 2.5-coder）</option>
-                                <option value="cloud">云端模型（DeepSeek）</option>
-                            </select>
-                        </div>
-                        {reportType === 'report' && (
-                            <>
-                                <div><label className={labelClass}>报告主题</label><input className={inputClass} placeholder="例如：2024年度市场营销总结" value={reportFormData.topic || ''} onChange={e => setReportFormData({...reportFormData, topic: e.target.value})} autoFocus/></div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div><label className={labelClass}>使用场景</label><input className={inputClass} placeholder="例如：部门内部汇报" value={reportFormData.scene || ''} onChange={e => setReportFormData({...reportFormData, scene: e.target.value})}/></div>
-                                    <div><label className={labelClass}>受众/阅读者</label><input className={inputClass} placeholder="例如：部门经理" value={reportFormData.audience || ''} onChange={e => setReportFormData({...reportFormData, audience: e.target.value})}/></div>
-                                </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div><label className={labelClass}>时间范围</label><input className={inputClass} placeholder="例如：2024 Q1-Q4 / 近6个月" value={reportFormData.timeRange || ''} onChange={e => setReportFormData({...reportFormData, timeRange: e.target.value})}/></div>
-                                    <div><label className={labelClass}>业务范围/对象</label><input className={inputClass} placeholder="例如：华东区域 / 新客转化业务线" value={reportFormData.scope || ''} onChange={e => setReportFormData({...reportFormData, scope: e.target.value})}/></div>
-                                </div>
-                                <div><label className={labelClass}>报告目的/用途</label><input className={inputClass} placeholder="例如：复盘问题、制定年度策略、向管理层汇报" value={reportFormData.purpose || ''} onChange={e => setReportFormData({...reportFormData, purpose: e.target.value})}/></div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div>
-                                        <label className={labelClass}>报告风格</label>
-                                        <select className={inputClass} value={reportFormData.reportStyle || REPORT_STYLE_OPTIONS[0]} onChange={e => setReportFormData({...reportFormData, reportStyle: e.target.value})}>
-                                            {REPORT_STYLE_OPTIONS.map((opt) => <option key={opt}>{opt}</option>)}
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className={labelClass}>详细程度</label>
-                                        <select className={inputClass} value={reportFormData.detailLevel || DETAIL_LEVEL_OPTIONS[2]} onChange={e => setReportFormData({...reportFormData, detailLevel: e.target.value})}>
-                                            {DETAIL_LEVEL_OPTIONS.map((opt) => <option key={opt}>{opt}</option>)}
-                                        </select>
-                                    </div>
-                                </div>
-                                <div>
-                                    <label className={labelClass}>必含模块 (可多选)</label>
-                                    <div className="flex flex-wrap gap-2">
-                                        {REPORT_SECTION_OPTIONS.map((opt) => {
-                                            const active = (reportFormData.reportModules || []).includes(opt);
-                                            return (
-                                                <button
-                                                    type="button"
-                                                    key={opt}
-                                                    onClick={() => toggleFormArrayValue('reportModules', opt)}
-                                                    className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${active ? 'bg-blue-600 text-white border-blue-600 shadow-sm' : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-blue-400'}`}
-                                                >
-                                                    {opt}
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-                                <div><label className={labelClass}>核心关键点 (可选)</label><textarea className={inputClass} rows={4} placeholder="列出报告中必须包含的数据、结论或重点..." value={reportFormData.keyPoints || ''} onChange={e => setReportFormData({...reportFormData, keyPoints: e.target.value})}/></div>
-                                <div><label className={labelClass}>关键问题/假设 (可选)</label><textarea className={inputClass} rows={3} placeholder="例如：增长放缓的主要原因是什么？核心假设有哪些？" value={reportFormData.keyQuestions || ''} onChange={e => setReportFormData({...reportFormData, keyQuestions: e.target.value})}/></div>
-                                <div><label className={labelClass}>数据/指标/素材 (可选)</label><textarea className={inputClass} rows={3} placeholder="例如：GMV、CAC、转化率、投放成本、关键样本..." value={reportFormData.dataMetrics || ''} onChange={e => setReportFormData({...reportFormData, dataMetrics: e.target.value})}/></div>
-                                <div><label className={labelClass}>约束/风险关注 (可选)</label><textarea className={inputClass} rows={3} placeholder="例如：预算上限、合规要求、资源受限等" value={reportFormData.constraints || ''} onChange={e => setReportFormData({...reportFormData, constraints: e.target.value})}/></div>
-                                <div><label className={labelClass}>预期结论/建议方向 (可选)</label><textarea className={inputClass} rows={3} placeholder="例如：优化渠道结构，推进自动化，控制成本..." value={reportFormData.expectedOutcome || ''} onChange={e => setReportFormData({...reportFormData, expectedOutcome: e.target.value})}/></div>
-                            </>
-                        )}
-                        {reportType === 'ppt' && (
-                            <>
-                                <div><label className={labelClass}>演示主题</label><input className={inputClass} placeholder="例如：新产品发布会演示" value={reportFormData.topic || ''} onChange={e => setReportFormData({...reportFormData, topic: e.target.value})} autoFocus/></div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div><label className={labelClass}>预计页数</label><input className={inputClass} placeholder="例如：10-15页" value={reportFormData.pages || ''} onChange={e => setReportFormData({...reportFormData, pages: e.target.value})}/></div>
-                                    <div><label className={labelClass}>听众/背景</label><input className={inputClass} placeholder="例如：潜在客户、管理层" value={reportFormData.audience || ''} onChange={e => setReportFormData({...reportFormData, audience: e.target.value})}/></div>
-                                </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div><label className={labelClass}>演示目的</label><input className={inputClass} placeholder="例如：争取预算/对外路演/内部复盘" value={reportFormData.pptPurpose || ''} onChange={e => setReportFormData({...reportFormData, pptPurpose: e.target.value})}/></div>
-                                    <div><label className={labelClass}>演讲时长</label><input className={inputClass} placeholder="例如：15-20分钟" value={reportFormData.duration || ''} onChange={e => setReportFormData({...reportFormData, duration: e.target.value})}/></div>
-                                </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div>
-                                        <label className={labelClass}>结构偏好</label>
-                                        <select className={inputClass} value={reportFormData.structureStyle || PPT_STRUCTURE_OPTIONS[0]} onChange={e => setReportFormData({...reportFormData, structureStyle: e.target.value})}>
-                                            {PPT_STRUCTURE_OPTIONS.map((opt) => <option key={opt}>{opt}</option>)}
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className={labelClass}>视觉风格</label>
-                                        <select className={inputClass} value={reportFormData.visualStyle || PPT_VISUAL_OPTIONS[0]} onChange={e => setReportFormData({...reportFormData, visualStyle: e.target.value})}>
-                                            {PPT_VISUAL_OPTIONS.map((opt) => <option key={opt}>{opt}</option>)}
-                                        </select>
-                                    </div>
-                                </div>
-                                <div>
-                                    <label className={labelClass}>详细程度</label>
-                                    <select className={inputClass} value={reportFormData.detailLevel || DETAIL_LEVEL_OPTIONS[2]} onChange={e => setReportFormData({...reportFormData, detailLevel: e.target.value})}>
-                                        {DETAIL_LEVEL_OPTIONS.map((opt) => <option key={opt}>{opt}</option>)}
-                                    </select>
-                                </div>
-                                <div>
-                                    <label className={labelClass}>必含页/模块 (可多选)</label>
-                                    <div className="flex flex-wrap gap-2">
-                                        {PPT_SECTION_OPTIONS.map((opt) => {
-                                            const active = (reportFormData.pptModules || []).includes(opt);
-                                            return (
-                                                <button
-                                                    type="button"
-                                                    key={opt}
-                                                    onClick={() => toggleFormArrayValue('pptModules', opt)}
-                                                    className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${active ? 'bg-purple-600 text-white border-purple-600 shadow-sm' : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-purple-400'}`}
-                                                >
-                                                    {opt}
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-                                <div><label className={labelClass}>核心观点/关键信息 (可选)</label><textarea className={inputClass} rows={4} placeholder="简述希望强调的关键结论、价值主张或数据..." value={reportFormData.keyPoints || ''} onChange={e => setReportFormData({...reportFormData, keyPoints: e.target.value})}/></div>
-                                <div><label className={labelClass}>数据/图表/素材 (可选)</label><textarea className={inputClass} rows={3} placeholder="例如：增长曲线、市场份额、客户案例、竞品对标..." value={reportFormData.dataAssets || ''} onChange={e => setReportFormData({...reportFormData, dataAssets: e.target.value})}/></div>
-                                <div><label className={labelClass}>行动号召/期望结果 (可选)</label><textarea className={inputClass} rows={3} placeholder="例如：批准预算、确认方案、推进试点" value={reportFormData.cta || ''} onChange={e => setReportFormData({...reportFormData, cta: e.target.value})}/></div>
-                            </>
-                        )}
-                        {reportType === 'email' && (
-                            <>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div><label className={labelClass}>收件人称呼/角色</label><input className={inputClass} placeholder="例如：李总、HR部门" value={reportFormData.recipient || ''} onChange={e => setReportFormData({...reportFormData, recipient: e.target.value})} autoFocus/></div>
-                                    <div><label className={labelClass}>发件人身份/部门</label><input className={inputClass} placeholder="例如：市场部 张三" value={reportFormData.senderRole || ''} onChange={e => setReportFormData({...reportFormData, senderRole: e.target.value})}/></div>
-                                </div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div><label className={labelClass}>语气风格</label>
-                                        <select className={inputClass} value={reportFormData.tone || '专业正式'} onChange={e => setReportFormData({...reportFormData, tone: e.target.value})}>
-                                            <option>专业正式</option>
-                                            <option>委婉客气</option>
-                                            <option>热情积极</option>
-                                            <option>严肃直接</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className={labelClass}>详细程度</label>
-                                        <select className={inputClass} value={reportFormData.detailLevel || DETAIL_LEVEL_OPTIONS[2]} onChange={e => setReportFormData({...reportFormData, detailLevel: e.target.value})}>
-                                            {DETAIL_LEVEL_OPTIONS.map((opt) => <option key={opt}>{opt}</option>)}
-                                        </select>
-                                    </div>
-                                </div>
-                                <div><label className={labelClass}>邮件主题/意图</label><input className={inputClass} placeholder="例如：申请下周三调休" value={reportFormData.intent || ''} onChange={e => setReportFormData({...reportFormData, intent: e.target.value})}/></div>
-                                <div><label className={labelClass}>背景/上下文 (可选)</label><textarea className={inputClass} rows={3} placeholder="说明事件背景、当前进展或原因..." value={reportFormData.background || ''} onChange={e => setReportFormData({...reportFormData, background: e.target.value})}/></div>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                    <div><label className={labelClass}>请求/行动 (可选)</label><input className={inputClass} placeholder="例如：请批准、请协助、请确认" value={reportFormData.request || ''} onChange={e => setReportFormData({...reportFormData, request: e.target.value})}/></div>
-                                    <div><label className={labelClass}>截止时间/期望回复 (可选)</label><input className={inputClass} placeholder="例如：请于周五前反馈" value={reportFormData.deadline || ''} onChange={e => setReportFormData({...reportFormData, deadline: e.target.value})}/></div>
-                                </div>
-                                <div><label className={labelClass}>附件/参考 (可选)</label><input className={inputClass} placeholder="例如：附件为预算表/方案PPT" value={reportFormData.attachments || ''} onChange={e => setReportFormData({...reportFormData, attachments: e.target.value})}/></div>
-                                <div>
-                                    <label className={labelClass}>必须包含要素 (可多选)</label>
-                                    <div className="flex flex-wrap gap-2">
-                                        {EMAIL_ELEMENT_OPTIONS.map((opt) => {
-                                            const active = (reportFormData.emailElements || []).includes(opt);
-                                            return (
-                                                <button
-                                                    type="button"
-                                                    key={opt}
-                                                    onClick={() => toggleFormArrayValue('emailElements', opt)}
-                                                    className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${active ? 'bg-green-600 text-white border-green-600 shadow-sm' : 'bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:border-green-400'}`}
-                                                >
-                                                    {opt}
-                                                </button>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-                                <div><label className={labelClass}>关键信息点</label><textarea className={inputClass} rows={4} placeholder="需要包含的具体细节，例如时间、地点、原因..." value={reportFormData.keyPoints || ''} onChange={e => setReportFormData({...reportFormData, keyPoints: e.target.value})}/></div>
-                            </>
-                        )}
-                    </div>
-                    <div className="px-5 md:px-6 py-4 border-t border-gray-100 dark:border-gray-800 bg-white/80 dark:bg-gray-900/80 backdrop-blur flex items-center justify-between">
-                        <span className="hidden md:block text-xs text-gray-500 dark:text-gray-400">可先生成一版，再在对话区继续迭代细化。</span>
-                        <button onClick={handleSubmitReportForm} className={`px-6 py-2.5 rounded-xl font-medium text-white shadow-lg shadow-blue-500/20 transition-all active:scale-95 flex items-center gap-2 ${reportType === 'report' ? 'bg-blue-600 hover:bg-blue-700' : (reportType === 'ppt' ? 'bg-purple-600 hover:bg-purple-700' : 'bg-green-600 hover:bg-green-700')}`}>
-                            <Sparkles size={18} /> 开始生成
-                        </button>
-                    </div>
-                </div>
-            </div>
-        );
-    }
+          return (
+              <div className="h-full w-full overflow-y-auto bg-gradient-to-br from-gray-100 via-white to-blue-50/40 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 px-4 py-6 md:px-8 md:py-8">
+                  <div className="max-w-6xl mx-auto">
+                      <div className="mb-4">
+                          <button
+                              type="button"
+                              onClick={() => {
+                                  setWritingEntryMode('root');
+                                  setReportStep('selection');
+                                  setReportType(null);
+                                  setReportFormData({});
+                                  setReportAudienceInput('');
+                              }}
+                              className="inline-flex items-center gap-1 rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                          >
+                              <ArrowLeft size={14} /> 返回上一级
+                          </button>
+                      </div>
+                      <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-900/85 shadow-sm px-6 py-7 mb-6">
+                          <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:border-blue-500/40 dark:bg-blue-900/30 dark:text-blue-200">
+                              <Sparkles size={14} /> 写作助手
+                          </div>
+                          <h2 className="mt-3 text-2xl font-bold text-gray-900 dark:text-white">请选择生成场景</h2>
+                          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">内容会自动结合你的项目背景和进出口企业业务语境。</p>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                          {tabs.map((item) => {
+                              const Icon = item.icon;
+                              return (
+                                  <button
+                                      key={item.key}
+                                      type="button"
+                                      onClick={() => applyReportType(item.key)}
+                                      className="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-900/80 p-6 text-left hover:shadow-lg hover:-translate-y-0.5 transition-all"
+                                  >
+                                      <div className="inline-flex rounded-xl border border-gray-200 dark:border-gray-700 p-2.5 text-gray-700 dark:text-gray-300">
+                                          <Icon size={20} />
+                                      </div>
+                                      <div className="mt-4 text-lg font-semibold text-gray-900 dark:text-white">{item.label}</div>
+                                      <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">{item.desc}</div>
+                                      <div className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-gray-700 dark:text-gray-300">
+                                          进入配置 <ArrowRight size={14} />
+                                      </div>
+                                  </button>
+                              );
+                          })}
+                      </div>
+                  </div>
+              </div>
+          );
+      }
+
+      if (reportStep !== 'form') return null;
+
+      return (
+          <div className="h-full w-full overflow-y-auto bg-gradient-to-br from-gray-100 via-white to-indigo-50/40 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 px-3 py-4 md:px-6 md:py-6">
+              <div className="max-w-[1320px] mx-auto space-y-4">
+                  <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-900/85 shadow-sm p-4 md:p-5">
+                      <div className="flex flex-wrap items-center gap-2 justify-between">
+                          <button
+                              type="button"
+                              onClick={() => setReportStep('selection')}
+                              className="inline-flex items-center gap-1 rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                          >
+                              <ArrowLeft size={14} /> 返回场景
+                          </button>
+                          <select
+                              className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-200"
+                              value={backend}
+                              onChange={(event) => updateField('modelBackend', event.target.value)}
+                          >
+                              <option value="local">本地模型（Qwen 2.5-coder）</option>
+                              <option value="cloud">云端模型（DeepSeek）</option>
+                          </select>
+                      </div>
+                      <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-2">
+                          {tabs.map((item) => {
+                              const active = item.key === activeType;
+                              const Icon = item.icon;
+                              return (
+                                  <button
+                                      key={item.key}
+                                      type="button"
+                                      onClick={() => applyReportType(item.key)}
+                                      className={`rounded-2xl border px-4 py-3 text-left transition-all ${active ? item.activeClass : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'}`}
+                                  >
+                                      <div className="flex items-center gap-2 text-sm font-semibold">
+                                          <Icon size={16} /> {item.label}
+                                      </div>
+                                      <div className="mt-1 text-xs opacity-80">{item.desc}</div>
+                                  </button>
+                              );
+                          })}
+                      </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)] gap-4">
+                      <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/90 shadow-sm p-4 md:p-6 space-y-4">
+                          {activeType === 'report' && (
+                              <>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <label className="space-y-1.5"><span className={labelClass}>我要写一个</span><select className={inputClass} value={reportFormData.contentType || WRITING_CONTENT_TYPE_OPTIONS[0]} onChange={(event) => updateField('contentType', event.target.value)}>{WRITING_CONTENT_TYPE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>想发布的平台是</span><select className={inputClass} value={reportFormData.platform || WRITING_PLATFORM_OPTIONS[0]} onChange={(event) => updateField('platform', event.target.value)}>{WRITING_PLATFORM_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                  </div>
+                                  <div className="space-y-2">
+                                      <span className={labelClass}>目标人群类型是</span>
+                                      <div className="min-h-[44px] rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 flex flex-wrap gap-2 items-center">
+                                          {audiences.length === 0 && <span className="text-sm text-gray-400 dark:text-gray-500">暂未添加目标人群</span>}
+                                          {audiences.map((tag) => (
+                                              <span key={tag} className="inline-flex items-center gap-1 rounded-lg bg-blue-50 dark:bg-blue-900/35 text-blue-700 dark:text-blue-200 px-2 py-1 text-xs">{tag}<button type="button" onClick={() => removeAudienceTag(tag)}><X size={12} /></button></span>
+                                          ))}
+                                      </div>
+                                      <div className="flex flex-col sm:flex-row gap-2">
+                                          <input className={inputClass} value={reportAudienceInput} placeholder="输入后回车或点击添加" onChange={(event) => setReportAudienceInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); addAudienceTag(reportAudienceInput); } }} />
+                                          <button type="button" onClick={() => addAudienceTag(reportAudienceInput)} className="rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">添加目标人群</button>
+                                          <span className="inline-flex items-center justify-center rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">{audiences.length} / {WRITING_FORM_AUDIENCE_LIMIT}</span>
+                                      </div>
+                                  </div>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <label className="space-y-1.5"><span className={labelClass}>语气或风格是</span><select className={inputClass} value={reportFormData.tone || WRITING_TONE_OPTIONS[0]} onChange={(event) => updateField('tone', event.target.value)}>{WRITING_TONE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={100} max={5000} className={inputClass} value={reportFormData.minWords ?? 200} onChange={(event) => updateField('minWords', event.target.value)} /></label>
+                                  </div>
+                                  <label className="space-y-1.5 block"><span className={labelClass}>参考这些内容</span><textarea className={textareaClass} maxLength={1200} value={reportFormData.referenceContent || ''} onChange={(event) => updateField('referenceContent', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.referenceContent || '').length} / 1200</span></label>
+                                  <label className="space-y-1.5 block"><span className={labelClass}>包含这些关键词</span><textarea className={textareaClass} maxLength={300} value={reportFormData.keywords || ''} onChange={(event) => updateField('keywords', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.keywords || '').length} / 300</span></label>
+                                  <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.withEmoji} onChange={(event) => updateField('withEmoji', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />带一点emoji</label>
+                              </>
+                          )}
+
+                          {activeType === 'ppt' && (
+                              <>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <label className="space-y-1.5"><span className={labelClass}>分析框架</span><select className={inputClass} value={reportFormData.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]} onChange={(event) => updateField('analysisFramework', event.target.value)}>{WRITING_ANALYSIS_FRAMEWORK_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={200} max={5000} className={inputClass} value={reportFormData.analysisMinWords ?? 350} onChange={(event) => updateField('analysisMinWords', event.target.value)} /></label>
+                                  </div>
+                                  <label className="space-y-1.5 block"><span className={labelClass}>相关信息输入</span><textarea className={textareaClass} maxLength={2000} value={reportFormData.analysisInput || ''} onChange={(event) => updateField('analysisInput', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.analysisInput || '').length} / 2000</span></label>
+                                  <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.requireMetrics} onChange={(event) => updateField('requireMetrics', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />要求结合丰富的数据指标</label>
+                              </>
+                          )}
+
+                          {activeType === 'email' && (
+                              <>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <label className="space-y-1.5"><span className={labelClass}>咨询类型</span><select className={inputClass} value={reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]} onChange={(event) => updateField('consultingType', event.target.value)}>{WRITING_CONSULTING_TYPE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>面向角色</span><select className={inputClass} value={reportFormData.consultingRole || WRITING_CONSULTING_ROLE_OPTIONS[0]} onChange={(event) => updateField('consultingRole', event.target.value)}>{WRITING_CONSULTING_ROLE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                  </div>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <label className="space-y-1.5"><span className={labelClass}>输出形式</span><select className={inputClass} value={reportFormData.outputFormat || WRITING_OUTPUT_FORMAT_OPTIONS[0]} onChange={(event) => updateField('outputFormat', event.target.value)}>{WRITING_OUTPUT_FORMAT_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={200} max={5000} className={inputClass} value={reportFormData.consultingMinWords ?? 300} onChange={(event) => updateField('consultingMinWords', event.target.value)} /></label>
+                                  </div>
+                                  <label className="space-y-1.5 block"><span className={labelClass}>业务背景描述</span><textarea className={textareaClass} maxLength={1600} value={reportFormData.consultingContext || ''} onChange={(event) => updateField('consultingContext', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.consultingContext || '').length} / 1600</span></label>
+                                  <label className="space-y-1.5 block"><span className={labelClass}>约束条件/限制</span><textarea className={textareaClass} maxLength={1000} value={reportFormData.consultingConstraints || ''} onChange={(event) => updateField('consultingConstraints', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.consultingConstraints || '').length} / 1000</span></label>
+                                  <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.includeTimeline} onChange={(event) => updateField('includeTimeline', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />需要分阶段时间表</label>
+                              </>
+                          )}
+
+                          <div className="pt-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-end gap-2">
+                              <button type="button" onClick={clearCurrentWritingForm} className="rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">一键清空</button>
+                              <button type="button" onClick={handleSubmitReportForm} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium text-white ${activeType === 'report' ? 'bg-blue-600 hover:bg-blue-700' : (activeType === 'ppt' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-emerald-600 hover:bg-emerald-700')}`}><Sparkles size={15} />立即生成</button>
+                          </div>
+                      </div>
+
+                      <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/90 shadow-sm p-4 md:p-5">
+                          <div className="flex items-center justify-between">
+                              <div>
+                                  <p className="text-sm font-semibold text-gray-900 dark:text-white">{activeMeta.label}</p>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">Powered by AIGC</p>
+                              </div>
+                              <span className="inline-flex items-center rounded-lg border border-gray-200 dark:border-gray-700 px-2 py-1 text-xs text-gray-500 dark:text-gray-400">{backend === 'cloud' ? '云端模型' : '本地模型'}</span>
+                          </div>
+                          <div className="mt-4 rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/60 p-4 space-y-3">
+                              {previewRows.map(([label, value]) => (
+                                  <div key={label}>
+                                      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+                                      <div className="text-sm text-gray-900 dark:text-gray-100 leading-relaxed">{value}</div>
+                                  </div>
+                              ))}
+                          </div>
+                          <div className="mt-4 rounded-2xl border border-blue-100 dark:border-blue-900/40 bg-blue-50/70 dark:bg-blue-900/25 p-4 text-sm text-blue-700 dark:text-blue-200 leading-relaxed">
+                              点击“立即生成”后，会在对话区输出初稿。后续可继续追问细化，保持当前所有写作功能不变。
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      );
+  };
+
+  const renderWritingWorkspace = () => {
+      if (writingEntryMode === 'assistant') return renderReportWizard();
+      if (writingEntryMode === 'ppt') return renderStandalonePptGenerator();
+      return renderWritingEntryHub();
   };
 
   const getPanelStyles = () => {
@@ -4814,6 +5231,23 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           {selectedModel === model.id && <Check size={16} className="text-gray-900 dark:text-white" />}
                         </div>
                       ))}
+                      <div className="my-1 h-px bg-gray-100 dark:bg-gray-700" />
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          setIsMobileModelDropdownOpen(false);
+                          handleOpenDecisionCenter(event);
+                        }}
+                        className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-cyan-50 dark:hover:bg-cyan-900/20 transition-colors text-left"
+                      >
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-600 dark:text-cyan-300">
+                          <Layout size={18} />
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-sm font-medium text-cyan-700 dark:text-cyan-300">数据决策系统</div>
+                        </div>
+                        <ArrowRight size={16} className="text-cyan-500" />
+                      </button>
                     </div>
                   </div>
                 )}
@@ -4843,6 +5277,23 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           {selectedModel === model.id && <Check size={16} className="text-gray-900 dark:text-white" />}
                         </div>
                       ))}
+                      <div className="my-1 h-px bg-gray-100 dark:bg-gray-700" />
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          setIsDropdownOpen(false);
+                          handleOpenDecisionCenter(event);
+                        }}
+                        className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-cyan-50 dark:hover:bg-cyan-900/20 transition-colors text-left"
+                      >
+                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-600 dark:text-cyan-300">
+                          <Layout size={18} />
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-sm font-medium text-cyan-700 dark:text-cyan-300">数据决策系统</div>
+                        </div>
+                        <ArrowRight size={16} className="text-cyan-500" />
+                      </button>
                     </div>
                   </div>
                 )}
@@ -4943,6 +5394,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           onAuditErpAction={handleAuditErpAction}
                           isAuditErpActionLoading={isAuditErpActionLoading}
                           fullWidth={isAuditSinglePane}
+                          onMeetingUploadClick={handleMeetingUploadClick}
                       />
                   </Suspense>
               )}
@@ -4950,7 +5402,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               {shouldRenderChat && (
               <div className={`flex flex-col h-full relative transition-all duration-300 ${showContentPanel ? 'w-full md:w-1/2' : 'w-full'}`}>
                   {isReportMode && chatHistory.length === 0 ? (
-                      renderReportWizard()
+                      renderWritingWorkspace()
                   ) : (
                       <>
                           <div
@@ -5266,15 +5718,21 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                                   : 'absolute bottom-full left-0 mb-3 w-56'
                                               }`}
                                             >
-                                                <button
-                                                    onClick={() => { if (fileInputRef.current) fileInputRef.current.click(); setIsPlusMenuOpen(false); }}
-                                                    className="flex items-center gap-3 px-3 py-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50 rounded-xl text-left text-sm font-medium text-gray-700 dark:text-gray-200 transition-colors group"
-                                                >
-                                                    <div className="w-8 h-8 rounded-full bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                                        <FileUp size={16} />
+                                                {!isMeetingMode ? (
+                                                    <button
+                                                        onClick={() => { if (fileInputRef.current) fileInputRef.current.click(); setIsPlusMenuOpen(false); }}
+                                                        className="flex items-center gap-3 px-3 py-2.5 hover:bg-gray-100 dark:hover:bg-gray-700/50 rounded-xl text-left text-sm font-medium text-gray-700 dark:text-gray-200 transition-colors group"
+                                                    >
+                                                        <div className="w-8 h-8 rounded-full bg-orange-50 dark:bg-orange-900/20 text-orange-600 dark:text-orange-400 flex items-center justify-center group-hover:scale-110 transition-transform">
+                                                            <FileUp size={16} />
+                                                        </div>
+                                                        添加文件
+                                                    </button>
+                                                ) : (
+                                                    <div className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400 leading-5 bg-gray-50/80 dark:bg-gray-900/50 rounded-xl border border-gray-100 dark:border-gray-700">
+                                                        会议纪要模式请使用左侧面板顶部的“上传音频文件”按钮。
                                                     </div>
-                                                    添加文件
-                                                </button>
+                                                )}
 
                                                 <button
                                                     onClick={() => { onModeChange(isRAGMode ? 'general' : 'rag'); setIsPlusMenuOpen(false); }}
@@ -5453,6 +5911,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 };
 
 export default DashboardPage;
+
 
 
 

@@ -28,6 +28,9 @@ user_router = None
 chat_router = None
 audit_router = None
 admin_router = None
+decision_router = None
+presentation_router = None
+warmup_decision_cache = None
 upload_document_to_vector_store = None
 delete_user_documents = None
 store_text_to_vector_store = None
@@ -87,6 +90,7 @@ try:
     from chat_router import router as chat_router
     from audit_router import router as audit_router
     from admin_router import router as admin_router
+    from decision_router import router as decision_router, warmup_decision_cache
     from documents_processing import upload_document_to_vector_store, delete_user_documents, store_text_to_vector_store, warmup_embeddings
     from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase
     from ocr_manager import OCRManager, get_shared_ocr_manager
@@ -108,6 +112,13 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+try:
+    from presentation_router import router as presentation_router
+    print("[Presentation] presentation_router loaded")
+except Exception as e:
+    presentation_router = None
+    print(f"[Presentation] presentation_router unavailable: {e}")
+
 # 单独的负载共享模块
 share_manager = None
 try:
@@ -124,16 +135,24 @@ app = FastAPI(title="Enterprise AI API")
 
 @app.on_event("startup")
 def _warmup_models():
-    if os.getenv("LLM_WARMUP", "true").lower() == "false":
+    llm_warmup_enabled = os.getenv("LLM_WARMUP", "true").lower() != "false"
+    decision_warmup_enabled = os.getenv("DECISION_WARMUP", "true").lower() != "false"
+
+    if (
+        not llm_warmup_enabled
+        and not decision_warmup_enabled
+    ):
         return
-    if not warmup_models and not warmup_embeddings:
+    if not warmup_models and not warmup_embeddings and not warmup_decision_cache:
         return
 
     def _run_warmups():
-        if warmup_models:
+        if llm_warmup_enabled and warmup_models:
             warmup_models()
-        if warmup_embeddings:
+        if llm_warmup_enabled and warmup_embeddings:
             warmup_embeddings()
+        if decision_warmup_enabled and warmup_decision_cache:
+            warmup_decision_cache()
 
     threading.Thread(target=_run_warmups, daemon=True).start()
 
@@ -221,6 +240,14 @@ if admin_router:
     app.include_router(admin_router)
 else:
     print("[Warn] Admin Router not loaded, /api/admin endpoints unavailable")
+if decision_router:
+    app.include_router(decision_router)
+else:
+    print("[Warn] Decision Router not loaded, /api/decision endpoints unavailable")
+if presentation_router:
+    app.include_router(presentation_router)
+else:
+    print("[Warn] Presentation Router not loaded, /api/presentation endpoints unavailable")
 if voice_ws_proxy: app.include_router(voice_ws_proxy.router, prefix="/api/ws", tags=["Voice WebSocket"])
 
 

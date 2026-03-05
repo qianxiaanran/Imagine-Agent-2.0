@@ -9,6 +9,7 @@ const loadLandingPage = () => import('./pages/LandingPage');
 const loadCapabilitiesPage = () => import('./pages/CapabilitiesPage');
 const loadQuickStartPage = () => import('./pages/QuickStartPage');
 const loadDashboardPage = () => import('./pages/Dashboard/DashboardPage');
+const loadDecisionPage = () => import('./pages/DecisionCenterPage');
 const loadSharedPage = () => import('./pages/Dashboard/SharedChatPage');
 const loadAdminPage = () => import('./pages/Admin/AdminPage');
 const loadLoginModal = () => import('./pages/Login/LoginModal');
@@ -18,6 +19,7 @@ const LandingPage = React.lazy(loadLandingPage);
 const CapabilitiesPage = React.lazy(loadCapabilitiesPage);
 const QuickStartPage = React.lazy(loadQuickStartPage);
 const DashboardPage = React.lazy(loadDashboardPage);
+const DecisionCenterPage = React.lazy(loadDecisionPage);
 const SharedChatPage = React.lazy(loadSharedPage);
 const AdminPage = React.lazy(loadAdminPage);
 const LoginModal = React.lazy(loadLoginModal);
@@ -50,6 +52,7 @@ export default function App() {
   const normalizedPath = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
   const isShareRoute = normalizedPath.startsWith('/share/');
   const isAdminRoute = normalizedPath.startsWith('/admin');
+  const isDecisionRoute = normalizedPath === '/decision';
   const isCapabilitiesRoute = normalizedPath === '/capabilities';
   const isQuickStartRoute = normalizedPath === '/quickstart';
   const shouldShowLoading = !isAuthReady;
@@ -182,6 +185,8 @@ export default function App() {
               setIsAuthenticated(true);
               if (isAdminRoute) {
                 loadAdminPage();
+              } else if (isDecisionRoute) {
+                loadDecisionPage();
               } else {
                 loadDashboardPage();
               }
@@ -208,7 +213,7 @@ export default function App() {
     };
 
     void checkAuth();
-  }, [isShareRoute, isAdminRoute, isCapabilitiesRoute, isQuickStartRoute]);
+  }, [isShareRoute, isAdminRoute, isDecisionRoute, isCapabilitiesRoute, isQuickStartRoute]);
 
   useEffect(() => {
     if (shouldShowLoading) {
@@ -293,6 +298,8 @@ export default function App() {
             ) : isAuthenticated ? (
               isAdminRoute ? (
                 <AdminPage />
+              ) : isDecisionRoute ? (
+                <DecisionCenterPage />
               ) : (
                 <DashboardPage onLogout={handleLogout} currentMode={currentMode} onModeChange={setCurrentMode} />
               )
@@ -310,9 +317,11 @@ export default function App() {
           <LoadingScreen
             text={
               isAuthenticated
-                ? '正在加载工作台...'
+                ? (isDecisionRoute ? '正在加载决策系统...' : '正在加载工作台...')
                 : isShareRoute
                   ? '正在解析分享内容...'
+                  : isDecisionRoute
+                    ? '正在加载决策系统...'
                   : '正在启动智能引擎...'
             }
             isVisible={shouldShowLoading}
