@@ -1,13 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { ArrowLeft, Loader2, RefreshCw } from "lucide-react";
+import { ArrowLeft, FileUp, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import adminApi from "../../api/admin";
 import userApi from "../../api/user";
+import presentationApi from "../../api/presentation";
 
 const tabs = [
   { key: "users", label: "用户与权限" },
   { key: "audit", label: "审单记录" },
   { key: "rules", label: "规则库" },
   { key: "kb", label: "知识库治理" },
+  { key: "templates", label: "PPT模板导入" },
   { key: "jobs", label: "任务中心" },
   { key: "logs", label: "审计日志" },
 ];
@@ -129,6 +131,7 @@ const AdminPage = () => {
         {activeTab === "audit" && <AuditTab />}
         {activeTab === "rules" && <RulesTab />}
         {activeTab === "kb" && <KbTab />}
+        {activeTab === "templates" && <TemplatesTab />}
         {activeTab === "jobs" && <JobsTab />}
         {activeTab === "logs" && <LogsTab />}
       </div>
@@ -591,6 +594,156 @@ const KbTab = () => {
                 <tr>
                   <td className="py-6 text-center text-sm text-gray-400" colSpan={5}>
                     暂无文档
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const TemplatesTab = () => {
+  const [templates, setTemplates] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [form, setForm] = useState({
+    templateId: "",
+    alias: "",
+    description: "",
+  });
+
+  const loadTemplates = async () => {
+    setLoading(true);
+    try {
+      const res = await presentationApi.listImportedPresentonTemplates();
+      setTemplates(Array.isArray(res?.data) ? res.data : []);
+    } catch {
+      setTemplates([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadTemplates();
+  }, []);
+
+  const handleImportTemplate = async () => {
+    const templateId = String(form.templateId || "").trim();
+    if (!templateId) {
+      window.alert("请输入模板 ID");
+      return;
+    }
+    setImporting(true);
+    try {
+      await presentationApi.importPresentonTemplate({
+        template_id: templateId,
+        alias: String(form.alias || "").trim() || undefined,
+        description: String(form.description || "").trim() || undefined,
+      });
+      setForm({ templateId: "", alias: "", description: "" });
+      await loadTemplates();
+      window.alert("模板导入成功");
+    } catch (error) {
+      window.alert(error?.message || "模板导入失败");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleDeleteTemplate = async (templateId) => {
+    if (!window.confirm(`确认删除模板 ${templateId} 吗？`)) return;
+    try {
+      await presentationApi.removeImportedPresentonTemplate(templateId);
+      await loadTemplates();
+    } catch (error) {
+      window.alert(error?.message || "删除模板失败");
+    }
+  };
+
+  return (
+    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
+        <div>
+          <div className="text-sm font-medium text-gray-800 dark:text-gray-100">PPT 模板导入</div>
+          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            先在 Presenton 按文档流程创建模板，再将模板 ID 导入到本系统。
+          </div>
+        </div>
+        <button className="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-1" onClick={loadTemplates}>
+          <RefreshCw size={14} /> 刷新
+        </button>
+      </div>
+
+      <div className="p-4 border-b border-gray-100 dark:border-slate-700 bg-gray-50 dark:bg-slate-950/50">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+          <input
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
+            placeholder="模板ID（必填）"
+            value={form.templateId}
+            onChange={(e) => setForm((prev) => ({ ...prev, templateId: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
+            placeholder="模板别名（可选）"
+            value={form.alias}
+            onChange={(e) => setForm((prev) => ({ ...prev, alias: e.target.value }))}
+          />
+          <input
+            className="px-3 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-100"
+            placeholder="描述（可选）"
+            value={form.description}
+            onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
+          />
+          <button
+            onClick={handleImportTemplate}
+            disabled={importing}
+            className="inline-flex items-center justify-center gap-1 px-3 py-2 rounded-lg bg-black text-white text-sm disabled:opacity-60"
+          >
+            {importing ? <Loader2 size={14} className="animate-spin" /> : <FileUp size={14} />}
+            {importing ? "导入中..." : "导入模板"}
+          </button>
+        </div>
+      </div>
+
+      <div className="p-4 overflow-x-auto">
+        {loading ? (
+          <AdminTableSkeleton columns={5} rows={5} />
+        ) : (
+          <table className="min-w-full text-sm text-gray-700 dark:text-gray-200">
+            <thead>
+              <tr className="text-left text-gray-500 dark:text-gray-400">
+                <th className="py-2">模板ID</th>
+                <th className="py-2">名称</th>
+                <th className="py-2">描述</th>
+                <th className="py-2">来源</th>
+                <th className="py-2">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {templates.map((template) => (
+                <tr key={template.template_id} className="border-t border-gray-100 dark:border-gray-800">
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{template.template_id}</td>
+                  <td className="py-2">{template.name || "-"}</td>
+                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{template.description || "-"}</td>
+                  <td className="py-2 text-xs">{template.source || "presenton_import"}</td>
+                  <td className="py-2">
+                    <button
+                      className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400 hover:underline"
+                      onClick={() => handleDeleteTemplate(template.template_id)}
+                    >
+                      <Trash2 size={13} /> 删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {templates.length === 0 && (
+                <tr>
+                  <td className="py-6 text-center text-sm text-gray-400" colSpan={5}>
+                    暂无已导入模板
                   </td>
                 </tr>
               )}

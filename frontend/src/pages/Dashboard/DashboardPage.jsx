@@ -6,7 +6,7 @@ import {
   ClipboardCheck, Mail, ArrowLeft, Share2, Copy, PencilLine, Presentation,
   TrendingUp, AlertTriangle, Play, Image as ImageIcon,
   Volume2, File as FileIcon,
-  ThumbsUp, ThumbsDown, Square, RefreshCw, Globe, Star,
+  ThumbsUp, ThumbsDown, Square, RefreshCw, Globe, Star, Trash2,
   FileUp, Cloud, Cpu
 } from 'lucide-react';
 
@@ -67,6 +67,17 @@ const WRITING_PLATFORM_OPTIONS = ["微信公众号", "企业微信", "官网", "
 const WRITING_AUDIENCE_PRESET = ["外贸业务员", "采购负责人", "运营主管", "财务/合规", "管理层", "跨境电商团队"];
 const WRITING_TONE_OPTIONS = ["专业严谨", "商务简洁", "数据驱动", "亲和易读", "行动导向"];
 const WRITING_ANALYSIS_FRAMEWORK_OPTIONS = ["4P框架", "SWOT", "PEST", "波特五力", "STP"];
+const STANDALONE_PPT_INPUT_MODES = [
+  { key: "topic", label: "输入PPT主题", icon: Sparkles },
+  { key: "document", label: "Word/PDF文档生成PPT", icon: FileUp },
+  { key: "longText", label: "大段文本生成PPT", icon: FileText },
+];
+const STANDALONE_PPT_TOPIC_SUGGESTIONS = ["学术报告", "教学备课", "政策宣讲", "心得体会分享", "工作总结"];
+const STANDALONE_PPT_BUILTIN_TEMPLATES = [
+  { template_id: "general", name: "general", source: "builtin" },
+  { template_id: "corporate", name: "corporate", source: "builtin" },
+  { template_id: "minimal", name: "minimal", source: "builtin" },
+];
 const WRITING_CONSULTING_TYPE_OPTIONS = ["流程优化建议", "合规风控建议", "增长策略咨询", "系统落地方案"];
 const WRITING_CONSULTING_ROLE_OPTIONS = ["管理层", "运营团队", "销售团队", "财务风控团队", "IT实施团队"];
 const WRITING_OUTPUT_FORMAT_OPTIONS = ["执行清单", "分阶段计划", "OKR/KPI方案", "风险-对策矩阵"];
@@ -128,6 +139,156 @@ const normalizePresentonEditUrl = (rawUrl) => {
     } catch {
         return value;
     }
+};
+
+const parseTemplatePreviewPath = (rawPathname) => {
+    const pathname = String(rawPathname || "").trim();
+    if (!pathname) return null;
+    const cleanPath = pathname.replace(/^\/api\/presentation\/presenton\/proxy/i, "");
+    const matched = cleanPath.match(/^\/template-preview\/([^/?#]+)/i);
+    if (!matched) return null;
+    const routeIdRaw = matched[1] || "";
+    let routeId = routeIdRaw;
+    try {
+        routeId = decodeURIComponent(routeIdRaw);
+    } catch {}
+    const templateId = String(routeId || "").trim();
+    if (!templateId) return null;
+    return { routeId: String(routeId || templateId), templateId };
+};
+
+const buildFallbackOutlineSlides = (count = 8) => {
+    const safeCount = Math.max(3, Math.min(40, Number(count) || 8));
+    return Array.from({ length: safeCount }, (_, idx) => ({
+        index: idx + 1,
+        title: `第 ${idx + 1} 页`,
+        points: ["补充本页核心观点", "补充本页关键支撑信息"],
+        notes: "",
+    }));
+};
+
+const parseStandalonePptHistoryState = (messages = []) => {
+    const contexts = (Array.isArray(messages) ? messages : [])
+        .filter((msg) => msg?.role === "context" && String(msg?.func_type || "").toLowerCase().startsWith("ppt_"));
+    if (!contexts.length) {
+        return null;
+    }
+
+    const findLatestByType = (type) => {
+        for (let i = contexts.length - 1; i >= 0; i -= 1) {
+            if (String(contexts[i]?.func_type || "").toLowerCase() === type) {
+                return contexts[i];
+            }
+        }
+        return null;
+    };
+
+    const latest = contexts[contexts.length - 1] || null;
+    const latestOutline = findLatestByType("ppt_outline");
+    const latestTask = findLatestByType("ppt_task");
+    const latestResult = findLatestByType("ppt_result");
+
+    const splitLines = (rawText) =>
+        String(rawText || "")
+            .split(/\r?\n/)
+            .map((line) => String(line || "").trim())
+            .filter(Boolean);
+
+    const parseHeader = (line) => {
+        const text = String(line || "").trim();
+        const matched = text.match(/\]\s*(.+?)(?:[（(]\s*(\d+)\s*页\s*[）)])?$/);
+        const title = String(matched?.[1] || "业务汇报").trim();
+        const count = Math.max(0, Math.min(40, Number(matched?.[2]) || 0));
+        return { title, count };
+    };
+
+    const extractLineValue = (lines, prefix) => {
+        const cleanPrefix = String(prefix || "").trim();
+        if (!cleanPrefix) return "";
+        const line = lines.find((item) => item.startsWith(cleanPrefix));
+        return line ? String(line.slice(cleanPrefix.length)).trim() : "";
+    };
+
+    const outlineLines = splitLines(latestOutline?.content || "");
+    const outlineHeader = parseHeader(outlineLines[0] || "");
+    const outlineSubtitle = extractLineValue(outlineLines, "副标题：");
+    const outlineSlideTitles = outlineLines
+        .filter((line) => /^\d+\.\s*/.test(line))
+        .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+        .filter(Boolean);
+    const outlineSlides = outlineSlideTitles.length
+        ? outlineSlideTitles.map((title, idx) => ({
+              index: idx + 1,
+              title,
+              points: ["补充本页核心观点", "补充本页关键支撑信息"],
+              notes: "",
+          }))
+        : buildFallbackOutlineSlides(outlineHeader.count || 8);
+
+    const resultLines = splitLines(latestResult?.content || "");
+    const taskLines = splitLines(latestTask?.content || "");
+    const latestLines = splitLines(latest?.content || "");
+    const resultHeader = parseHeader(resultLines[0] || latestLines[0] || "");
+
+    const restoredTemplate =
+        extractLineValue(resultLines, "模板：") ||
+        extractLineValue(taskLines, "模板：") ||
+        "general";
+
+    const downloadUrl = extractLineValue(resultLines, "下载链接：");
+    const editUrl = extractLineValue(resultLines, "在线编辑：");
+    const errorText = extractLineValue(resultLines, "错误：");
+    const taskId = extractLineValue(taskLines, "任务ID：");
+    const latestHeader = String(latestLines[0] || "").trim();
+    const latestType = String(latest?.func_type || "").toLowerCase();
+
+    let progress = { taskId: "", status: "idle", progress: 0, message: "" };
+    if (latestType === "ppt_result") {
+        const isFailed = latestHeader.includes("失败") || !!errorText;
+        progress = {
+            taskId,
+            status: isFailed ? "failed" : "completed",
+            progress: isFailed ? 0 : 100,
+            message: isFailed ? (errorText || latestHeader || "PPT 生成失败") : (latestHeader || "PPT 生成完成"),
+        };
+    } else if (latestType === "ppt_task") {
+        progress = {
+            taskId,
+            status: "pending",
+            progress: 35,
+            message: latestHeader || "任务已提交，正在生成...",
+        };
+    } else if (latestType === "ppt_outline") {
+        progress = {
+            taskId: "",
+            status: "outline_ready",
+            progress: 100,
+            message: latestHeader || "大纲已生成",
+        };
+    }
+
+    const resultPayload = latestResult
+        ? {
+              provider: "presenton",
+              slideCount: outlineSlides.length || resultHeader.count || 8,
+              framework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+              downloadUrl: downloadUrl || "",
+              editUrl: normalizePresentonEditUrl(editUrl || ""),
+              finishedAt: latestResult?.created_at || new Date().toISOString(),
+              ...(errorText ? { error: errorText } : {}),
+          }
+        : null;
+
+    return {
+        outline: {
+            title: outlineHeader.title || resultHeader.title || "业务汇报",
+            subtitle: outlineSubtitle,
+            slides: outlineSlides,
+        },
+        template: restoredTemplate,
+        result: resultPayload,
+        progress,
+    };
 };
 
 const splitUserMessageContent = (raw = '') => {
@@ -384,14 +545,23 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [reportAudienceInput, setReportAudienceInput] = useState('');
   const [writingEntryMode, setWritingEntryMode] = useState('root');
   const [standalonePptForm, setStandalonePptForm] = useState({
+    inputMode: STANDALONE_PPT_INPUT_MODES[0].key,
     analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
-    pptSlideCount: 6,
-    analysisInput: "请基于进出口企业协同办公场景，生成可落地的管理汇报PPT，包含现状、问题、方案、计划与风险。",
+    pptSlideCount: 8,
+    analysisInput: "",
+    documentName: "",
     requireMetrics: true,
-    pptFastMode: true,
-    includeImages: true,
+    includeImages: false,
     template: 'general',
   });
+  const [standalonePptOutline, setStandalonePptOutline] = useState(null);
+  const [isOutlineGenerating, setIsOutlineGenerating] = useState(false);
+  const [isOutlineEditorOpen, setIsOutlineEditorOpen] = useState(false);
+  const [isPptWorkspaceOpen, setIsPptWorkspaceOpen] = useState(false);
+  const [isTemplatePreviewOpen, setIsTemplatePreviewOpen] = useState(false);
+  const [templatePreviewSelection, setTemplatePreviewSelection] = useState({ routeId: '', templateId: '' });
+  const [standaloneTemplateCatalog, setStandaloneTemplateCatalog] = useState(STANDALONE_PPT_BUILTIN_TEMPLATES);
+  const [isTemplateCatalogLoading, setIsTemplateCatalogLoading] = useState(false);
   const [standalonePptResult, setStandalonePptResult] = useState(null);
   const [isPresentonGenerating, setIsPresentonGenerating] = useState(false);
   const [presentonProgress, setPresentonProgress] = useState({
@@ -497,6 +667,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const newChatHandlerRef = useRef(null);
   const hasHandledInitialRouteRef = useRef(false);
   const isApplyingRouteSessionRef = useRef(false);
+  const templatePreviewFrameRef = useRef(null);
+  const templatePreviewPollRef = useRef(null);
 
 
   const dropdownRef = useRef(null);
@@ -1778,8 +1950,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               setReportFormData({});
               setReportAudienceInput('');
               setStandalonePptForm(buildDefaultStandalonePptFormData());
+              setStandalonePptOutline(null);
+              setIsOutlineEditorOpen(false);
+              setIsPptWorkspaceOpen(false);
+              setIsTemplatePreviewOpen(false);
+              setTemplatePreviewSelection({ routeId: '', templateId: '' });
               setStandalonePptResult(null);
               setIsPresentonGenerating(false);
+              setIsOutlineGenerating(false);
               setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
           }
           return;
@@ -1839,8 +2017,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setReportAudienceInput('');
       setWritingEntryMode('root');
       setStandalonePptForm(buildDefaultStandalonePptFormData());
+      setStandalonePptOutline(null);
+      setIsOutlineEditorOpen(false);
+      setIsPptWorkspaceOpen(false);
+      setIsTemplatePreviewOpen(false);
+      setTemplatePreviewSelection({ routeId: '', templateId: '' });
       setStandalonePptResult(null);
       setIsPresentonGenerating(false);
+      setIsOutlineGenerating(false);
       setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
       setSpeakingIdx(null);
       window.speechSynthesis.cancel();
@@ -1871,6 +2055,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setIsMobileSidebarOpen(false);
     setIsProcessing(true);
     setIsPresentonGenerating(false);
+    setIsOutlineGenerating(false);
+    setIsOutlineEditorOpen(false);
+    setIsPptWorkspaceOpen(false);
+    setIsTemplatePreviewOpen(false);
+    setTemplatePreviewSelection({ routeId: '', templateId: '' });
     setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
     setAudioFileUrl(null);
     setCurrentAudioPath(null);
@@ -1938,6 +2127,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setSelectedModel(targetModel);
       setLlmBackend(savedBackend);
       if (targetMode && targetMode !== currentMode) onModeChange(targetMode);
+      const restoredStandalonePptState = targetModel === 3 ? parseStandalonePptHistoryState(safeMessages) : null;
+      const isStandalonePptHistory = !!restoredStandalonePptState;
 
       const chatMsgs = safeMessages.filter((m) => m.role !== 'context' && m.role !== 'meta');
       const normalizedChatMsgs = chatMsgs.length > 0
@@ -1948,7 +2139,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               ? msg.content
               : (msg?.content == null ? '' : JSON.stringify(msg.content))
           }))
-        : (safeMessages.length > 0
+        : (isStandalonePptHistory
+          ? []
+          : safeMessages.length > 0
           ? [{
               role: 'assistant',
               content: '该历史会话未找到可展示的对话消息（仅包含上下文/元数据）。'
@@ -1962,7 +2155,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setVisibleMessageCount(Math.min(HISTORY_FIRST_PAINT_COUNT, normalizedChatMsgs.length));
       setExpandedSources({});
       scheduleHistoryExpand();
-      setPanelContent(contextMsg ? contextMsg.content : '');
+      setPanelContent(isStandalonePptHistory ? '' : (contextMsg ? contextMsg.content : ''));
       setCurrentSessionId(sessionId);
 
       if (targetModel === 2 && contextMsg?.content) {
@@ -2041,16 +2234,47 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       if (targetModel === 3) {
-        // 写作模式始终先回到一级入口（写作助手 / PPT生成）
-        setWritingEntryMode('root');
         setReportStep('selection');
-        setReportType(null);
+        setReportType(isStandalonePptHistory ? 'ppt' : null);
         setReportFormData({});
         setReportAudienceInput('');
-        setStandalonePptForm(buildDefaultStandalonePptFormData());
-        setStandalonePptResult(null);
+        if (isStandalonePptHistory) {
+          const restoredOutline = restoredStandalonePptState?.outline || null;
+          const restoredResult = restoredStandalonePptState?.result || null;
+          const restoredTemplate = String(restoredStandalonePptState?.template || "general").trim() || "general";
+          const restoredProgress = restoredStandalonePptState?.progress || { taskId: '', status: 'idle', progress: 0, message: '' };
+          const hasRestoredOutline = Array.isArray(restoredOutline?.slides) && restoredOutline.slides.length > 0;
+          const hasRestoredResult = !!(restoredResult?.downloadUrl || restoredResult?.editUrl || restoredResult?.error);
+          setWritingEntryMode('ppt');
+          setStandalonePptForm((prev) => ({
+            ...buildDefaultStandalonePptFormData(),
+            analysisFramework: prev?.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+            template: restoredTemplate,
+            includeImages: false,
+          }));
+          setStandalonePptOutline(restoredOutline);
+          setStandalonePptResult(restoredResult);
+          setIsPptWorkspaceOpen(hasRestoredOutline || hasRestoredResult);
+          setPresentonProgress({
+            taskId: String(restoredProgress?.taskId || ''),
+            status: String(restoredProgress?.status || 'idle'),
+            progress: Math.max(0, Math.min(100, Number(restoredProgress?.progress) || 0)),
+            message: String(restoredProgress?.message || ''),
+          });
+        } else {
+          // 写作模式普通会话回到一级入口（写作助手 / PPT生成）
+          setWritingEntryMode('root');
+          setStandalonePptForm(buildDefaultStandalonePptFormData());
+          setStandalonePptOutline(null);
+          setStandalonePptResult(null);
+          setIsPptWorkspaceOpen(false);
+          setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+        }
+        setIsOutlineEditorOpen(false);
+        setIsTemplatePreviewOpen(false);
+        setTemplatePreviewSelection({ routeId: '', templateId: '' });
         setIsPresentonGenerating(false);
-        setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+        setIsOutlineGenerating(false);
       } else {
         setWritingEntryMode('root');
         setReportStep('selection');
@@ -2058,8 +2282,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         setReportFormData({});
         setReportAudienceInput('');
         setStandalonePptForm(buildDefaultStandalonePptFormData());
+        setStandalonePptOutline(null);
+        setIsOutlineEditorOpen(false);
+        setIsPptWorkspaceOpen(false);
+        setIsTemplatePreviewOpen(false);
+        setTemplatePreviewSelection({ routeId: '', templateId: '' });
         setStandalonePptResult(null);
         setIsPresentonGenerating(false);
+        setIsOutlineGenerating(false);
         setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
       }
     } catch (e) {
@@ -2102,8 +2332,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setReportAudienceInput('');
       setWritingEntryMode('root');
       setStandalonePptForm(buildDefaultStandalonePptFormData());
+      setStandalonePptOutline(null);
+      setIsOutlineEditorOpen(false);
+      setIsPptWorkspaceOpen(false);
+      setIsTemplatePreviewOpen(false);
+      setTemplatePreviewSelection({ routeId: '', templateId: '' });
       setStandalonePptResult(null);
       setIsPresentonGenerating(false);
+      setIsOutlineGenerating(false);
       setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
       setSpeakingIdx(null);
       window.speechSynthesis.cancel();
@@ -2205,6 +2441,39 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     } catch (e) {
         console.error("Failed to save session meta", e);
     }
+  };
+
+  const ensureHistorySessionForCreative = () => {
+      let sid = currentSessionId;
+      if (!sid) {
+          sid = crypto.randomUUID ? crypto.randomUUID() : `sid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          setCurrentSessionId(sid);
+      }
+      return sid;
+  };
+
+  const refreshSessionListForCreative = async () => {
+      const uid = userProfile.id || 'anonymous';
+      try {
+          const sessions = await historyApi.getSessions(uid);
+          setSessionList(sessions || []);
+      } catch (e) {
+          console.error("Failed to refresh creative sessions", e);
+      }
+  };
+
+  const persistStandaloneCreativeHistory = async (content, contextType = 'ppt_context') => {
+      const safeContent = String(content || '').trim();
+      if (!safeContent) return null;
+      const sid = ensureHistorySessionForCreative();
+      try {
+          await savePanelContext(sid, safeContent.slice(0, 12000), contextType);
+          await saveSessionMeta(sid, 3, 'general', currentAudioPath, llmBackend);
+          await refreshSessionListForCreative();
+      } catch (e) {
+          console.error("Failed to persist standalone creative history", e);
+      }
+      return sid;
   };
 
   useEffect(() => {
@@ -3316,38 +3585,259 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       handleSendMessage(prompt, false, { modelBackend: chosenBackend });
   };
 
-  const handleGeneratePresentonPpt = async () => {
-      if (isPresentonGenerating) return;
-
-      const fastMode = standalonePptForm.pptFastMode !== false;
+  const resolveStandalonePptInput = () => {
+      const inputMode = standalonePptForm.inputMode || STANDALONE_PPT_INPUT_MODES[0].key;
       const rawSlides = Number(standalonePptForm.pptSlideCount);
-      const maxSlides = fastMode ? 20 : 40;
-      const defaultSlides = fastMode ? 6 : 10;
-      const slideCount = Math.max(3, Math.min(maxSlides, rawSlides || defaultSlides));
+      const slideCount = Math.max(3, Math.min(40, rawSlides || 8));
       const framework = standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0];
-      const analysisInput = String(standalonePptForm.analysisInput || '').trim();
+      const typedInput = String(standalonePptForm.analysisInput || '').trim();
+      const documentName = String(standalonePptForm.documentName || '').trim();
+
+      if (inputMode === "topic") {
+          if (!typedInput) return { error: "请先输入 PPT 主题。" };
+          return { inputMode, slideCount, framework, analysisInput: typedInput, documentName, typedInput };
+      }
+
+      if (inputMode === "document") {
+          if (!documentName && !typedInput) return { error: "请先上传 Word/PDF 文档，或补充文档说明。" };
+          const docInputs = [];
+          if (documentName) docInputs.push(`参考文档：${documentName}`);
+          if (typedInput) docInputs.push(`文档补充说明：${typedInput}`);
+          docInputs.push("请优先根据文档内容组织目录与正文，缺失信息请合理补齐。");
+          return {
+              inputMode,
+              slideCount,
+              framework,
+              analysisInput: docInputs.join('\n'),
+              documentName,
+              typedInput,
+          };
+      }
+
+      if (!typedInput) return { error: "请先粘贴需要转换的大段文本内容。" };
+      return {
+          inputMode,
+          slideCount,
+          framework,
+          analysisInput: typedInput,
+          documentName,
+          typedInput,
+      };
+  };
+
+  const normalizeOutline = (outlinePayload, fallbackTitle = "业务汇报") => {
+      const slides = Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [];
+      const normalizedSlides = slides.map((slide, idx) => {
+          const pointsRaw = Array.isArray(slide?.points) ? slide.points : [];
+          const points = pointsRaw.map((item) => String(item || '').trim()).filter(Boolean);
+          return {
+              index: idx + 1,
+              title: String(slide?.title || `第 ${idx + 1} 页`).trim(),
+              points: points.length ? points : ["补充本页核心观点", "补充本页关键支撑信息"],
+              notes: String(slide?.notes || '').trim(),
+          };
+      }).filter((slide) => slide.title);
+      return {
+          title: String(outlinePayload?.title || fallbackTitle || "业务汇报").trim(),
+          subtitle: String(outlinePayload?.subtitle || "").trim(),
+          slides: normalizedSlides,
+      };
+  };
+
+  const buildSlidesMarkdownFromOutline = (outlinePayload) => {
+      const slides = Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [];
+      return slides.map((slide, idx) => {
+          const title = String(slide?.title || `第 ${idx + 1} 页`).trim();
+          const points = Array.isArray(slide?.points) ? slide.points.map((item) => String(item || '').trim()).filter(Boolean) : [];
+          const notes = String(slide?.notes || "").trim();
+          const pointLines = points.length ? points.map((item) => `- ${item}`).join('\n') : "- 待补充要点";
+          const noteBlock = notes ? `\n\n> 讲解备注：${notes}` : "";
+          return `# ${title}\n${pointLines}${noteBlock}`;
+      });
+  };
+
+  const applyTemplateSelection = (templateId, routeId = "") => {
+      const selectedId = String(templateId || "").trim();
+      if (!selectedId) return;
+      setStandalonePptForm((prev) => ({
+          ...prev,
+          template: selectedId,
+          includeImages: false,
+      }));
+      setStandaloneTemplateCatalog((prev) => {
+          const existing = Array.isArray(prev) ? prev : [];
+          if (existing.some((item) => item.template_id === selectedId)) return existing;
+          return [
+              { template_id: selectedId, name: selectedId, description: "来自模板预览页", source: "template_preview" },
+              ...existing,
+          ];
+      });
+      setTemplatePreviewSelection({ routeId: String(routeId || selectedId), templateId: selectedId });
+  };
+
+  const openTemplatePreviewPicker = () => {
+      setTemplatePreviewSelection((prev) => {
+          if (prev?.templateId) return prev;
+          const currentTemplate = String(standalonePptForm.template || "").trim();
+          return currentTemplate ? { routeId: currentTemplate, templateId: currentTemplate } : { routeId: "", templateId: "" };
+      });
+      setIsTemplatePreviewOpen(true);
+  };
+
+  const closeTemplatePreviewPicker = () => {
+      setIsTemplatePreviewOpen(false);
+  };
+
+  const handleApplyTemplateFromPreview = () => {
+      if (!templatePreviewSelection?.templateId) return;
+      applyTemplateSelection(templatePreviewSelection.templateId, templatePreviewSelection.routeId);
+      setIsTemplatePreviewOpen(false);
+  };
+
+  const handleGeneratePresentonOutline = async () => {
+      if (isOutlineGenerating || isPresentonGenerating) return;
+      setStandalonePptForm((prev) => (prev.includeImages ? { ...prev, includeImages: false } : prev));
+      const resolved = resolveStandalonePptInput();
+      if (resolved.error) {
+          setStandalonePptResult({ error: resolved.error });
+          return;
+      }
+
+      setIsOutlineGenerating(true);
+      setIsOutlineEditorOpen(false);
+      setIsTemplatePreviewOpen(false);
+      setStandalonePptResult(null);
+      setPresentonProgress({
+          taskId: "",
+          status: "outline_generating",
+          progress: 12,
+          message: "正在生成大纲，请稍候...",
+      });
+      const outlineStartAt = Date.now();
+      const progressTimer = setInterval(() => {
+          setPresentonProgress((prev) => {
+              if (prev.status !== "outline_generating") return prev;
+              const current = Math.max(12, Number(prev.progress) || 12);
+              const step = current < 35 ? 3 : (current < 68 ? 2 : 1);
+              const next = Math.min(89, current + step);
+              const message = next < 30
+                  ? "正在解析输入内容..."
+                  : next < 55
+                      ? "正在规划章节结构..."
+                      : next < 80
+                          ? "正在补全页级要点..."
+                          : "正在整理最终大纲...";
+              return { ...prev, progress: next, message };
+          });
+      }, 420);
+
+      try {
+          const outlineResp = await presentationApi.generatePresentonOutline({
+              input_mode: resolved.inputMode,
+              analysis_framework: resolved.framework,
+              analysis_input: resolved.analysisInput,
+              document_name: resolved.documentName,
+              n_slides: resolved.slideCount,
+              language: "Chinese",
+              require_metrics: !!standalonePptForm.requireMetrics,
+              include_images: false,
+              model_backend: llmBackend === "cloud" ? "cloud" : "local",
+          });
+
+          const outlineData = normalizeOutline(outlineResp?.outline, resolved.typedInput || resolved.documentName || "业务汇报");
+          if (!outlineData.slides.length) {
+              throw new Error("未生成有效大纲，请重试。");
+          }
+          const elapsed = Date.now() - outlineStartAt;
+          const minDurationMs = 3200;
+          if (elapsed < minDurationMs) {
+              await new Promise((resolve) => setTimeout(resolve, minDurationMs - elapsed));
+          }
+          setPresentonProgress({
+              taskId: "",
+              status: "outline_ready",
+              progress: 100,
+              message: "大纲生成完成，正在打开编辑窗口...",
+          });
+          await new Promise((resolve) => setTimeout(resolve, 260));
+          setStandalonePptOutline(outlineData);
+          setIsOutlineEditorOpen(true);
+          setIsPptWorkspaceOpen(false);
+          const outlineHistory = [
+              `[智能创作/PPT大纲] ${outlineData.title || "业务汇报"}（${outlineData.slides.length}页）`,
+              outlineData.subtitle ? `副标题：${outlineData.subtitle}` : "",
+              ...outlineData.slides.slice(0, 8).map((slide, idx) => `${idx + 1}. ${slide.title || `第${idx + 1}页`}`),
+          ].filter(Boolean).join('\n');
+          await persistStandaloneCreativeHistory(outlineHistory, 'ppt_outline');
+          setPresentonProgress({
+              taskId: "",
+              status: "outline_ready",
+              progress: 100,
+              message: "大纲生成完成，可编辑后再生成 PPT。",
+          });
+      } catch (error) {
+          const errMsg = String(error?.message || "大纲生成失败");
+          await persistStandaloneCreativeHistory(`[智能创作/PPT大纲失败]\n${errMsg}`, 'ppt_outline');
+          setPresentonProgress({
+              taskId: "",
+              status: "failed",
+              progress: 0,
+              message: errMsg,
+          });
+          setIsOutlineEditorOpen(false);
+          setStandalonePptResult({ error: errMsg });
+      } finally {
+          clearInterval(progressTimer);
+          setIsOutlineGenerating(false);
+      }
+  };
+
+  const handleGeneratePresentonPpt = async () => {
+      if (isPresentonGenerating || isOutlineGenerating) return;
+      setStandalonePptForm((prev) => (prev.includeImages ? { ...prev, includeImages: false } : prev));
+      if (!standalonePptOutline?.slides?.length) {
+          setStandalonePptResult({ error: "请先生成并确认大纲，再生成 PPT。" });
+          return;
+      }
+
+      const slideCount = Math.max(3, Math.min(40, standalonePptOutline.slides.length));
+      const framework = standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0];
+      const outlineTitle = String(standalonePptOutline?.title || "业务汇报").trim();
+      const outlineSubtitle = String(standalonePptOutline?.subtitle || "").trim();
+      const slidesMarkdown = buildSlidesMarkdownFromOutline(standalonePptOutline);
+
       const projectPrompt = [
-          `请生成一个 ${slideCount} 页的中文商务汇报 PPT。`,
+          `请根据已确认大纲生成一个 ${slideCount} 页的中文商务汇报 PPT。`,
           `项目背景：${WRITING_PROJECT_CONTEXT}`,
           `分析框架：${framework}`,
-          analysisInput ? `业务输入：${analysisInput}` : "业务输入：请围绕进出口企业协同办公痛点与数字化升级方案展开。",
-          standalonePptForm.requireMetrics ? "要求：每个关键章节都给出可量化指标和图表建议。" : "要求：结构清晰、可执行、结论明确。",
-          standalonePptForm.includeImages !== false ? "要求：每个关键页生成贴合内容的配图建议并输出可视化呈现。" : "要求：以文本逻辑和图表结构为主，可不含配图。",
-          fastMode ? "输出要求：每页只保留核心要点，文本精简，减少冗长描述。" : "输出要求：内容完整，适合正式汇报。",
+          `演示主题：${outlineTitle}`,
+          outlineSubtitle ? `副标题：${outlineSubtitle}` : "副标题：无",
+          standalonePptForm.requireMetrics ? "要求：每个关键章节尽量给出可量化指标和图表建议。" : "要求：内容结构清晰，结论明确。",
+          "图片策略：默认关闭并禁止配图，仅允许文字与图表结构表达。",
+          "执行要求：严格依据 slides_markdown 的页级结构生成，避免新增无关章节。",
       ].join('\n');
 
       setIsPresentonGenerating(true);
+      setIsOutlineEditorOpen(false);
+      setIsPptWorkspaceOpen(true);
+      setIsTemplatePreviewOpen(false);
       setStandalonePptResult(null);
       try {
-          const submitResult = await presentationApi.submitPresentonPptTask({
+          const submitPayload = {
               prompt: projectPrompt,
               n_slides: slideCount,
               language: "Chinese",
               template: standalonePptForm.template || "general",
               export_as: "pptx",
-              verbosity: fastMode ? "concise" : "standard",
+              verbosity: "standard",
               provider: "cloud_async",
-          });
+              content_generation: "preserve",
+              slides_markdown: slidesMarkdown,
+              image_type: "none",
+              web_search: false,
+          };
+
+          const submitResult = await presentationApi.submitPresentonPptTask(submitPayload);
           const taskId = String(submitResult?.task_id || "").trim();
           if (!taskId) {
               throw new Error("未获取到任务ID");
@@ -3356,9 +3846,18 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           setPresentonProgress({
               taskId,
               status: "pending",
-              progress: 8,
-              message: submitResult?.message || "任务已提交，等待生成...",
+              progress: 36,
+              message: submitResult?.message || "已提交生成任务，正在执行...",
           });
+          await persistStandaloneCreativeHistory(
+              [
+                  `[智能创作/PPT任务已提交] ${outlineTitle}（${slideCount}页）`,
+                  `任务ID：${taskId}`,
+                  `模板：${standalonePptForm.template || "general"}`,
+                  `配图：关闭`,
+              ].join('\n'),
+              'ppt_task',
+          );
 
           const deadline = Date.now() + 15 * 60 * 1000;
           let finalResult = null;
@@ -3367,19 +3866,30 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               const status = String(statusResult?.status || "pending").toLowerCase();
               const progressValue = Math.max(0, Math.min(100, Number(statusResult?.progress) || 0));
               const message = String(statusResult?.message || "");
+              const isSuccessStatus = ["completed", "done", "success", "succeeded"].includes(status);
+              const isFailureStatus = ["failed", "error", "cancelled", "canceled"].includes(status);
 
-              setPresentonProgress({
-                  taskId,
-                  status,
-                  progress: progressValue,
-                  message,
+              setPresentonProgress((prev) => {
+                  const previous = Math.max(0, Math.min(100, Number(prev?.progress) || 0));
+                  let nextProgress = progressValue;
+                  if (isSuccessStatus) {
+                      nextProgress = 100;
+                  } else if (!isFailureStatus) {
+                      nextProgress = Math.max(previous, progressValue, 12);
+                  }
+                  return {
+                      taskId,
+                      status,
+                      progress: nextProgress,
+                      message,
+                  };
               });
 
-              if (["completed", "done", "success", "succeeded"].includes(status)) {
+              if (isSuccessStatus) {
                   finalResult = statusResult;
                   break;
               }
-              if (["failed", "error", "cancelled", "canceled"].includes(status)) {
+              if (isFailureStatus) {
                   throw new Error(message || "PPT 生成失败");
               }
 
@@ -3407,6 +3917,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               editUrl,
               finishedAt: new Date().toISOString(),
           });
+          await persistStandaloneCreativeHistory(
+              [
+                  `[智能创作/PPT生成完成] ${outlineTitle}（${slideCount}页）`,
+                  `模板：${standalonePptForm.template || "general"}`,
+                  `下载链接：${downloadUrl || "无"}`,
+                  `在线编辑：${editUrl || "无"}`,
+              ].join('\n'),
+              'ppt_result',
+          );
+          setIsPptWorkspaceOpen(true);
       } catch (error) {
           const errMsg = String(error?.message || "未知错误");
           setPresentonProgress((prev) => ({
@@ -3414,12 +3934,62 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               status: "failed",
               message: errMsg,
           }));
+          await persistStandaloneCreativeHistory(
+              [
+                  `[智能创作/PPT生成失败] ${outlineTitle}（${slideCount}页）`,
+                  `模板：${standalonePptForm.template || "general"}`,
+                  `错误：${errMsg}`,
+              ].join('\n'),
+              'ppt_result',
+          );
           setStandalonePptResult({
               error: errMsg,
           });
+          setIsPptWorkspaceOpen(true);
       } finally {
           setIsPresentonGenerating(false);
       }
+  };
+
+  const updateStandaloneOutlineSlide = (slideIndex, updater) => {
+      setStandalonePptOutline((prev) => {
+          if (!prev || !Array.isArray(prev.slides)) return prev;
+          const nextSlides = prev.slides.map((slide, idx) => {
+              if (idx !== slideIndex) return slide;
+              return updater(slide, idx);
+          });
+          return { ...prev, slides: nextSlides };
+      });
+  };
+
+  const addStandaloneOutlineSlide = () => {
+      setStandalonePptOutline((prev) => {
+          const currentSlides = Array.isArray(prev?.slides) ? prev.slides : [];
+          const nextIndex = currentSlides.length + 1;
+          return {
+              title: prev?.title || "业务汇报",
+              subtitle: prev?.subtitle || "",
+              slides: [
+                  ...currentSlides,
+                  {
+                      index: nextIndex,
+                      title: `新增页面 ${nextIndex}`,
+                      points: ["补充本页核心观点", "补充本页关键数据与论据"],
+                      notes: "",
+                  },
+              ],
+          };
+      });
+  };
+
+  const removeStandaloneOutlineSlide = (slideIndex) => {
+      setStandalonePptOutline((prev) => {
+          if (!prev || !Array.isArray(prev.slides) || prev.slides.length <= 1) return prev;
+          const nextSlides = prev.slides
+              .filter((_, idx) => idx !== slideIndex)
+              .map((slide, idx) => ({ ...slide, index: idx + 1 }));
+          return { ...prev, slides: nextSlides };
+      });
   };
 
   const handleShareClick = () => {
@@ -3611,15 +4181,81 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const buildDefaultStandalonePptFormData = () => {
       return {
+          inputMode: STANDALONE_PPT_INPUT_MODES[0].key,
           analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
-          pptSlideCount: 6,
-          analysisInput: "请基于进出口企业协同办公场景，生成可落地的管理汇报PPT，包含现状、问题、方案、计划与风险。",
+          pptSlideCount: 8,
+          analysisInput: "",
+          documentName: "",
           requireMetrics: true,
-          pptFastMode: true,
-          includeImages: true,
+          includeImages: false,
           template: 'general',
       };
   };
+
+  const loadStandaloneTemplateCatalog = async () => {
+      setIsTemplateCatalogLoading(true);
+      try {
+          const result = await presentationApi.getPresentonTemplateCatalog();
+          const catalog = Array.isArray(result?.data) ? result.data : [];
+          const normalized = catalog
+              .map((item) => ({
+                  template_id: String(item?.template_id || item?.id || "").trim(),
+                  name: String(item?.name || item?.template_name || item?.template_id || "").trim(),
+                  description: String(item?.description || "").trim(),
+                  source: String(item?.source || "").trim(),
+              }))
+              .filter((item) => item.template_id);
+          const finalCatalog = normalized.length ? normalized : STANDALONE_PPT_BUILTIN_TEMPLATES;
+          setStandaloneTemplateCatalog(finalCatalog);
+          setStandalonePptForm((prev) => {
+              if (finalCatalog.some((item) => item.template_id === prev.template)) return prev;
+              return { ...prev, template: finalCatalog[0]?.template_id || "general" };
+          });
+      } catch {
+          setStandaloneTemplateCatalog(STANDALONE_PPT_BUILTIN_TEMPLATES);
+      } finally {
+          setIsTemplateCatalogLoading(false);
+      }
+  };
+
+  useEffect(() => {
+      if (writingEntryMode !== "ppt") return;
+      loadStandaloneTemplateCatalog();
+  }, [writingEntryMode]);
+
+  useEffect(() => {
+      if (!isTemplatePreviewOpen) {
+          if (templatePreviewPollRef.current) {
+              clearInterval(templatePreviewPollRef.current);
+              templatePreviewPollRef.current = null;
+          }
+          return undefined;
+      }
+
+      const syncSelectionFromFrame = () => {
+          const frame = templatePreviewFrameRef.current;
+          if (!frame?.contentWindow) return;
+          try {
+              const matched = parseTemplatePreviewPath(frame.contentWindow.location?.pathname || "");
+              if (!matched) return;
+              setTemplatePreviewSelection((prev) => {
+                  if (prev.routeId === matched.routeId && prev.templateId === matched.templateId) return prev;
+                  return matched;
+              });
+          } catch {
+              // If browser blocks iframe location access, user can still manually pick in dropdown.
+          }
+      };
+
+      syncSelectionFromFrame();
+      templatePreviewPollRef.current = setInterval(syncSelectionFromFrame, 700);
+      return () => {
+          if (templatePreviewPollRef.current) {
+              clearInterval(templatePreviewPollRef.current);
+              templatePreviewPollRef.current = null;
+          }
+      };
+  }, [isTemplatePreviewOpen]);
 
   const applyReportType = (nextType) => {
       if (!nextType) return;
@@ -4036,8 +4672,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       onClick={() => {
                           setWritingEntryMode('ppt');
                           setStandalonePptForm(buildDefaultStandalonePptFormData());
+                          setStandalonePptOutline(null);
+                          setIsOutlineEditorOpen(false);
+                          setIsPptWorkspaceOpen(false);
+                          setIsTemplatePreviewOpen(false);
+                          setTemplatePreviewSelection({ routeId: '', templateId: '' });
                           setStandalonePptResult(null);
                           setIsPresentonGenerating(false);
+                          setIsOutlineGenerating(false);
                           setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
                       }}
                       className="rounded-3xl border border-fuchsia-200 dark:border-fuchsia-800/50 bg-white/95 dark:bg-gray-900/80 p-6 text-left hover:shadow-lg hover:-translate-y-0.5 transition-all"
@@ -4057,104 +4699,700 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   );
 
   const renderStandalonePptGenerator = () => {
-      const labelClass = 'text-sm font-medium text-gray-700 dark:text-gray-200';
-      const inputClass = 'w-full rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2.5 text-sm text-gray-800 dark:text-gray-100 outline-none focus:border-fuchsia-500 focus:ring-4 focus:ring-fuchsia-500/10';
-      const textareaClass = `${inputClass} min-h-[120px] resize-y`;
-      const fastMode = standalonePptForm.pptFastMode !== false;
+      const inputMode = standalonePptForm.inputMode || STANDALONE_PPT_INPUT_MODES[0].key;
       const progressValue = Math.max(0, Math.min(100, Number(presentonProgress.progress) || 0));
-      const slideCountPreview = Math.max(3, Math.min(fastMode ? 20 : 40, Number(standalonePptForm.pptSlideCount) || 6));
+      const progressStatus = String(presentonProgress.status || 'idle').toLowerCase();
+      const progressStatusLabelMap = {
+          idle: "待开始",
+          pending: "排队中",
+          running: "生成中",
+          processing: "处理中",
+          outline_generating: "大纲生成中",
+          outline_ready: "大纲已完成",
+          completed: "已完成",
+          done: "已完成",
+          success: "已完成",
+          succeeded: "已完成",
+          failed: "失败",
+          error: "失败",
+          cancelled: "已取消",
+          canceled: "已取消",
+      };
+      const progressStatusLabel = progressStatusLabelMap[progressStatus] || progressStatus || "处理中";
+      const isProgressVisible = progressStatus !== 'idle' || isPresentonGenerating || isOutlineGenerating || progressValue > 0 || !!presentonProgress.message;
+      const slideCountPreview = Math.max(3, Math.min(40, Number(standalonePptForm.pptSlideCount) || 8));
+      const inputLength = String(standalonePptForm.analysisInput || "").length;
+      const textInputClass = "w-full rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-3 text-sm text-gray-800 dark:text-gray-100 outline-none focus:border-emerald-400 dark:focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100 dark:focus:ring-emerald-900/40";
+      const textAreaClass = `${textInputClass} min-h-[200px] resize-none`;
+      const hasOutline = Array.isArray(standalonePptOutline?.slides) && standalonePptOutline.slides.length > 0;
+      const selectedTemplate = standaloneTemplateCatalog.find((item) => item.template_id === standalonePptForm.template);
 
       return (
-          <div className="h-full w-full overflow-y-auto bg-gradient-to-br from-gray-100 via-white to-fuchsia-50/30 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 px-3 py-4 md:px-6 md:py-6">
-              <div className="max-w-[1320px] mx-auto space-y-4">
-                  <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-900/85 shadow-sm p-4 md:p-5">
-                      <div className="flex flex-wrap items-center gap-2 justify-between">
-                          <button
-                              type="button"
-                              onClick={() => {
-                                  setWritingEntryMode('root');
-                                  setStandalonePptResult(null);
-                                  setIsPresentonGenerating(false);
-                                  setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
-                              }}
-                              className="inline-flex items-center gap-1 rounded-xl border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
-                          >
-                              <ArrowLeft size={14} /> 返回一级功能
-                          </button>
-                          <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
-                              固定模型：qwen3:1.7b（生成结束自动恢复 qwen2.5-coder）
-                          </div>
+          <div className="h-full w-full overflow-y-auto bg-[linear-gradient(180deg,#e8f6f2_0%,#f4f8f7_46%,#f8fbfa_100%)] dark:bg-[radial-gradient(circle_at_20%_10%,#1f2937_0%,#111827_45%,#030712_100%)] px-3 py-4 md:px-6 md:py-7">
+              <div className="mx-auto max-w-6xl">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                      <button
+                          type="button"
+                          onClick={() => {
+                              if (isPptWorkspaceOpen) {
+                                  setIsPptWorkspaceOpen(false);
+                                  return;
+                              }
+                              setWritingEntryMode('root');
+                              setStandalonePptOutline(null);
+                              setIsOutlineEditorOpen(false);
+                              setIsPptWorkspaceOpen(false);
+                              setIsTemplatePreviewOpen(false);
+                              setTemplatePreviewSelection({ routeId: '', templateId: '' });
+                              setStandalonePptResult(null);
+                              setIsPresentonGenerating(false);
+                              setIsOutlineGenerating(false);
+                              setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+                          }}
+                          className="inline-flex items-center gap-1 rounded-xl border border-gray-300 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-white dark:hover:bg-slate-800"
+                      >
+                          <ArrowLeft size={14} /> {isPptWorkspaceOpen ? "返回生成配置" : "返回一级功能"}
+                      </button>
+                      <div className="rounded-xl border border-emerald-200/80 dark:border-emerald-500/30 bg-emerald-50/90 dark:bg-emerald-900/20 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-200">
+                          固定模型：qwen3:1.7b
                       </div>
-                      <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-fuchsia-200 bg-fuchsia-50 px-3 py-1 text-xs font-semibold text-fuchsia-700 dark:border-fuchsia-500/40 dark:bg-fuchsia-900/30 dark:text-fuchsia-200">
-                          <Presentation size={14} /> PPT 生成界面
-                      </div>
-                      <h2 className="mt-3 text-xl md:text-2xl font-bold text-gray-900 dark:text-white">独立 PPT 生成</h2>
-                      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">该界面仅用于 PPT 文件生成、进度跟踪与下载。</p>
                   </div>
 
-                  <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)] gap-4">
-                      <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/90 shadow-sm p-4 md:p-6 space-y-4">
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                              <label className="space-y-1.5"><span className={labelClass}>分析框架</span><select className={inputClass} value={standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisFramework: event.target.value }))}>{WRITING_ANALYSIS_FRAMEWORK_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
-                              <label className="space-y-1.5"><span className={labelClass}>页数</span><input type="number" min={3} max={fastMode ? 20 : 40} className={inputClass} value={standalonePptForm.pptSlideCount ?? 6} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, pptSlideCount: event.target.value }))} /></label>
-                              <label className="space-y-1.5"><span className={labelClass}>模板</span><select className={inputClass} value={standalonePptForm.template || 'general'} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, template: event.target.value }))}><option value="general">general</option><option value="corporate">corporate</option><option value="minimal">minimal</option></select></label>
+                  {!isPptWorkspaceOpen && (
+                      <>
+                  <div className="mt-6 text-center">
+                      <h2 className="text-[34px] leading-tight font-black text-gray-900 dark:text-white md:text-[56px]">
+                          AI生成PPT，<span className="text-[#4fbf53]">高效交付</span>
+                      </h2>
+                      <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+                          先生成并编辑大纲，再确认生成 PPT 文件
+                      </p>
+                  </div>
+
+                  <div className="mx-auto mt-5 max-w-4xl rounded-full border border-gray-200 dark:border-slate-700 bg-[#e5e7ea]/95 dark:bg-slate-800/90 p-1.5">
+                      <div className="flex flex-wrap gap-1">
+                          {STANDALONE_PPT_INPUT_MODES.map((mode) => {
+                              const Icon = mode.icon;
+                              const active = inputMode === mode.key;
+                              return (
+                                  <button
+                                      key={mode.key}
+                                      type="button"
+                                      onClick={() => setStandalonePptForm((prev) => ({ ...prev, inputMode: mode.key }))}
+                                      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm transition-colors ${
+                                          active
+                                              ? "bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-300 shadow-sm"
+                                              : "text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white"
+                                      }`}
+                                  >
+                                      <Icon size={15} />
+                                      {mode.label}
+                                  </button>
+                              );
+                          })}
+                      </div>
+                  </div>
+
+                  <div className="mx-auto mt-4 max-w-5xl rounded-2xl border border-gray-300/90 dark:border-slate-700 bg-white/85 dark:bg-slate-900/85 p-4 shadow-[0_12px_30px_rgba(15,23,42,0.08)] md:p-6">
+                      <div className="min-h-[280px] rounded-xl border border-gray-200 dark:border-slate-700 bg-[#f7f8f8] dark:bg-slate-900/80 p-4 md:p-5">
+                          {inputMode === "topic" && (
+                              <textarea
+                                  className={textAreaClass}
+                                  placeholder="请输入 您想制作的PPT主题"
+                                  value={standalonePptForm.analysisInput || ""}
+                                  maxLength={10000}
+                                  onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisInput: event.target.value }))}
+                              />
+                          )}
+
+                          {inputMode === "document" && (
+                              <div className="space-y-4">
+                                  <div className="rounded-xl border border-dashed border-gray-300 dark:border-slate-600 bg-white/80 dark:bg-slate-950/70 px-4 py-7 text-center">
+                                      <label className="inline-flex cursor-pointer items-center gap-1 rounded-lg bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-emerald-600">
+                                          上传文档
+                                          <input
+                                              type="file"
+                                              accept=".pdf,.doc,.docx,.txt"
+                                              className="hidden"
+                                              onChange={(event) => {
+                                                  const file = event.target.files?.[0];
+                                                  setStandalonePptForm((prev) => ({ ...prev, documentName: file ? file.name : "" }));
+                                              }}
+                                          />
+                                      </label>
+                                      <p className="mt-3 text-sm text-gray-700 dark:text-gray-200">或者直接将文档拖到这里</p>
+                                      <p className="mt-2 text-xs text-gray-400 dark:text-gray-400">
+                                          建议上传10000字、10MB以内的pdf/doc/docx/txt文件
+                                      </p>
+                                      {standalonePptForm.documentName && (
+                                          <p className="mt-3 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+                                              已选择：{standalonePptForm.documentName}
+                                          </p>
+                                      )}
+                                  </div>
+                                  <textarea
+                                      className={`${textInputClass} min-h-[100px] resize-none`}
+                                      placeholder="可选：补充文档内容说明（例如目标受众、汇报重点）"
+                                      value={standalonePptForm.analysisInput || ""}
+                                      maxLength={10000}
+                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisInput: event.target.value }))}
+                                  />
+                              </div>
+                          )}
+
+                          {inputMode === "longText" && (
+                              <div className="relative h-full">
+                                  <textarea
+                                      className={textAreaClass}
+                                      placeholder="输入或粘贴大纲或任意文本内容可直接生成PPT"
+                                      value={standalonePptForm.analysisInput || ""}
+                                      maxLength={10000}
+                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisInput: event.target.value }))}
+                                  />
+                                  <div className="mt-2 text-right text-xs text-gray-500 dark:text-gray-400">{inputLength}/10000</div>
+                              </div>
+                          )}
+                      </div>
+
+                      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex flex-wrap items-center gap-2">
+                              <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-100">
+                                  <span>篇幅</span>
+                                  <select
+                                      className="bg-transparent text-sm text-gray-700 dark:text-gray-100 outline-none"
+                                      value={standalonePptForm.pptSlideCount ?? 8}
+                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, pptSlideCount: Number(event.target.value) }))}
+                                  >
+                                      {[6, 8, 10, 12, 15, 20].map((count) => (
+                                          <option key={count} value={count}>{count}页</option>
+                                      ))}
+                                  </select>
+                              </label>
+                              <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-100">
+                                  <span>智能策略</span>
+                                  <select
+                                      className="bg-transparent text-sm text-gray-700 dark:text-gray-100 outline-none"
+                                      value={standalonePptForm.requireMetrics ? "smart" : "standard"}
+                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, requireMetrics: event.target.value === "smart" }))}
+                                  >
+                                      <option value="smart">智能提炼</option>
+                                      <option value="standard">标准结构</option>
+                                  </select>
+                              </label>
+                              <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-100">
+                                  <span>模板</span>
+                                  <select
+                                      className="bg-transparent text-sm text-gray-700 dark:text-gray-100 outline-none"
+                                      value={standalonePptForm.template || "general"}
+                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, template: event.target.value }))}
+                                  >
+                                      {standaloneTemplateCatalog.map((item) => (
+                                          <option key={item.template_id} value={item.template_id}>
+                                              {item.name || item.template_id}
+                                          </option>
+                                      ))}
+                                  </select>
+                              </label>
+                              <button
+                                  type="button"
+                                  onClick={openTemplatePreviewPicker}
+                                  className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-slate-800"
+                              >
+                                  模板预览选择
+                              </button>
+                              <div className="inline-flex items-center gap-2 rounded-lg border border-amber-200 dark:border-amber-500/40 bg-amber-50/70 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-700 dark:text-amber-200">
+                                  配图已强制关闭
+                              </div>
                           </div>
-                          <label className="space-y-1.5 block"><span className={labelClass}>业务输入</span><textarea className={textareaClass} maxLength={2200} value={standalonePptForm.analysisInput || ''} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisInput: event.target.value }))} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(standalonePptForm.analysisInput || '').length} / 2200</span></label>
-                          <div className="flex flex-wrap gap-4">
-                              <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!standalonePptForm.requireMetrics} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, requireMetrics: event.target.checked }))} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />要求数据指标</label>
-                              <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={standalonePptForm.pptFastMode !== false} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, pptFastMode: event.target.checked }))} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />极速生成</label>
-                              <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={standalonePptForm.includeImages !== false} onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, includeImages: event.target.checked }))} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />启用配图生成</label>
-                          </div>
-                          <div className="pt-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-end gap-2">
-                              <button type="button" onClick={() => { setStandalonePptForm(buildDefaultStandalonePptFormData()); setStandalonePptResult(null); setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' }); }} className="rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">一键重置</button>
-                              <button type="button" onClick={handleGeneratePresentonPpt} disabled={isPresentonGenerating} className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium text-white bg-fuchsia-600 hover:bg-fuchsia-700 disabled:opacity-60 disabled:cursor-not-allowed">
+
+                          <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                  type="button"
+                                  onClick={() => {
+                                      setStandalonePptForm(buildDefaultStandalonePptFormData());
+                                      setStandalonePptOutline(null);
+                                      setIsOutlineEditorOpen(false);
+                                      setIsPptWorkspaceOpen(false);
+                                      setIsTemplatePreviewOpen(false);
+                                      setTemplatePreviewSelection({ routeId: '', templateId: '' });
+                                      setStandalonePptResult(null);
+                                      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+                                  }}
+                                  className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                              >
+                                  重置
+                              </button>
+                              <button
+                                  type="button"
+                                  onClick={handleGeneratePresentonOutline}
+                                  disabled={isOutlineGenerating || isPresentonGenerating}
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                  {isOutlineGenerating ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
+                                  {isOutlineGenerating ? "大纲生成中" : "生成大纲"}
+                              </button>
+                              <button
+                                  type="button"
+                                  onClick={() => setIsOutlineEditorOpen(true)}
+                                  disabled={!hasOutline || isOutlineGenerating}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2 text-sm font-semibold text-gray-700 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                  编辑大纲
+                              </button>
+                              <button
+                                  type="button"
+                                  onClick={handleGeneratePresentonPpt}
+                                  disabled={isPresentonGenerating || isOutlineGenerating || !hasOutline}
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
+                              >
                                   {isPresentonGenerating ? <Loader2 size={15} className="animate-spin" /> : <Presentation size={15} />}
-                                  {isPresentonGenerating ? `生成中 ${Math.round(progressValue)}%` : '生成PPT文件'}
+                                  {isPresentonGenerating ? `生成中 ${Math.round(progressValue)}%` : "确认生成PPT"}
                               </button>
                           </div>
                       </div>
+                      <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                          {isTemplateCatalogLoading
+                              ? "模板加载中..."
+                              : `当前模板：${selectedTemplate?.name || standalonePptForm.template || "general"} · 图片生成默认关闭`}
+                      </div>
+                  </div>
 
-                      <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/90 shadow-sm p-4 md:p-5 space-y-4">
-                          <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/60 p-4 space-y-2">
-                              <p className="text-sm font-semibold text-gray-900 dark:text-white">生成概览</p>
-                              <p className="text-xs text-gray-500 dark:text-gray-400">框架：{standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]}</p>
-                              <p className="text-xs text-gray-500 dark:text-gray-400">预计页数：{slideCountPreview} 页</p>
-                              <p className="text-xs text-gray-500 dark:text-gray-400">模式：{standalonePptForm.pptFastMode !== false ? '极速' : '标准'}</p>
-                              <p className="text-xs text-gray-500 dark:text-gray-400">配图：{standalonePptForm.includeImages !== false ? '开启' : '关闭'}</p>
-                          </div>
+                  <div className="mx-auto mt-4 flex max-w-5xl flex-wrap gap-3">
+                      {STANDALONE_PPT_TOPIC_SUGGESTIONS.map((item) => (
+                          <button
+                              key={item}
+                              type="button"
+                              onClick={() => setStandalonePptForm((prev) => ({ ...prev, inputMode: "topic", analysisInput: item }))}
+                              className="rounded-full border border-emerald-200 dark:border-emerald-500/30 bg-white/80 dark:bg-slate-900/80 px-5 py-2 text-sm text-gray-700 dark:text-gray-200 hover:border-emerald-300 dark:hover:border-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300"
+                          >
+                              {item}
+                          </button>
+                      ))}
+                  </div>
+                      </>
+                  )}
 
-                          <div className="rounded-2xl border border-fuchsia-100 dark:border-fuchsia-900/40 bg-fuchsia-50/70 dark:bg-fuchsia-900/20 p-4">
-                              <div className="text-sm font-medium text-fuchsia-700 dark:text-fuchsia-200">{presentonProgress.message || '等待生成'}</div>
-                              <div className="mt-2 h-2 w-full rounded-full bg-fuchsia-100 dark:bg-fuchsia-900/40 overflow-hidden">
-                                  <div className="h-full bg-fuchsia-500 transition-all duration-300" style={{ width: `${progressValue}%` }} />
+                  {isPptWorkspaceOpen && hasOutline && (
+                      <div className="mx-auto mt-4 max-w-5xl rounded-2xl border border-gray-200 dark:border-slate-700 bg-white/90 dark:bg-slate-900/90 p-3 md:p-4">
+                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50/70 dark:bg-slate-800/50 px-3 py-2">
+                              <div className="text-xs text-gray-600 dark:text-gray-300">左侧大纲 / 右侧PPT，可在这里切换模板后重新生成</div>
+                              <div className="flex flex-wrap items-center gap-2">
+                                  <select
+                                      className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs text-gray-700 dark:text-gray-100 outline-none"
+                                      value={standalonePptForm.template || "general"}
+                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, template: event.target.value }))}
+                                  >
+                                      {standaloneTemplateCatalog.map((item) => (
+                                          <option key={`workspace-template-${item.template_id}`} value={item.template_id}>
+                                              {item.name || item.template_id}
+                                          </option>
+                                      ))}
+                                  </select>
+                                  <button
+                                      type="button"
+                                      onClick={openTemplatePreviewPicker}
+                                      className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-semibold text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800"
+                                  >
+                                      模板预览选择
+                                  </button>
+                                  <button
+                                      type="button"
+                                      onClick={handleGeneratePresentonPpt}
+                                      disabled={isPresentonGenerating || isOutlineGenerating || !hasOutline}
+                                      className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                      按当前模板重新生成
+                                  </button>
                               </div>
-                              <div className="mt-2 text-xs text-fuchsia-700/80 dark:text-fuchsia-200/80">{Math.round(progressValue)}%</div>
                           </div>
-
-                          {standalonePptResult?.downloadUrl && (
-                              <div className="rounded-2xl border border-emerald-200 dark:border-emerald-800/40 bg-emerald-50/70 dark:bg-emerald-900/20 p-4 space-y-2">
-                                  <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-200">PPT 生成完成</p>
-                                  <p className="text-xs text-emerald-700/80 dark:text-emerald-200/80">来源：{standalonePptResult.provider} · 页数：{standalonePptResult.slideCount}</p>
-                                  <div className="flex flex-wrap gap-2">
-                                      <a href={standalonePptResult.downloadUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold px-3 py-2">
-                                          <Download size={13} /> 下载PPT
-                                      </a>
-                                      {standalonePptResult.editUrl && (
-                                          <a href={standalonePptResult.editUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-200 text-xs font-semibold px-3 py-2">
-                                              在线编辑
-                                          </a>
+                          {isProgressVisible && (
+                              <div className="mb-3 rounded-xl border border-emerald-100 dark:border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-900/20 p-3">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <div className="text-sm font-semibold text-emerald-700 dark:text-emerald-200">
+                                          {presentonProgress.message || "任务执行中..."}
+                                      </div>
+                                      <div className="inline-flex items-center gap-2 text-xs text-emerald-700/90 dark:text-emerald-200/90">
+                                          <span className="rounded-full border border-emerald-200 dark:border-emerald-500/30 bg-white/70 dark:bg-emerald-900/40 px-2 py-0.5">{progressStatusLabel}</span>
+                                          <span>{Math.round(progressValue)}%</span>
+                                      </div>
+                                  </div>
+                                  <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-emerald-100 dark:bg-emerald-800/40">
+                                      <div className="h-full bg-emerald-500 transition-all duration-300" style={{ width: `${progressValue}%` }} />
+                                  </div>
+                                  {presentonProgress.taskId && (
+                                      <div className="mt-2 text-[11px] text-emerald-700/80 dark:text-emerald-200/80 break-all">
+                                          任务ID：{presentonProgress.taskId}
+                                      </div>
+                                  )}
+                              </div>
+                          )}
+                          <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(320px,0.44fr)_minmax(0,0.56fr)]">
+                              <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50/70 dark:bg-slate-900/60 overflow-hidden">
+                                  <div className="px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-sm font-semibold text-gray-900 dark:text-white">
+                                      大纲区
+                                  </div>
+                                  <div className="max-h-[620px] overflow-y-auto p-3 space-y-3 custom-scrollbar">
+                                      {standalonePptOutline.slides.map((slide, idx) => (
+                                          <div key={`workspace-outline-${idx}`} className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800/70 p-3">
+                                              <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">第 {idx + 1} 页</div>
+                                              <div className="mt-1 text-sm font-medium text-gray-900 dark:text-white">{slide.title || `第 ${idx + 1} 页`}</div>
+                                              <div className="mt-2 space-y-1 text-xs text-gray-600 dark:text-gray-300">
+                                                  {(Array.isArray(slide.points) ? slide.points : []).map((point, pointIdx) => (
+                                                      <div key={`workspace-outline-point-${idx}-${pointIdx}`}>• {point}</div>
+                                                  ))}
+                                              </div>
+                                          </div>
+                                      ))}
+                                  </div>
+                              </div>
+                              <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 overflow-hidden">
+                                  <div className="px-3 py-2 border-b border-gray-200 dark:border-slate-700 text-sm font-semibold text-gray-900 dark:text-white">
+                                      PPT区
+                                  </div>
+                                  <div className="h-[620px] bg-gray-50 dark:bg-slate-950">
+                                      {standalonePptResult?.editUrl ? (
+                                          <iframe
+                                              src={standalonePptResult.editUrl}
+                                              title="PPT Preview"
+                                              className="w-full h-full border-0"
+                                          />
+                                      ) : (
+                                          <div className="h-full overflow-y-auto p-4 custom-scrollbar">
+                                              <div className="rounded-lg border border-emerald-100 dark:border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-900/20 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-200">
+                                                  {isPresentonGenerating ? "正在生成PPT..." : "确认生成后，这里会展示在线 PPT 编辑区域。"}
+                                              </div>
+                                              <div className="mt-3 space-y-3">
+                                                  {standalonePptOutline.slides.slice(0, 8).map((slide, idx) => (
+                                                      <div key={`workspace-preview-${idx}`} className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3">
+                                                          <div className="text-xs text-gray-500 dark:text-gray-400">Slide {idx + 1}</div>
+                                                          <div className="text-sm font-semibold text-gray-900 dark:text-white">{slide.title || `第 ${idx + 1} 页`}</div>
+                                                          <div className="mt-2 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+                                                              {(Array.isArray(slide.points) ? slide.points : []).slice(0, 3).map((point, pointIdx) => (
+                                                                  <div key={`workspace-preview-point-${idx}-${pointIdx}`}>- {point}</div>
+                                                              ))}
+                                                          </div>
+                                                      </div>
+                                                  ))}
+                                              </div>
+                                          </div>
                                       )}
                                   </div>
                               </div>
-                          )}
+                          </div>
+                      </div>
+                  )}
 
-                          {standalonePptResult?.error && (
-                              <div className="rounded-2xl border border-red-200 dark:border-red-800/40 bg-red-50/80 dark:bg-red-900/20 p-4 text-sm text-red-700 dark:text-red-200">
-                                  {standalonePptResult.error}
-                              </div>
-                          )}
+                  {!isPptWorkspaceOpen && (
+                  <div className="mx-auto mt-4 grid max-w-5xl grid-cols-1 gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border border-emerald-100 dark:border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-900/20 p-4">
+                          <div className="text-sm font-semibold text-emerald-700 dark:text-emerald-200">{presentonProgress.message || "等待生成任务"}</div>
+                          <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-emerald-100 dark:bg-emerald-800/40">
+                              <div className="h-full bg-emerald-500 transition-all duration-300" style={{ width: `${progressValue}%` }} />
+                          </div>
+                          <div className="mt-2 text-xs text-emerald-700/80 dark:text-emerald-200/80">{Math.round(progressValue)}%</div>
+                      </div>
+
+                      <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 p-4">
+                          <div className="text-sm font-semibold text-gray-900 dark:text-white">生成概览</div>
+                          <div className="mt-2 space-y-1 text-xs text-gray-600 dark:text-gray-300">
+                              <p>框架：{standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]}</p>
+                              <p>预计页数：{slideCountPreview} 页</p>
+                              <p>模板：{selectedTemplate?.name || standalonePptForm.template || "general"}</p>
+                              <p>输入模式：{STANDALONE_PPT_INPUT_MODES.find((item) => item.key === inputMode)?.label || "输入PPT主题"}</p>
+                              <p>配图：关闭（强制）</p>
+                              <p>大纲状态：{hasOutline ? `已生成（${standalonePptOutline.slides.length} 页）` : "待生成"}</p>
+                          </div>
                       </div>
                   </div>
+                  )}
+
+                  {standalonePptResult?.downloadUrl && (
+                      <div className="mx-auto mt-3 max-w-5xl rounded-xl border border-emerald-200 dark:border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-900/20 p-4">
+                          <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-200">PPT 生成完成</p>
+                          <p className="mt-1 text-xs text-emerald-700/80 dark:text-emerald-200/80">
+                              来源：{standalonePptResult.provider} · 页数：{standalonePptResult.slideCount}
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                              <a
+                                  href={standalonePptResult.downloadUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+                              >
+                                  <Download size={13} /> 下载PPT
+                              </a>
+                              {standalonePptResult.editUrl && (
+                                  <a
+                                      href={standalonePptResult.editUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 dark:border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-200 hover:bg-emerald-50 dark:hover:bg-emerald-900/30"
+                                  >
+                                      在线编辑
+                                  </a>
+                              )}
+                          </div>
+                      </div>
+                  )}
+
+                  {standalonePptResult?.error && (
+                      <div className="mx-auto mt-3 max-w-5xl rounded-xl border border-red-200 dark:border-red-500/40 bg-red-50/80 dark:bg-red-900/20 p-4 text-sm text-red-700 dark:text-red-200">
+                          {standalonePptResult.error}
+                      </div>
+                  )}
+
+                  {isTemplatePreviewOpen && (
+                      <div className="fixed inset-0 z-[75] flex items-center justify-center p-3 md:p-5">
+                          <div className="absolute inset-0 bg-black/50" onClick={closeTemplatePreviewPicker} />
+                          <div className="relative w-full max-w-[1360px] h-[min(90vh,920px)] rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden flex flex-col">
+                              <div className="px-5 py-3 border-b border-gray-200 dark:border-slate-700 flex items-center justify-between gap-2">
+                                  <div className="text-lg font-semibold text-gray-900 dark:text-white">模板预览与选择</div>
+                                  <button
+                                      type="button"
+                                      onClick={closeTemplatePreviewPicker}
+                                      className="rounded-lg border border-gray-200 dark:border-slate-700 p-2 text-gray-500 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                                  >
+                                      <X size={18} />
+                                  </button>
+                              </div>
+                              <div className="px-5 py-2 border-b border-gray-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">
+                                  <div>在模板预览页进入某个模板详情后，点击下方“使用当前模板”即可应用。</div>
+                                  <a
+                                      href={`${PRESENTON_PROXY_PREFIX}/template-preview`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex items-center gap-1 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800"
+                                  >
+                                      新窗口打开
+                                  </a>
+                              </div>
+                              <div className="flex-1 min-h-0 bg-gray-100 dark:bg-slate-950">
+                                  <iframe
+                                      ref={templatePreviewFrameRef}
+                                      title="Template Preview"
+                                      src={`${PRESENTON_PROXY_PREFIX}/template-preview`}
+                                      className="w-full h-full border-0"
+                                  />
+                              </div>
+                              <div className="px-5 py-3 border-t border-gray-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2 min-w-[260px]">
+                                      <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">模板ID</span>
+                                      <input
+                                          className="w-full rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-800 dark:text-gray-100 outline-none"
+                                          placeholder="可手动输入模板ID"
+                                          value={templatePreviewSelection?.templateId || ""}
+                                          onChange={(event) => {
+                                              const value = String(event.target.value || "").trim();
+                                              setTemplatePreviewSelection((prev) => ({
+                                                  routeId: prev?.routeId || value,
+                                                  templateId: value,
+                                              }));
+                                          }}
+                                      />
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                      <button
+                                          type="button"
+                                          onClick={closeTemplatePreviewPicker}
+                                          className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                                      >
+                                          取消
+                                      </button>
+                                      <button
+                                          type="button"
+                                          onClick={handleApplyTemplateFromPreview}
+                                          disabled={!templatePreviewSelection?.templateId}
+                                          className="rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-60"
+                                      >
+                                          使用当前模板
+                                      </button>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                  )}
+
+                  {isOutlineGenerating && (
+                      <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+                          <div className="absolute inset-0 bg-black/45" />
+                          <div className="relative w-full max-w-3xl rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl">
+                              <div className="p-5">
+                                  <div className="text-3xl font-semibold text-gray-900 dark:text-white">
+                                      AI正在生成大纲...{Math.max(12, Math.round(progressValue))}%
+                                  </div>
+                                  <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                                      大纲内容生成时间约30秒-1分钟，内容可在生成完毕后自由编辑
+                                  </div>
+                                  <div className="mt-4 rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-950 max-h-[420px] overflow-y-auto p-4 space-y-2 custom-scrollbar">
+                                      {(String(standalonePptForm.analysisInput || "正在根据你的输入组织大纲结构..."))
+                                          .split('\n')
+                                          .map((line) => line.trim())
+                                          .filter(Boolean)
+                                          .slice(0, 18)
+                                          .map((line, idx) => (
+                                              <div key={`outline-progress-preview-${idx}`} className="text-sm text-gray-700 dark:text-gray-200">
+                                                  {idx + 1}. {line}
+                                              </div>
+                                          ))}
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
+                  )}
+
+                  {isOutlineEditorOpen && hasOutline && (
+                      <div className="fixed inset-0 z-[80] flex items-center justify-center p-3 md:p-5">
+                          <div className="absolute inset-0 bg-black/50" onClick={() => setIsOutlineEditorOpen(false)} />
+                          <div className="relative w-full max-w-[1320px] h-[min(88vh,900px)] rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl flex flex-col overflow-hidden">
+                              <div className="px-5 py-4 border-b border-gray-200 dark:border-slate-700 flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                      <Sparkles size={18} className="text-emerald-500" />
+                                      <div className="text-3xl font-semibold text-gray-900 dark:text-white">点击下方文字编辑内容</div>
+                                      <div className="text-sm text-gray-500 dark:text-gray-400 ml-2">该内容由AI生成</div>
+                                  </div>
+                                  <button
+                                      type="button"
+                                      onClick={() => setIsOutlineEditorOpen(false)}
+                                      className="rounded-lg border border-gray-200 dark:border-slate-700 p-2 text-gray-500 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800"
+                                  >
+                                      <X size={20} />
+                                  </button>
+                              </div>
+
+                              <div className="flex-1 min-h-0 p-4">
+                                  <div className="grid h-full grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,0.95fr)]">
+                                      <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50/80 dark:bg-slate-800/60 p-3 overflow-hidden flex flex-col">
+                                          <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                                              <input
+                                                  className={textInputClass}
+                                                  placeholder="大纲标题"
+                                                  value={standalonePptOutline?.title || ""}
+                                                  onChange={(event) => setStandalonePptOutline((prev) => ({ ...(prev || {}), title: event.target.value }))}
+                                              />
+                                              <input
+                                                  className={textInputClass}
+                                                  placeholder="副标题（可选）"
+                                                  value={standalonePptOutline?.subtitle || ""}
+                                                  onChange={(event) => setStandalonePptOutline((prev) => ({ ...(prev || {}), subtitle: event.target.value }))}
+                                              />
+                                          </div>
+                                          <div className="mt-3 flex-1 overflow-y-auto space-y-3 custom-scrollbar pr-1">
+                                              {standalonePptOutline.slides.map((slide, idx) => (
+                                                  <div key={`outline-modal-slide-${idx}`} className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3">
+                                                      <div className="mb-2 flex items-center justify-between">
+                                                          <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">第 {idx + 1} 页</div>
+                                                          <div className="flex items-center gap-2">
+                                                              <button
+                                                                  type="button"
+                                                                  onClick={addStandaloneOutlineSlide}
+                                                                  className="text-gray-500 dark:text-gray-300 hover:text-gray-800 dark:hover:text-white"
+                                                                  title="新增页"
+                                                              >
+                                                                  <Plus size={16} />
+                                                              </button>
+                                                              <button
+                                                                  type="button"
+                                                                  onClick={() => removeStandaloneOutlineSlide(idx)}
+                                                                  className="text-red-500 hover:text-red-600"
+                                                                  title="删除页"
+                                                              >
+                                                                  <Trash2 size={16} />
+                                                              </button>
+                                                          </div>
+                                                      </div>
+                                                      <input
+                                                          className={textInputClass}
+                                                          placeholder="页面标题"
+                                                          value={slide.title || ""}
+                                                          onChange={(event) => updateStandaloneOutlineSlide(idx, (prevSlide) => ({ ...prevSlide, title: event.target.value }))}
+                                                      />
+                                                      <textarea
+                                                          className={`${textInputClass} mt-2 min-h-[94px] resize-y`}
+                                                          placeholder="每行一个要点"
+                                                          value={(Array.isArray(slide.points) ? slide.points : []).join('\n')}
+                                                          onChange={(event) => {
+                                                              const points = String(event.target.value || "")
+                                                                  .split('\n')
+                                                                  .map((item) => item.trim())
+                                                                  .filter(Boolean);
+                                                              updateStandaloneOutlineSlide(idx, (prevSlide) => ({
+                                                                  ...prevSlide,
+                                                                  points: points.length ? points : [""],
+                                                              }));
+                                                          }}
+                                                      />
+                                                      <textarea
+                                                          className={`${textInputClass} mt-2 min-h-[72px] resize-y`}
+                                                          placeholder="讲解备注（可选）"
+                                                          value={slide.notes || ""}
+                                                          onChange={(event) => updateStandaloneOutlineSlide(idx, (prevSlide) => ({ ...prevSlide, notes: event.target.value }))}
+                                                      />
+                                                  </div>
+                                              ))}
+                                          </div>
+                                      </div>
+
+                                      <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50/80 dark:bg-slate-800/60 p-3 overflow-hidden flex flex-col">
+                                          <div className="flex items-center justify-between gap-2 mb-2">
+                                              <div className="text-3xl font-semibold text-gray-900 dark:text-white">智能优化建议</div>
+                                              <button
+                                                  type="button"
+                                                  onClick={handleGeneratePresentonOutline}
+                                                  disabled={isOutlineGenerating || isPresentonGenerating}
+                                                  className="rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm px-4 py-2 disabled:opacity-60"
+                                              >
+                                                  重新获取建议
+                                              </button>
+                                          </div>
+                                          <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-1">
+                                              {standalonePptOutline.slides.map((slide, idx) => (
+                                                  <div key={`outline-suggestion-${idx}`} className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3">
+                                                      <div className="text-lg font-medium text-gray-900 dark:text-white">{slide.title || `第 ${idx + 1} 页`}</div>
+                                                      <div className="mt-2 space-y-1 text-sm text-gray-600 dark:text-gray-300">
+                                                          {(Array.isArray(slide.points) ? slide.points : []).slice(0, 2).map((point, pointIdx) => (
+                                                              <div key={`outline-suggestion-point-${idx}-${pointIdx}`}>{point}</div>
+                                                          ))}
+                                                      </div>
+                                                      <div className="mt-2 flex justify-end">
+                                                          <button
+                                                              type="button"
+                                                              onClick={() => updateStandaloneOutlineSlide(idx, (prevSlide) => ({
+                                                                  ...prevSlide,
+                                                                  points: [...(Array.isArray(prevSlide.points) ? prevSlide.points : []), "补充：加入可量化指标与阶段目标。"],
+                                                              }))}
+                                                              className="rounded-lg border border-emerald-300 text-emerald-600 dark:text-emerald-300 px-3 py-1.5 text-sm hover:bg-emerald-50 dark:hover:bg-emerald-900/30"
+                                                          >
+                                                              采用建议
+                                                          </button>
+                                                      </div>
+                                                  </div>
+                                              ))}
+                                          </div>
+                                      </div>
+                                  </div>
+                              </div>
+
+                              <div className="px-5 py-4 border-t border-gray-200 dark:border-slate-700 flex items-center justify-end gap-2">
+                                  <button
+                                      type="button"
+                                      onClick={handleGeneratePresentonOutline}
+                                      disabled={isOutlineGenerating || isPresentonGenerating}
+                                      className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800 disabled:opacity-60"
+                                  >
+                                      换个大纲
+                                  </button>
+                                  <button
+                                      type="button"
+                                      onClick={handleGeneratePresentonPpt}
+                                      disabled={isPresentonGenerating || isOutlineGenerating || !hasOutline}
+                                      className="rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 text-sm font-semibold disabled:opacity-60"
+                                  >
+                                      生成PPT
+                                  </button>
+                              </div>
+                          </div>
+                      </div>
+                  )}
               </div>
           </div>
       );

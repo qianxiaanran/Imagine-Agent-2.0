@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from urllib.parse import quote, unquote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+from admin_utils import ROLE_ADMIN, require_role
+from deepseek_llm import ask_llm
 
 router = APIRouter(prefix="/api/presentation", tags=["Presentation"])
 
@@ -23,6 +29,19 @@ LOCAL_GENERATE_PATH = os.getenv("PRESENTON_LOCAL_PATH", "/api/v1/ppt/presentatio
 CLOUD_SYNC_PATH = os.getenv("PRESENTON_SYNC_PATH", "/api/v1/ppt/presentation/generate/sync").strip()
 CLOUD_ASYNC_PATH = os.getenv("PRESENTON_ASYNC_PATH", "/api/v1/ppt/presentation/generate/async").strip()
 STATUS_PATH_TEMPLATE = os.getenv("PRESENTON_STATUS_PATH_TEMPLATE", "/api/v1/ppt/presentation/status/{task_id}").strip()
+TEMPLATE_LIST_PATHS = [
+    os.getenv("PRESENTON_TEMPLATE_LIST_PATH", "/api/v1/ppt/template/all").strip() or "/api/v1/ppt/template/all",
+    os.getenv("PRESENTON_TEMPLATE_LIST_PATH_V3", "/api/v3/standard-template").strip() or "/api/v3/standard-template",
+    os.getenv("PRESENTON_TEMPLATE_LIST_PATH_TM", "/api/v1/ppt/template-management/summary").strip()
+    or "/api/v1/ppt/template-management/summary",
+]
+TEMPLATE_DETAIL_PATHS = [
+    os.getenv("PRESENTON_TEMPLATE_DETAIL_PATH", "/api/v1/ppt/template/{template_id}").strip() or "/api/v1/ppt/template/{template_id}",
+    os.getenv("PRESENTON_TEMPLATE_DETAIL_PATH_V3", "/api/v3/standard-template/{template_id}").strip() or "/api/v3/standard-template/{template_id}",
+]
+TEMPLATE_REGISTRY_FILE = Path(
+    os.getenv("PRESENTON_TEMPLATE_REGISTRY_FILE", str(Path(__file__).resolve().parent / "data" / "presentation_templates.json"))
+)
 
 REQUEST_TIMEOUT_SEC = float(os.getenv("PRESENTON_REQUEST_TIMEOUT_SEC", "180"))
 POLL_TIMEOUT_SEC = float(os.getenv("PRESENTON_POLL_TIMEOUT_SEC", "900"))
@@ -32,13 +51,34 @@ PRESENTON_PROXY_PREFIX = "/api/presentation/presenton/proxy"
 PRESENTON_USER_CONFIG_PATH = os.getenv("PRESENTON_USER_CONFIG_PATH", "/api/user-config").strip() or "/api/user-config"
 PPT_RUNTIME_MODEL = os.getenv("PRESENTON_PPT_RUNTIME_MODEL", "qwen3:1.7b").strip() or "qwen3:1.7b"
 PPT_RESTORE_MODEL = os.getenv("PRESENTON_PPT_RESTORE_MODEL", "qwen2.5-coder:latest").strip() or "qwen2.5-coder:latest"
+PPT_IMAGE_PROVIDER_DISABLED = os.getenv("PRESENTON_PPT_IMAGE_PROVIDER_DISABLED", "none").strip() or "none"
+PPT_IMAGE_PROVIDER_RESTORE = os.getenv("PRESENTON_PPT_IMAGE_PROVIDER_RESTORE", "").strip()
+PPT_FORCE_IMAGE_PROVIDER_OVERRIDE = os.getenv("PRESENTON_PPT_FORCE_IMAGE_PROVIDER_OVERRIDE", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 PPT_MODEL_KEEP_ALIVE = os.getenv("PRESENTON_PPT_MODEL_KEEP_ALIVE", "1h").strip() or "1h"
 OLLAMA_CONTROL_URL = (
     os.getenv("PRESENTON_OLLAMA_CONTROL_URL")
     or os.getenv("OLLAMA_API_BASE")
     or "http://127.0.0.1:11434"
 ).strip().rstrip("/")
-OLLAMA_CONTROL_TIMEOUT_SEC = float(os.getenv("PRESENTON_OLLAMA_CONTROL_TIMEOUT_SEC", "30"))
+OLLAMA_CONTROL_TIMEOUT_SEC = float(os.getenv("PRESENTON_OLLAMA_CONTROL_TIMEOUT_SEC", "8"))
+PPT_RUNTIME_CONFIG_TIMEOUT_SEC = float(os.getenv("PRESENTON_RUNTIME_CONFIG_TIMEOUT_SEC", "20"))
+PPT_RUNTIME_SWITCH_STRICT = os.getenv("PRESENTON_RUNTIME_SWITCH_STRICT", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+PPT_ENFORCE_SINGLE_OLLAMA_MODEL = os.getenv("PRESENTON_ENFORCE_SINGLE_OLLAMA_MODEL", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 PPT_TASK_STALE_SEC = float(os.getenv("PRESENTON_PPT_TASK_STALE_SEC", "7200"))
 TERMINAL_TASK_STATUSES = {"completed", "done", "success", "succeeded", "failed", "error", "cancelled", "canceled"}
 HOP_BY_HOP_HEADERS = {
@@ -62,7 +102,15 @@ _PRESENTON_SESSION.mount("http://", HTTPAdapter(pool_connections=32, pool_maxsiz
 _PRESENTON_SESSION.mount("https://", HTTPAdapter(pool_connections=32, pool_maxsize=128, max_retries=0))
 _MODEL_RUNTIME_LOCK = threading.Lock()
 _ACTIVE_PPT_TASKS: Dict[str, float] = {}
+_TEMPLATE_REGISTRY_LOCK = threading.Lock()
+_LAST_IMAGE_PROVIDER: Optional[str] = None
 logger = logging.getLogger(__name__)
+
+BUILTIN_TEMPLATE_CATALOG: List[Dict[str, Any]] = [
+    {"template_id": "general", "name": "general", "description": "通用商务模板", "source": "builtin"},
+    {"template_id": "corporate", "name": "corporate", "description": "企业汇报模板", "source": "builtin"},
+    {"template_id": "minimal", "name": "minimal", "description": "简洁极简模板", "source": "builtin"},
+]
 
 
 class PresentonGenerateRequest(BaseModel):
@@ -73,8 +121,32 @@ class PresentonGenerateRequest(BaseModel):
     export_as: str = Field(default="pptx", max_length=16)
     tone: str = Field(default="professional", max_length=32)
     verbosity: str = Field(default="standard", max_length=32)
+    image_type: Optional[str] = Field(default="none", max_length=32)
+    content_generation: Optional[str] = Field(default=None, max_length=32)
+    markdown_emphasis: Optional[str] = Field(default=None, max_length=32)
+    web_search: Optional[bool] = None
+    slides_markdown: Optional[List[str]] = None
+    slides_layout: Optional[List[str]] = None
     provider: Literal["auto", "local", "cloud_sync", "cloud_async"] = "auto"
     base_url: Optional[str] = None
+
+
+class PresentonOutlineRequest(BaseModel):
+    input_mode: Literal["topic", "document", "longText"] = "topic"
+    analysis_framework: str = Field(default="4P框架", max_length=64)
+    analysis_input: str = Field(default="", max_length=14000)
+    document_name: Optional[str] = Field(default=None, max_length=256)
+    n_slides: int = Field(default=8, ge=3, le=40)
+    language: str = Field(default="Chinese", max_length=64)
+    require_metrics: bool = True
+    include_images: bool = False
+    model_backend: Literal["local", "cloud"] = "local"
+
+
+class PresentonTemplateImportRequest(BaseModel):
+    template_id: str = Field(..., min_length=1, max_length=120)
+    alias: Optional[str] = Field(default=None, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=300)
 
 
 def _normalize_base_url(base_url: Optional[str]) -> str:
@@ -106,6 +178,21 @@ def _is_same_model(model_a: Optional[str], model_b: Optional[str]) -> bool:
     if a == b:
         return True
     return a.removesuffix(":latest") == b.removesuffix(":latest")
+
+
+def _runtime_config_timeout() -> float:
+    upper = REQUEST_TIMEOUT_SEC if REQUEST_TIMEOUT_SEC > 0 else 20.0
+    preferred = PPT_RUNTIME_CONFIG_TIMEOUT_SEC if PPT_RUNTIME_CONFIG_TIMEOUT_SEC > 0 else 20.0
+    return max(3.0, min(upper, preferred))
+
+
+def _handle_runtime_switch_error(step: str, exc: Exception) -> None:
+    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+    logger.warning("%s: %s", step, detail)
+    if PPT_RUNTIME_SWITCH_STRICT:
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(status_code=500, detail=f"{step}: {detail}") from exc
 
 
 def _ollama_request_json(
@@ -153,18 +240,50 @@ def _list_loaded_ollama_models() -> List[str]:
     return result
 
 
-def _set_presenton_ollama_model(base_url: str, model_name: str) -> None:
+def _set_presenton_ollama_model(base_url: str, model_name: str, image_provider: Optional[str] = None) -> None:
+    runtime_timeout = _runtime_config_timeout()
     payload = {
         "LLM": "ollama",
         "OLLAMA_MODEL": model_name,
     }
-    _request_json(
-        "POST",
-        f"{base_url}{PRESENTON_USER_CONFIG_PATH}",
-        {"Content-Type": "application/json"},
-        payload=payload,
-        timeout=max(REQUEST_TIMEOUT_SEC, 30),
-    )
+    if image_provider is not None:
+        payload["IMAGE_PROVIDER"] = str(image_provider).strip()
+    try:
+        _request_json(
+            "POST",
+            f"{base_url}{PRESENTON_USER_CONFIG_PATH}",
+            {"Content-Type": "application/json"},
+            payload=payload,
+            timeout=runtime_timeout,
+        )
+    except HTTPException as exc:
+        # Some deployments may not accept IMAGE_PROVIDER in user config update payload.
+        if image_provider is not None:
+            logger.warning("Failed to set IMAGE_PROVIDER in user config, fallback to model-only update: %s", exc.detail)
+            payload.pop("IMAGE_PROVIDER", None)
+            _request_json(
+                "POST",
+                f"{base_url}{PRESENTON_USER_CONFIG_PATH}",
+                {"Content-Type": "application/json"},
+                payload=payload,
+                timeout=runtime_timeout,
+            )
+            return
+        raise
+
+
+def _read_presenton_user_config(base_url: str) -> Dict[str, Any]:
+    try:
+        data = _request_json(
+            "GET",
+            f"{base_url}{PRESENTON_USER_CONFIG_PATH}",
+            {"Content-Type": "application/json"},
+            payload=None,
+            timeout=_runtime_config_timeout(),
+        )
+    except HTTPException:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _unload_ollama_model(model_name: str) -> None:
@@ -218,14 +337,45 @@ def _ensure_only_ollama_model(target_model: str) -> None:
             logger.warning("Second-pass unload failed for model %s: %s", model_name, exc.detail)
 
 
+def _enforce_single_ollama_model_if_needed(target_model: str, stage: str) -> None:
+    if not PPT_ENFORCE_SINGLE_OLLAMA_MODEL:
+        return
+    try:
+        _ensure_only_ollama_model(target_model)
+    except Exception as exc:
+        _handle_runtime_switch_error(f"Failed to enforce single Ollama model during {stage}", exc)
+
+
 def _activate_ppt_runtime(base_url: str) -> None:
-    _set_presenton_ollama_model(base_url, PPT_RUNTIME_MODEL)
-    _ensure_only_ollama_model(PPT_RUNTIME_MODEL)
+    global _LAST_IMAGE_PROVIDER
+    if PPT_FORCE_IMAGE_PROVIDER_OVERRIDE and _LAST_IMAGE_PROVIDER is None:
+        try:
+            current = _read_presenton_user_config(base_url)
+            current_provider = str(current.get("IMAGE_PROVIDER") or "").strip()
+            if current_provider:
+                _LAST_IMAGE_PROVIDER = current_provider
+        except Exception as exc:
+            _handle_runtime_switch_error("Failed to read Presenton user config before runtime activation", exc)
+
+    target_image_provider = PPT_IMAGE_PROVIDER_DISABLED if PPT_FORCE_IMAGE_PROVIDER_OVERRIDE else None
+    try:
+        _set_presenton_ollama_model(base_url, PPT_RUNTIME_MODEL, image_provider=target_image_provider)
+    except Exception as exc:
+        _handle_runtime_switch_error("Failed to activate PPT runtime model", exc)
+        return
+    _enforce_single_ollama_model_if_needed(PPT_RUNTIME_MODEL, "runtime activation")
 
 
 def _restore_default_runtime(base_url: str) -> None:
-    _set_presenton_ollama_model(base_url, PPT_RESTORE_MODEL)
-    _ensure_only_ollama_model(PPT_RESTORE_MODEL)
+    restore_provider = None
+    if PPT_FORCE_IMAGE_PROVIDER_OVERRIDE:
+        restore_provider = _LAST_IMAGE_PROVIDER or PPT_IMAGE_PROVIDER_RESTORE
+    try:
+        _set_presenton_ollama_model(base_url, PPT_RESTORE_MODEL, image_provider=restore_provider if restore_provider else None)
+    except Exception as exc:
+        _handle_runtime_switch_error("Failed to restore default runtime model", exc)
+        return
+    _enforce_single_ollama_model_if_needed(PPT_RESTORE_MODEL, "runtime restore")
 
 
 def _purge_stale_tasks_locked(now_ts: Optional[float] = None) -> None:
@@ -401,6 +551,40 @@ def _extract_progress_from_payload(payload: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _extract_status_value(payload: Dict[str, Any]) -> str:
+    direct = str(payload.get("status") or payload.get("state") or "").strip().lower()
+    if direct:
+        return direct
+    data = payload.get("data")
+    if isinstance(data, dict):
+        nested = str(data.get("status") or data.get("state") or data.get("task_status") or "").strip().lower()
+        if nested:
+            return nested
+    return "pending"
+
+
+def _extract_status_message(payload: Dict[str, Any]) -> str:
+    message = str(payload.get("message") or payload.get("detail") or payload.get("error_message") or "").strip()
+    if message:
+        return message
+    error_payload = payload.get("error")
+    if isinstance(error_payload, dict):
+        nested_error = str(
+            error_payload.get("detail")
+            or error_payload.get("message")
+            or error_payload.get("error")
+            or ""
+        ).strip()
+        if nested_error:
+            return nested_error
+    data = payload.get("data")
+    if isinstance(data, dict):
+        nested_message = str(data.get("message") or data.get("detail") or "").strip()
+        if nested_message:
+            return nested_message
+    return ""
+
+
 def _rewrite_presenton_text_payload(content: str, base_url: str) -> str:
     # Rewrite both absolute local URLs and root-relative refs so all assets/APIs stay in backend proxy.
     parsed_base = urlparse(base_url)
@@ -481,24 +665,432 @@ def _request_json(
     return data
 
 
-def _build_generation_payload(req: PresentonGenerateRequest) -> Dict[str, Any]:
+def _extract_markdown_json(raw_text: str) -> Dict[str, Any]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+
+    fenced_match = re.search(r"```json\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    candidate = fenced_match.group(1).strip() if fenced_match else text
+
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+
+    first = candidate.find("{")
+    last = candidate.rfind("}")
+    if first >= 0 and last > first:
+        maybe_json = candidate[first:last + 1]
+        try:
+            parsed = json.loads(maybe_json)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _sanitize_outline_title(title: Optional[str], fallback: str) -> str:
+    value = str(title or "").strip()
+    return value[:120] if value else fallback
+
+
+def _fallback_outline(req: PresentonOutlineRequest, input_text: str) -> Dict[str, Any]:
+    topic = _sanitize_outline_title(input_text.splitlines()[0] if input_text else "", "业务汇报")
+    slide_count = max(3, min(40, int(req.n_slides or 8)))
+    section_titles = [
+        "封面", "目录", "背景与目标", "现状与问题", "方案设计",
+        "实施路径", "关键指标", "风险与对策", "总结与行动项",
+    ]
+    slides: List[Dict[str, Any]] = []
+    for idx in range(slide_count):
+        title = section_titles[idx] if idx < len(section_titles) else f"补充页 {idx + 1}"
+        points = [
+            f"围绕“{topic}”提炼本页核心结论。",
+            "给出 2-3 条关键事实或数据依据。",
+            "明确本页行动建议与预期结果。",
+        ]
+        slides.append(
+            {
+                "index": idx + 1,
+                "title": title,
+                "points": points,
+                "notes": "可根据业务真实数据继续补充。",
+            }
+        )
     return {
-        "prompt": req.prompt,
-        "content": req.prompt,
-        "instructions": req.prompt,
+        "title": f"{topic}汇报",
+        "subtitle": f"{req.analysis_framework} · {req.language}",
+        "slides": slides,
+    }
+
+
+def _normalize_outline_payload(payload: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        return fallback
+
+    slides_raw = payload.get("slides")
+    if not isinstance(slides_raw, list) or not slides_raw:
+        return fallback
+
+    normalized_slides: List[Dict[str, Any]] = []
+    for idx, item in enumerate(slides_raw, start=1):
+        if isinstance(item, dict):
+            title = str(item.get("title") or item.get("heading") or f"第 {idx} 页").strip()
+            points_raw = item.get("points") or item.get("bullets") or []
+            notes = str(item.get("notes") or item.get("speaker_notes") or "").strip()
+        else:
+            title = f"第 {idx} 页"
+            points_raw = []
+            notes = ""
+
+        points: List[str] = []
+        if isinstance(points_raw, list):
+            points = [str(point).strip() for point in points_raw if str(point).strip()]
+        elif isinstance(points_raw, str):
+            points = [line.strip("- \t") for line in points_raw.splitlines() if line.strip()]
+
+        if not points:
+            points = [
+                "补充本页核心观点。",
+                "补充关键支撑信息。",
+            ]
+
+        normalized_slides.append(
+            {
+                "index": idx,
+                "title": title[:120],
+                "points": points[:8],
+                "notes": notes[:800],
+            }
+        )
+
+    return {
+        "title": _sanitize_outline_title(payload.get("title"), fallback.get("title", "演示文稿")),
+        "subtitle": _sanitize_outline_title(payload.get("subtitle"), fallback.get("subtitle", "")),
+        "slides": normalized_slides[:40],
+    }
+
+
+def _build_outline_prompt(req: PresentonOutlineRequest, input_text: str) -> str:
+    metrics_req = "是" if req.require_metrics else "否"
+    image_req = "开启" if req.include_images else "关闭"
+    return (
+        "你是一名资深 PPT 策划顾问。"
+        "\n请严格输出 JSON，不要输出除 JSON 外的任何内容。"
+        "\nJSON 结构："
+        '\n{"title":"", "subtitle":"", "slides":[{"title":"","points":[""],"notes":""}]}\n'
+        f"\n目标页数：{req.n_slides} 页"
+        f"\n语言：{req.language}"
+        f"\n分析框架：{req.analysis_framework}"
+        f"\n输入模式：{req.input_mode}"
+        f"\n是否强调指标：{metrics_req}"
+        f"\n图片建议：{image_req}"
+        "\n每页要求：标题 + 3-6 条可执行要点 + 一条讲解备注。"
+        "\n目录结构建议涵盖：封面、目录、背景、问题、方案、执行、风险、总结。"
+        f"\n业务输入：\n{input_text}"
+    )
+
+
+def _ensure_template_registry_file() -> None:
+    if TEMPLATE_REGISTRY_FILE.exists():
+        return
+    TEMPLATE_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_REGISTRY_FILE.write_text("[]", encoding="utf-8")
+
+
+def _load_template_registry() -> List[Dict[str, Any]]:
+    _ensure_template_registry_file()
+    with _TEMPLATE_REGISTRY_LOCK:
+        try:
+            data = json.loads(TEMPLATE_REGISTRY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = []
+    return data if isinstance(data, list) else []
+
+
+def _save_template_registry(entries: List[Dict[str, Any]]) -> None:
+    _ensure_template_registry_file()
+    safe_entries = entries if isinstance(entries, list) else []
+    with _TEMPLATE_REGISTRY_LOCK:
+        TEMPLATE_REGISTRY_FILE.write_text(
+            json.dumps(safe_entries, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+
+def _normalize_template_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    template_id = str(item.get("template_id") or item.get("id") or item.get("presentation_id") or "").strip()
+    if not template_id:
+        return {}
+    return {
+        "template_id": template_id,
+        "name": str(item.get("name") or item.get("template_name") or template_id).strip()[:120],
+        "description": str(item.get("description") or item.get("summary") or "").strip()[:300],
+        "thumbnail_url": str(item.get("thumbnail_url") or item.get("thumbnail") or item.get("cover_url") or "").strip(),
+        "source": str(item.get("source") or "presenton").strip(),
+        "created_at": str(item.get("created_at") or "").strip(),
+        "updated_at": str(item.get("updated_at") or "").strip(),
+    }
+
+
+def _extract_template_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+
+    candidates: List[Any] = []
+    for key in ("data", "templates", "items", "list", "result", "presentations"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            candidates = value
+            break
+        if isinstance(value, dict):
+            nested_list = value.get("items") or value.get("list")
+            if isinstance(nested_list, list):
+                candidates = nested_list
+                break
+
+    if not candidates and isinstance(payload.get("id"), (str, int)):
+        candidates = [payload]
+
+    normalized: List[Dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        normalized_item: Dict[str, Any] = {}
+        template_field = item.get("template")
+        if isinstance(template_field, dict):
+            template_payload = dict(template_field)
+            template_payload.setdefault(
+                "template_id",
+                template_payload.get("template_id") or template_payload.get("id") or item.get("presentation_id"),
+            )
+            if not template_payload.get("description") and item.get("layout_count") is not None:
+                template_payload["description"] = f"Custom template · {item.get('layout_count')} layouts"
+            template_payload.setdefault("source", "presenton_custom")
+            normalized_item = _normalize_template_item(template_payload)
+
+        if not normalized_item:
+            normalized_item = _normalize_template_item(item)
+
+        if not normalized_item and item.get("presentation_id"):
+            normalized_item = _normalize_template_item(
+                {
+                    "template_id": item.get("presentation_id"),
+                    "name": item.get("name") or item.get("presentation_id"),
+                    "description": f"Custom template · {item.get('layout_count', 0)} layouts",
+                    "source": "presenton_custom",
+                    "updated_at": item.get("last_updated_at") or item.get("updated_at") or "",
+                }
+            )
+        if normalized_item:
+            normalized.append(normalized_item)
+    return normalized
+
+
+def _fetch_template_list_from_presenton(base_url: str, headers: Dict[str, str]) -> List[Dict[str, Any]]:
+    errors: List[str] = []
+    merged: Dict[str, Dict[str, Any]] = {}
+    for path in TEMPLATE_LIST_PATHS:
+        try:
+            payload = _request_json("GET", f"{base_url}{path}", headers, payload=None, timeout=max(REQUEST_TIMEOUT_SEC, 20))
+            items = _extract_template_items(payload)
+            for item in items:
+                template_id = str(item.get("template_id") or "").strip()
+                if not template_id:
+                    continue
+                previous = merged.get(template_id, {})
+                merged[template_id] = {
+                    "template_id": template_id,
+                    "name": str(item.get("name") or previous.get("name") or template_id),
+                    "description": str(item.get("description") or previous.get("description") or ""),
+                    "thumbnail_url": str(item.get("thumbnail_url") or previous.get("thumbnail_url") or ""),
+                    "source": str(item.get("source") or previous.get("source") or "presenton"),
+                    "created_at": str(item.get("created_at") or previous.get("created_at") or ""),
+                    "updated_at": str(item.get("updated_at") or previous.get("updated_at") or ""),
+                }
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+            continue
+    if merged:
+        return list(merged.values())
+    if errors:
+        logger.warning("Template list fetch failed: %s", " | ".join(errors))
+    return []
+
+
+def _fetch_template_detail_from_presenton(base_url: str, headers: Dict[str, str], template_id: str) -> Dict[str, Any]:
+    clean_id = str(template_id or "").strip()
+    if not clean_id:
+        raise HTTPException(status_code=400, detail="template_id is required")
+
+    errors: List[str] = []
+    for path in TEMPLATE_DETAIL_PATHS:
+        resolved = path.replace("{template_id}", requests.utils.quote(clean_id, safe=""))
+        try:
+            payload = _request_json("GET", f"{base_url}{resolved}", headers, payload=None, timeout=max(REQUEST_TIMEOUT_SEC, 20))
+            items = _extract_template_items(payload)
+            if items:
+                return items[0]
+            if isinstance(payload, dict):
+                normalized = _normalize_template_item(payload)
+                if normalized:
+                    return normalized
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+            continue
+
+    # v1 may not expose detail endpoint for built-in templates; fallback to list scan.
+    template_list = _fetch_template_list_from_presenton(base_url, headers)
+    for item in template_list:
+        if str(item.get("template_id")) == clean_id:
+            return item
+
+    detail = errors[-1] if errors else "Template not found"
+    raise HTTPException(status_code=404, detail=detail)
+
+
+def _build_generation_payload(req: PresentonGenerateRequest) -> Dict[str, Any]:
+    resolved_image_type = str(req.image_type or "none").strip().lower()
+    if resolved_image_type in {"", "off", "false", "disabled", "0", "no"}:
+        resolved_image_type = "none"
+
+    no_image_constraint = (
+        "硬性约束：默认关闭并禁止配图。不要生成或请求任何图片/插画/照片，"
+        "不要触发图片素材检索，页面内容仅使用文字、图表和形状布局。"
+    )
+    prompt_text = str(req.prompt or "").strip()
+    if resolved_image_type == "none":
+        prompt_text = f"{prompt_text}\n{no_image_constraint}".strip()
+
+    payload: Dict[str, Any] = {
+        "prompt": prompt_text,
+        "content": prompt_text,
+        "instructions": prompt_text,
         "n_slides": req.n_slides,
         "language": req.language,
         "template": req.template,
         "export_as": req.export_as,
         "tone": req.tone,
         "verbosity": req.verbosity,
+        "image_type": resolved_image_type,
     }
+
+    if resolved_image_type == "none":
+        payload["web_search"] = False
+        payload["include_images"] = False
+        payload["enable_images"] = False
+        payload["disable_image_generation"] = True
+        payload["image_provider"] = "none"
+
+    if req.content_generation:
+        payload["content_generation"] = req.content_generation
+    if req.markdown_emphasis:
+        payload["markdown_emphasis"] = req.markdown_emphasis
+    if req.web_search is not None and resolved_image_type != "none":
+        payload["web_search"] = bool(req.web_search)
+    if isinstance(req.slides_markdown, list) and req.slides_markdown:
+        payload["slides_markdown"] = req.slides_markdown
+    if isinstance(req.slides_layout, list) and req.slides_layout:
+        payload["slides_layout"] = req.slides_layout
+    return payload
+
+
+def _request_generation_with_no_image_fallback(
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    timeout: float = REQUEST_TIMEOUT_SEC,
+) -> Dict[str, Any]:
+    def _template_retry_candidates(raw_template: Any) -> List[str]:
+        value = str(raw_template or "").strip()
+        if not value:
+            return ["general"]
+        candidates: List[str] = [value]
+        lowered = value.lower()
+        if lowered in {"auto", "default"}:
+            candidates.append("general")
+        if lowered.startswith("custom-") and len(value) > len("custom-"):
+            candidates.append(value[len("custom-"):])
+        if lowered.startswith("neo-") and len(value) > len("neo-"):
+            candidates.append(value[len("neo-"):])
+        unique: List[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            key = item.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(key)
+        return unique or ["general"]
+
+    template_candidates = _template_retry_candidates(payload.get("template"))
+    collected_errors: List[str] = []
+
+    for idx, candidate in enumerate(template_candidates):
+        candidate_payload = dict(payload)
+        candidate_payload["template"] = candidate
+        try:
+            data = _request_json(method, url, headers, candidate_payload, timeout=timeout)
+            original_template = str(payload.get("template") or "").strip()
+            if original_template and candidate != original_template:
+                logger.warning("Template fallback applied: requested=%s, used=%s", original_template, candidate)
+            return data
+        except HTTPException as exc:
+            detail_text = str(exc.detail or "")
+            detail_l = detail_text.lower()
+
+            if str(candidate_payload.get("image_type") or "").lower() == "none" and any(
+                token in detail_l for token in ("image_type", "validation", "extra", "unprocessable")
+            ):
+                fallback_payload = dict(candidate_payload)
+                # Keep hard no-image intent and only trim extra compatibility fields.
+                for key in ("include_images", "enable_images", "disable_image_generation", "image_provider"):
+                    fallback_payload.pop(key, None)
+                fallback_payload["image_type"] = "none"
+                fallback_payload["web_search"] = False
+                logger.warning(
+                    "Retrying generation with minimal no-image fields due upstream validation: %s",
+                    exc.detail,
+                )
+                try:
+                    return _request_json(method, url, headers, fallback_payload, timeout=timeout)
+                except HTTPException as fallback_exc:
+                    detail_text = str(fallback_exc.detail or detail_text)
+                    detail_l = detail_text.lower()
+                    if any(token in detail_l for token in ("image_type", "image provider", "image_provider")):
+                        raise HTTPException(
+                            status_code=502,
+                            detail=(
+                                "Presenton does not accept no-image control fields in current endpoint; "
+                                "request is blocked to prevent unexpected auto image generation. "
+                                f"Upstream detail: {detail_text}"
+                            ),
+                        ) from fallback_exc
+                    collected_errors.append(f"{candidate}: {detail_text}")
+                    if not any(token in detail_l for token in ("template not found", "invalid template", "unknown template")):
+                        raise fallback_exc
+                    if idx < len(template_candidates) - 1:
+                        continue
+                    raise fallback_exc
+
+            collected_errors.append(f"{candidate}: {detail_text}")
+            if not any(token in detail_l for token in ("template not found", "invalid template", "unknown template")):
+                raise
+            if idx < len(template_candidates) - 1:
+                logger.warning("Template %s rejected, retrying next candidate", candidate)
+                continue
+            raise
+
+    raise HTTPException(status_code=502, detail="; ".join(collected_errors) if collected_errors else "Generation failed")
 
 
 def _generate_local(base_url: str, headers: Dict[str, str], req: PresentonGenerateRequest) -> Dict[str, Any]:
     payload = _build_generation_payload(req)
     url = f"{base_url}{LOCAL_GENERATE_PATH}"
-    data = _request_json("POST", url, headers, payload)
+    data = _request_generation_with_no_image_fallback("POST", url, headers, payload)
     download_url, edit_url = _extract_urls(data, base_url)
     return {
         "success": True,
@@ -513,7 +1105,13 @@ def _generate_local(base_url: str, headers: Dict[str, str], req: PresentonGenera
 def _generate_cloud_sync(base_url: str, headers: Dict[str, str], req: PresentonGenerateRequest) -> Dict[str, Any]:
     payload = _build_generation_payload(req)
     url = f"{base_url}{CLOUD_SYNC_PATH}"
-    data = _request_json("POST", url, headers, payload, timeout=max(REQUEST_TIMEOUT_SEC, POLL_TIMEOUT_SEC))
+    data = _request_generation_with_no_image_fallback(
+        "POST",
+        url,
+        headers,
+        payload,
+        timeout=max(REQUEST_TIMEOUT_SEC, POLL_TIMEOUT_SEC),
+    )
     download_url, edit_url = _extract_urls(data, base_url)
     return {
         "success": True,
@@ -551,7 +1149,7 @@ def _fetch_cloud_status(base_url: str, headers: Dict[str, str], task_id: str) ->
 def _generate_cloud_async(base_url: str, headers: Dict[str, str], req: PresentonGenerateRequest) -> Dict[str, Any]:
     payload = _build_generation_payload(req)
     submit_url = f"{base_url}{CLOUD_ASYNC_PATH}"
-    submit_data = _request_json("POST", submit_url, headers, payload)
+    submit_data = _request_generation_with_no_image_fallback("POST", submit_url, headers, payload)
     task_id = _extract_task_id(submit_data)
     if not task_id:
         raise HTTPException(status_code=502, detail="Presenton did not return task id")
@@ -566,6 +1164,146 @@ def _generate_cloud_async(base_url: str, headers: Dict[str, str], req: Presenton
         "task_id": task_id,
         "raw": final_data,
     }
+
+
+@router.post("/presenton/outline/generate")
+def generate_presenton_outline(req: PresentonOutlineRequest):
+    slide_count = max(3, min(40, int(req.n_slides or 8)))
+    raw_input = str(req.analysis_input or "").strip()
+    doc_name = str(req.document_name or "").strip()
+
+    if req.input_mode == "topic" and not raw_input:
+        raise HTTPException(status_code=400, detail="请先输入 PPT 主题")
+    if req.input_mode == "document" and not raw_input and not doc_name:
+        raise HTTPException(status_code=400, detail="请先上传文档或补充文档说明")
+    if req.input_mode == "longText" and not raw_input:
+        raise HTTPException(status_code=400, detail="请先输入或粘贴正文内容")
+
+    input_parts: List[str] = []
+    if doc_name:
+        input_parts.append(f"文档名称：{doc_name}")
+    if raw_input:
+        input_parts.append(raw_input)
+    if not input_parts:
+        input_parts.append("请围绕进出口企业协同办公主题生成完整汇报大纲。")
+    input_text = "\n".join(input_parts)
+
+    fallback_outline = _fallback_outline(req, input_text)
+    prompt = _build_outline_prompt(req, input_text)
+    llm_raw = ask_llm(prompt, model_type=req.model_backend)
+    parsed = _extract_markdown_json(llm_raw)
+    outline = _normalize_outline_payload(parsed, fallback_outline)
+
+    return {
+        "success": True,
+        "outline": {
+            "title": outline["title"],
+            "subtitle": outline.get("subtitle") or f"{req.analysis_framework} · {req.language}",
+            "slides": outline["slides"][:slide_count],
+            "language": req.language,
+            "analysis_framework": req.analysis_framework,
+        },
+        "raw_model_output": llm_raw[:6000] if llm_raw else "",
+    }
+
+
+@router.get("/presenton/template/catalog")
+def get_presenton_template_catalog(base_url: Optional[str] = None):
+    resolved_base_url = _normalize_base_url(base_url)
+    headers = _build_headers()
+    remote_items = _fetch_template_list_from_presenton(resolved_base_url, headers)
+    imported_items = _load_template_registry()
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for source_items in (BUILTIN_TEMPLATE_CATALOG, remote_items, imported_items):
+        for raw_item in source_items:
+            item = _normalize_template_item(raw_item) if not raw_item.get("template_id") else raw_item
+            template_id = str(item.get("template_id") or "").strip()
+            if not template_id:
+                continue
+            prev = merged.get(template_id, {})
+            merged[template_id] = {
+                "template_id": template_id,
+                "name": str(item.get("name") or prev.get("name") or template_id),
+                "description": str(item.get("description") or prev.get("description") or ""),
+                "thumbnail_url": str(item.get("thumbnail_url") or prev.get("thumbnail_url") or ""),
+                "source": str(item.get("source") or prev.get("source") or "presenton"),
+                "created_at": str(item.get("created_at") or prev.get("created_at") or ""),
+                "updated_at": str(item.get("updated_at") or prev.get("updated_at") or ""),
+                "imported": bool(item.get("imported") or prev.get("imported") or False),
+            }
+
+    data = list(merged.values())
+    data.sort(key=lambda item: (0 if item.get("imported") else 1, str(item.get("name") or "").lower()))
+    return {"success": True, "data": data}
+
+
+@router.get("/presenton/template/imported")
+def list_imported_presenton_templates(
+    ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN])),
+):
+    _ = ctx
+    return {"success": True, "data": _load_template_registry()}
+
+
+@router.post("/presenton/template/import")
+def import_presenton_template(
+    payload: PresentonTemplateImportRequest,
+    base_url: Optional[str] = None,
+    ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN])),
+):
+    resolved_base_url = _normalize_base_url(base_url)
+    headers = _build_headers()
+    template_id = str(payload.template_id or "").strip()
+    if not template_id:
+        raise HTTPException(status_code=400, detail="template_id is required")
+
+    detail = _fetch_template_detail_from_presenton(resolved_base_url, headers, template_id)
+    now = datetime.now(timezone.utc).isoformat()
+    imported = {
+        "template_id": template_id,
+        "name": str(payload.alias or detail.get("name") or template_id).strip()[:120],
+        "description": str(payload.description or detail.get("description") or "").strip()[:300],
+        "thumbnail_url": str(detail.get("thumbnail_url") or "").strip(),
+        "source": "presenton_import",
+        "imported": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    entries = _load_template_registry()
+    updated_entries: List[Dict[str, Any]] = []
+    replaced = False
+    for item in entries:
+        if str(item.get("template_id") or "").strip() == template_id:
+            merged_item = dict(item)
+            merged_item.update(imported)
+            merged_item["created_at"] = item.get("created_at") or now
+            updated_entries.append(merged_item)
+            replaced = True
+        else:
+            updated_entries.append(item)
+    if not replaced:
+        updated_entries.append(imported)
+
+    _save_template_registry(updated_entries)
+    logger.info("Admin %s imported template %s", ctx.get("user_id"), template_id)
+    return {"success": True, "data": imported}
+
+
+@router.delete("/presenton/template/import/{template_id}")
+def delete_imported_presenton_template(
+    template_id: str,
+    ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN])),
+):
+    clean_id = str(template_id or "").strip()
+    entries = _load_template_registry()
+    remained = [item for item in entries if str(item.get("template_id") or "").strip() != clean_id]
+    if len(remained) == len(entries):
+        raise HTTPException(status_code=404, detail="Template not found in imported list")
+    _save_template_registry(remained)
+    logger.info("Admin %s removed imported template %s", ctx.get("user_id"), clean_id)
+    return {"success": True}
 
 
 @router.post("/presenton/generate")
@@ -629,7 +1367,12 @@ def submit_presenton_ppt_task(req: PresentonGenerateRequest):
             _purge_stale_tasks_locked()
             _activate_ppt_runtime(base_url)
 
-        submit_data = _request_json("POST", submit_url, headers, _build_generation_payload(req))
+        submit_data = _request_generation_with_no_image_fallback(
+            "POST",
+            submit_url,
+            headers,
+            _build_generation_payload(req),
+        )
         task_id = _extract_task_id(submit_data)
         if not task_id:
             raise HTTPException(status_code=502, detail="Presenton did not return task id")
@@ -662,8 +1405,8 @@ def get_presenton_ppt_task_status(task_id: str, base_url: Optional[str] = None):
     resolved_base_url = _normalize_base_url(base_url)
     headers = _build_headers()
     status_data = _fetch_cloud_status(resolved_base_url, headers, task_id)
-    status_value = str(status_data.get("status") or "pending").lower()
-    message = str(status_data.get("message") or "")
+    status_value = _extract_status_value(status_data)
+    message = _extract_status_message(status_data)
     download_url, edit_url = _extract_urls(status_data, resolved_base_url)
     proxied_download = _build_download_proxy_url(download_url)
     proxied_edit = _build_presenton_proxy_url(edit_url, resolved_base_url)
@@ -673,17 +1416,22 @@ def get_presenton_ppt_task_status(task_id: str, base_url: Optional[str] = None):
         _purge_stale_tasks_locked()
         if status_value in TERMINAL_TASK_STATUSES:
             _ACTIVE_PPT_TASKS.pop(task_id, None)
+            if status_value in {"failed", "error", "cancelled", "canceled"}:
+                logger.warning(
+                    "Presenton task %s finished with status=%s message=%s raw_error=%s",
+                    task_id,
+                    status_value,
+                    message,
+                    status_data.get("error"),
+                )
             if not _ACTIVE_PPT_TASKS:
                 try:
                     _restore_default_runtime(resolved_base_url)
                 except HTTPException as exc:
                     logger.warning("Failed to restore default runtime on task completion: %s", exc.detail)
         else:
+            # Do not mutate runtime during polling; toggling global config mid-task can break Presenton jobs.
             _ACTIVE_PPT_TASKS[task_id] = time.time()
-            try:
-                _activate_ppt_runtime(resolved_base_url)
-            except HTTPException as exc:
-                logger.warning("Failed to enforce qwen3 runtime during active task %s: %s", task_id, exc.detail)
 
     return {
         "success": True,
