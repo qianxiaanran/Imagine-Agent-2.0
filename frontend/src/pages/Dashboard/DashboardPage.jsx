@@ -22,6 +22,11 @@ import {
   useSessionHistoryPagination,
 } from './useSessionHistoryPagination';
 import {
+  StandalonePptSelect,
+  StandaloneTemplatePreviewCard,
+} from './StandalonePptWidgets';
+import WritingEntryHub from './WritingEntryHub';
+import {
   APP_SETTINGS_UPDATED_EVENT,
   DEFAULT_APP_SETTINGS,
   loadAppSettings,
@@ -154,6 +159,44 @@ function useStableCallback(callback) {
 
   return useCallback((...args) => callbackRef.current?.(...args), []);
 }
+
+const extractOcrLinesFromPayload = (data) => {
+  if (!data) return [];
+  return data.lines
+    || data?.data?.lines
+    || data?.ocrData?.lines
+    || data?.ocrData?.data?.lines
+    || [];
+};
+
+const extractOcrTextFromPayload = (data) => {
+  if (!data) return '';
+  return data.text
+    || data?.data?.text
+    || data?.result?.text
+    || '';
+};
+
+const extractOcrPagesFromPayload = (data) => {
+  if (!data) return [];
+  return data.pages
+    || data?.data?.pages
+    || data?.ocrData?.pages
+    || data?.ocrData?.data?.pages
+    || [];
+};
+
+const resolveOcrLinesForFile = (file) => {
+  if (!file) return [];
+  if (Array.isArray(file.lines) && file.lines.length) return file.lines;
+  const dataLines = extractOcrLinesFromPayload(file.ocrData);
+  if (Array.isArray(dataLines) && dataLines.length) return dataLines;
+  const text = file.ocrText || extractOcrTextFromPayload(file.ocrData);
+  return (text || '')
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map((textLine) => ({ text: textLine }));
+};
 const STANDALONE_PPT_TOPIC_SUGGESTIONS = ["学术报告", "教学备课", "政策宣讲", "心得体会分享", "工作总结"];
 const STANDALONE_PPT_TOPIC_SUGGESTION_PROMPTS = {
   "学术报告": "PPT主题：\n研究对象：\n希望突出：研究背景、方法思路、核心结论",
@@ -344,188 +387,6 @@ const getStandalonePptContentFocusConfig = (focusKey) => {
 const getStandalonePptTopicSuggestionPrompt = (topic) =>
   STANDALONE_PPT_TOPIC_SUGGESTION_PROMPTS[String(topic || "").trim()]
   || `PPT主题：\n内容方向：${String(topic || "").trim()}`;
-const StandalonePptSelect = ({
-  label,
-  value,
-  options,
-  onChange,
-  disabled = false,
-  className = "",
-}) => {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const handlePointerDown = (event) => {
-      if (rootRef.current && !rootRef.current.contains(event.target)) {
-        setOpen(false);
-      }
-    };
-    const handleKeyDown = (event) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("touchstart", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("touchstart", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
-
-  const normalizedOptions = Array.isArray(options) ? options : [];
-  const selectedOption = normalizedOptions.find((item) => String(item?.value) === String(value)) || normalizedOptions[0];
-  const selectedLabel = String(selectedOption?.label || value || "").trim();
-
-  return (
-    <div ref={rootRef} className={`relative ${className}`}>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => setOpen((prev) => !prev)}
-        className="inline-flex min-w-[112px] items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-sm text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-100 dark:hover:bg-slate-800"
-      >
-        <span className="shrink-0 text-gray-500 dark:text-gray-300">{label}</span>
-        <span className="max-w-[140px] flex-1 truncate font-medium text-gray-900 dark:text-white">{selectedLabel}</span>
-        <ChevronDown size={15} className={`shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && normalizedOptions.length > 0 && (
-        <div className="absolute left-0 top-full z-30 mt-2 min-w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-[#081224]">
-          <div className="max-h-72 overflow-y-auto p-1.5">
-            {normalizedOptions.map((item) => {
-              const itemValue = item?.value;
-              const active = String(itemValue) === String(selectedOption?.value);
-              return (
-                <button
-                  key={String(itemValue)}
-                  type="button"
-                  onClick={() => {
-                    onChange?.(itemValue);
-                    setOpen(false);
-                  }}
-                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition ${
-                    active
-                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/12 dark:text-emerald-300"
-                      : "text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-slate-800/90"
-                  }`}
-                >
-                  <span className="flex-1 truncate">{item.label}</span>
-                  {active && <Check size={14} className="shrink-0" />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-const StandaloneTemplatePreviewCard = ({
-  template,
-  selected = false,
-  onSelect,
-}) => {
-  const previewMeta = getStandalonePptTemplatePreviewMeta(template);
-  const templateId = normalizeStandalonePptTemplateId(template?.template_id || template?.id || "");
-  const title = getStandalonePptTemplateLabel(template);
-  const description = String(previewMeta.summary || template?.description || "").trim();
-  const thumbnailUrl = String(template?.thumbnail_url || "").trim();
-  const tags = Array.isArray(previewMeta.tags) ? previewMeta.tags : [];
-
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect?.(templateId)}
-      className={`group w-full overflow-hidden rounded-2xl border text-left transition ${
-        selected
-          ? "border-emerald-400 bg-emerald-50/80 shadow-[0_18px_60px_rgba(16,185,129,0.18)] dark:border-emerald-400/70 dark:bg-emerald-500/10"
-          : "border-gray-200 bg-white shadow-sm hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-xl dark:border-slate-700 dark:bg-slate-900/90 dark:hover:border-emerald-500/40"
-      }`}
-    >
-      <div className={`relative h-44 overflow-hidden bg-gradient-to-br ${previewMeta.gradient}`}>
-        <div className={`absolute inset-0 ${previewMeta.shell} opacity-90`} />
-        {thumbnailUrl ? (
-          <div
-            className="absolute inset-0 bg-cover bg-center opacity-95"
-            style={{ backgroundImage: `url(${thumbnailUrl})` }}
-          />
-        ) : (
-          <div className="absolute inset-0 p-4">
-            <div className="grid h-full grid-cols-[1.15fr_0.85fr] gap-3">
-              <div className={`rounded-2xl ${previewMeta.slideTone} p-3 shadow-lg`}>
-                <div className={`h-2.5 w-20 rounded-full ${previewMeta.accentTone}`} />
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <div className={`h-14 rounded-xl ${previewMeta.mutedTone}`} />
-                  <div className={`h-14 rounded-xl ${previewMeta.mutedTone}`} />
-                </div>
-                <div className="mt-3 space-y-2">
-                  <div className={`h-2 rounded-full ${previewMeta.linesTone}`} />
-                  <div className={`h-2 w-4/5 rounded-full ${previewMeta.linesTone}`} />
-                </div>
-              </div>
-              <div className="flex flex-col gap-3">
-                <div className={`flex-1 rounded-2xl ${previewMeta.slideTone} p-3 shadow-lg`}>
-                  <div className={`h-2.5 w-14 rounded-full ${previewMeta.accentTone}`} />
-                  <div className="mt-3 space-y-2">
-                    <div className={`h-2 rounded-full ${previewMeta.linesTone}`} />
-                    <div className={`h-2 w-3/4 rounded-full ${previewMeta.linesTone}`} />
-                    <div className={`h-2 w-2/3 rounded-full ${previewMeta.linesTone}`} />
-                  </div>
-                </div>
-                <div className={`h-16 rounded-2xl ${previewMeta.slideTone} p-3 shadow-lg`}>
-                  <div className="flex h-full items-end gap-1.5">
-                    <div className={`w-3 rounded-md ${previewMeta.linesTone}`} style={{ height: "38%" }} />
-                    <div className={`w-3 rounded-md ${previewMeta.accentTone}`} style={{ height: "78%" }} />
-                    <div className={`w-3 rounded-md ${previewMeta.linesTone}`} style={{ height: "55%" }} />
-                    <div className={`w-3 rounded-md ${previewMeta.linesTone}`} style={{ height: "68%" }} />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-        <div className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-full bg-white/14 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur">
-          <Layout size={12} />
-          {templateId || "template"}
-        </div>
-        {selected && (
-          <div className="absolute right-4 top-4 inline-flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg">
-            <Check size={16} />
-          </div>
-        )}
-      </div>
-      <div className="space-y-3 p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-base font-semibold text-gray-900 dark:text-white">{title}</div>
-            <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">{description || "适合当前 PPT 生成场景。"}</div>
-          </div>
-          <div className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ${
-            selected
-              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-200"
-              : "bg-gray-100 text-gray-600 dark:bg-slate-800 dark:text-gray-300"
-          }`}>
-            {String(template?.source || "builtin").trim() || "builtin"}
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {tags.map((tag) => (
-            <span
-              key={`${templateId}-${tag}`}
-              className="rounded-full bg-gray-100 px-2.5 py-1 text-[11px] text-gray-600 dark:bg-slate-800 dark:text-gray-300"
-            >
-              {tag}
-            </span>
-          ))}
-        </div>
-      </div>
-    </button>
-  );
-};
 const WRITING_CONSULTING_TYPE_OPTIONS = ["流程优化建议", "合规风控建议", "增长策略咨询", "系统落地方案"];
 const WRITING_CONSULTING_ROLE_OPTIONS = ["管理层", "运营团队", "销售团队", "财务风控团队", "IT实施团队"];
 const WRITING_OUTPUT_FORMAT_OPTIONS = ["执行清单", "分阶段计划", "OKR/KPI方案", "风险-对策矩阵"];
@@ -850,8 +711,8 @@ const normalizeStandaloneOutlineTextLine = (value = '') =>
     String(value || '')
         .replace(/^#{1,6}\s*/, '')
         .replace(/^\s*[-*•]\s*/, '')
-        .replace(/^\s*\d+\s*[\.、\)\）]\s*/, '')
-        .replace(/^\s*[一二三四五六七八九十]+\s*[、\.\)\）]\s*/, '')
+        .replace(/^\s*\d+\s*[.、)）]\s*/, '')
+        .replace(/^\s*[一二三四五六七八九十]+\s*[、.)）]\s*/, '')
         .trim();
 
 const splitStandaloneOutlinePointCandidates = (value = '') =>
@@ -1098,7 +959,9 @@ const StructuredContent = ({ content, role, enableMarkdown = true, streaming = f
             jsonData = JSON.parse(jsonMatch[1]);
             // 提取 JSON 前的文本（如果有）
             preText = content.split('```json')[0].trim();
-        } catch (e) {}
+        } catch {
+            // Streaming responses may briefly contain incomplete JSON blocks.
+        }
     }
 
     // 如果没有 JSON 或者在流式输出中（可能 JSON 还没闭合），直接渲染 Markdown
@@ -1284,7 +1147,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
-  const [isOcrSaving, setIsOcrSaving] = useState(false);
+  const isOcrSaving = false;
   const [isProfileLoading, setIsProfileLoading] = useState(true);
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [isSavingContext, setIsSavingContext] = useState(false);
@@ -1323,7 +1186,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [ocrPreviewSize, setOcrPreviewSize] = useState({ width: 0, height: 0 });
   const [ocrImageMetrics, setOcrImageMetrics] = useState({ width: 0, height: 0, offsetX: 0, offsetY: 0 });
   const [ocrRenderSize, setOcrRenderSize] = useState({ width: 0, height: 0 });
-  const ocrMeasureCanvasRef = useRef(null);
   const ocrCanvasRef = useRef(null);
   const copyToastTimerRef = useRef(null);
   const [isOcrSummaryOpen, setIsOcrSummaryOpen] = useState(false);
@@ -1358,7 +1220,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   // ✨ 新增 UI 状态
   const [isPlusMenuOpen, setIsPlusMenuOpen] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
-  const [isInputFocused, setIsInputFocused] = useState(false);
+  const [, setIsInputFocused] = useState(false);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [isMobileViewport, setIsMobileViewport] = useState(false);
   const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState('chat');
@@ -1525,7 +1387,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       ctx.save();
       ctx.scale(scale, scale);
-      const lines = getOcrLines(activeOcrFile);
+      const lines = resolveOcrLinesForFile(activeOcrFile);
       const pageLines = lines.filter((line) => {
           const linePage = line.page === undefined || line.page === null ? 0 : line.page;
           return linePage === ocrPageIndex;
@@ -1554,10 +1416,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
       ctx.restore();
   }, [
-      activeOcrFile?.id,
-      activeOcrFile?.status,
-      activeOcrFile?.ocrText,
-      activeOcrFile?.lines,
+      activeOcrFile,
       ocrRenderSize.width,
       ocrRenderSize.height,
       ocrViewTab,
@@ -1569,9 +1428,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setJsonEditError('');
       if (!activeOcrFile) return;
       if (!activeOcrFile.jsonText && activeOcrFile.ocrData) {
-          updateOcrEntry(activeOcrFile.id, { jsonText: JSON.stringify(activeOcrFile.ocrData, null, 2) });
+          setOcrFiles((prev) => prev.map((item) => (
+              item.id === activeOcrFile.id
+                  ? { ...item, jsonText: JSON.stringify(activeOcrFile.ocrData, null, 2) }
+                  : item
+          )));
       }
-  }, [activeOcrFile?.id, ocrViewTab]);
+  }, [activeOcrFile, ocrViewTab]);
 
   useEffect(() => {
       if (!activeOcrFile) return;
@@ -1580,7 +1443,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           setOcrPageIndex(0);
       }
       setSelectedOcrLine(null);
-  }, [activeOcrFile?.id, ocrPageIndex]);
+  }, [activeOcrFile, ocrPageIndex]);
 
   useEffect(() => {
       return () => {
@@ -1932,7 +1795,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       isActive = false;
       cancelProfile();
     };
-  }, [refreshSessionList]);
+  }, [onLogout, refreshSessionList]);
 
   useEffect(() => {
     if (isProfileLoading || isSessionsLoading) return;
@@ -1944,7 +1807,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         setShowOnboarding(false);
         return;
       }
-    } catch (e) {
+    } catch {
       return;
     }
     if (sessionList.length > 0) return;
@@ -1961,7 +1824,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         setShowOnboarding(false);
         return;
       }
-    } catch (e) {
+    } catch {
       return;
     }
     if (sessionList.length > 0) return;
@@ -2097,7 +1960,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     try {
       vk.overlaysContent = true;
       virtualKeyboardEnabledRef.current = !!vk.overlaysContent;
-    } catch (e) {
+    } catch {
       virtualKeyboardEnabledRef.current = false;
     }
 
@@ -2150,8 +2013,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   }, [isMobileViewport, isKeyboardVisible]);
 
   useEffect(() => {
+    const lockRef = keyboardLockPrevRef.current;
     return () => {
-      const lockRef = keyboardLockPrevRef.current;
       if (lockRef.body !== null) {
         document.body.style.overflow = lockRef.body;
         lockRef.body = null;
@@ -2185,7 +2048,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     if (activeOcrFile.status === 'done' || activeOcrFile.status === 'error') {
       setOcrMobileTab('result');
     }
-  }, [isMobileViewport, isOCRMode, activeOcrFile?.id, activeOcrFile?.status]);
+  }, [isMobileViewport, isOCRMode, activeOcrFile]);
 
   // 监听语音播放结束，重置图标状态
   useEffect(() => {
@@ -2327,43 +2190,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
   };
 
-  const extractOcrLinesFromData = (data) => {
-      if (!data) return [];
-      return data.lines
-          || data?.data?.lines
-          || data?.ocrData?.lines
-          || data?.ocrData?.data?.lines
-          || [];
-  };
+  const extractOcrLinesFromData = (data) => extractOcrLinesFromPayload(data);
 
-  const extractOcrTextFromData = (data) => {
-      if (!data) return '';
-      return data.text
-          || data?.data?.text
-          || data?.result?.text
-          || '';
-  };
+  const extractOcrTextFromData = (data) => extractOcrTextFromPayload(data);
 
-  const extractOcrPagesFromData = (data) => {
-      if (!data) return [];
-      return data.pages
-          || data?.data?.pages
-          || data?.ocrData?.pages
-          || data?.ocrData?.data?.pages
-          || [];
-  };
+  const extractOcrPagesFromData = (data) => extractOcrPagesFromPayload(data);
 
-  const getOcrLines = (file) => {
-      if (!file) return [];
-      if (Array.isArray(file.lines) && file.lines.length) return file.lines;
-      const dataLines = extractOcrLinesFromData(file.ocrData);
-      if (Array.isArray(dataLines) && dataLines.length) return dataLines;
-      const text = file.ocrText || extractOcrTextFromData(file.ocrData);
-      return (text || '')
-          .split(/\r?\n/)
-          .filter((line) => line.trim())
-          .map((textLine) => ({ text: textLine }));
-  };
+  const getOcrLines = (file) => resolveOcrLinesForFile(file);
 
   useEffect(() => {
       if (!activeOcrFile) return;
@@ -2410,9 +2243,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       if (Object.keys(updates).length) {
-          updateOcrEntry(activeOcrFile.id, updates);
+          setOcrFiles((prev) => prev.map((item) => (
+              item.id === activeOcrFile.id
+                  ? { ...item, ...updates }
+                  : item
+          )));
       }
-  }, [activeOcrFile?.id, activeOcrFile?.ocrData]);
+  }, [activeOcrFile]);
 
   const updateOcrLine = (fileId, lineIndex, newText) => {
       setOcrFiles((prev) => prev.map((item) => {
@@ -2477,7 +2314,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               resolve(0);
           };
           audio.src = url;
-      } catch (e) {
+      } catch {
           resolve(0);
       }
   });
@@ -2823,7 +2660,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
       try {
           popup.opener = null;
-      } catch {}
+      } catch {
+          // Ignore browsers that disallow writing to opener.
+      }
   };
 
   const handleMeetingUploadClick = () => {
@@ -2892,8 +2731,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           if (meta?.mode) targetMode = String(meta.mode);
           if (meta?.audio_path) loadedAudioPath = meta.audio_path;
           if (meta?.backend) savedBackend = meta.backend;
-        } catch (e) {
-          console.warn("Invalid session_meta json:", metaMsg.content);
+        } catch (error) {
+          console.warn('Invalid session_meta json:', metaMsg.content, error);
         }
       }
       else if (contextMsg) {
@@ -2985,7 +2824,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             error: '',
             createdAt: Date.now()
           };
-        } catch (e) {
+        } catch {
           const text = contextMsg.content || '';
           const lines = text.split(/\r?\n/).filter(Boolean);
           ocrEntry = {
@@ -3038,7 +2877,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           const hasRestoredOutline = Array.isArray(restoredOutline?.slides) && restoredOutline.slides.length > 0;
           const hasRestoredResult = !!(restoredResult?.downloadUrl || restoredResult?.editUrl || restoredResult?.error);
           setWritingEntryMode('ppt');
-          setStandalonePptForm((prev) => ({
+          setStandalonePptForm(() => ({
             ...buildDefaultStandalonePptFormData(),
             contentFocus: restoredFocus.key,
             requireMetrics: !!restoredFocus.emphasizeMetrics,
@@ -3244,25 +3083,25 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     }
   }, [userProfile.id]);
 
-  const ensureHistorySessionForCreative = () => {
+  const ensureHistorySessionForCreative = useCallback(() => {
       let sid = currentSessionId;
       if (!sid) {
           sid = crypto.randomUUID ? crypto.randomUUID() : `sid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
           setCurrentSessionId(sid);
       }
       return sid;
-  };
+  }, [currentSessionId]);
 
-  const refreshSessionListForCreative = async () => {
+  const refreshSessionListForCreative = useCallback(async () => {
       const uid = userProfile.id || 'anonymous';
       try {
           await refreshSessionList(uid);
       } catch (e) {
           console.error("Failed to refresh creative sessions", e);
       }
-  };
+  }, [refreshSessionList, userProfile.id]);
 
-  const persistStandaloneCreativeHistory = async (content, contextType = 'ppt_context') => {
+  const persistStandaloneCreativeHistory = useCallback(async (content, contextType = 'ppt_context') => {
       const safeContent = String(content || '').trim();
       if (!safeContent) return null;
       const sid = ensureHistorySessionForCreative();
@@ -3274,7 +3113,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           console.error("Failed to persist standalone creative history", e);
       }
       return sid;
-  };
+  }, [
+      currentAudioPath,
+      ensureHistorySessionForCreative,
+      llmBackend,
+      refreshSessionListForCreative,
+      savePanelContext,
+      saveSessionMeta,
+  ]);
 
   const pollPresentonTaskUntilSettled = useCallback(async ({
       taskId,
@@ -3481,7 +3327,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   const uid = userProfile.id || 'anonymous';
                   void refreshSessionList(uid);
               }
-          } catch (e) {
+          } catch {
               auditHistorySavedRef.current = null;
           }
       };
@@ -3498,6 +3344,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       currentMode,
       currentAudioPath,
       llmBackend,
+      refreshSessionList,
+      savePanelContext,
+      saveSessionMeta,
       userProfile.id
   ]);
 
@@ -3792,41 +3641,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           setIsUploadingFile(false);
       }
   };
-
-  useEffect(() => {
-      const pending = autoProcessFilesRef.current;
-      const mode = autoProcessModeRef.current;
-      if (!pending || !mode) return;
-
-      if ((mode === 'meeting' && selectedModel !== 1) || (mode === 'ocr' && selectedModel !== 2)) return;
-
-      autoProcessFilesRef.current = null;
-      autoProcessModeRef.current = null;
-
-      const run = async () => {
-          if (mode === 'ocr') {
-              const entries = pending.map(buildOcrEntry);
-              if (entries.length) {
-                  currentSessionIdRef.current = null;
-                  setCurrentSessionId(null);
-                  setPanelContent('');
-                  setSelectedOcrLine(null);
-                  setEditingOcrLine(null);
-                  setEditingOcrValue('');
-                  setOcrFiles(entries);
-                  setActiveOcrId(entries[0].id);
-                  setOcrPageIndex(0);
-              }
-          }
-          const { context, sessionId, audioPath } = await processFiles(pending);
-          if (mode === 'ocr') {
-              applyOcrContext(context, sessionId);
-          } else {
-              await applyFileContext(context, audioPath);
-          }
-      };
-      run();
-  }, [selectedModel]);
 
   const processFiles = async (filesToProcess) => {
       if (!filesToProcess || filesToProcess.length === 0) return { context: "", success: true };
@@ -4135,10 +3949,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (e.target && e.target.value) e.target.value = '';
   };
-
-  useEffect(() => {
-    handleFileSelectRef.current = handleFileSelect;
-  }, [handleFileSelect]);
 
   useEffect(() => {
     const resetDragState = () => {
@@ -4526,7 +4336,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             document.hidden
           ) {
             try {
-              // eslint-disable-next-line no-new
               new Notification('助手回复完成', {
                 body: resolvedFinalContent.slice(0, 120),
               });
@@ -4651,6 +4460,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   };
 
   const resetAuditStateStable = useStableCallback(resetAuditState);
+  const buildOcrEntryStable = useStableCallback(buildOcrEntry);
+  const applyOcrContextStable = useStableCallback(applyOcrContext);
+  const applyFileContextStable = useStableCallback(applyFileContext);
+  const processFilesStable = useStableCallback(processFiles);
+  const handleFileSelectStable = useStableCallback(handleFileSelect);
   const handleAuditFileSelectStable = useStableCallback(handleAuditFileSelect);
   const handleAuditErpActionStable = useStableCallback(handleAuditErpAction);
   const handleMeetingUploadClickStable = useStableCallback(handleMeetingUploadClick);
@@ -4658,6 +4472,45 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleExportWordStable = useStableCallback(handleExportWord);
   const handleGenerateSummaryStable = useStableCallback(handleGenerateSummary);
   const handleOcrStoreStable = useStableCallback(handleOcrStore);
+
+  useEffect(() => {
+      const pending = autoProcessFilesRef.current;
+      const mode = autoProcessModeRef.current;
+      if (!pending || !mode) return;
+
+      if ((mode === 'meeting' && selectedModel !== 1) || (mode === 'ocr' && selectedModel !== 2)) return;
+
+      autoProcessFilesRef.current = null;
+      autoProcessModeRef.current = null;
+
+      const run = async () => {
+          if (mode === 'ocr') {
+              const entries = pending.map(buildOcrEntryStable);
+              if (entries.length) {
+                  currentSessionIdRef.current = null;
+                  setCurrentSessionId(null);
+                  setPanelContent('');
+                  setSelectedOcrLine(null);
+                  setEditingOcrLine(null);
+                  setEditingOcrValue('');
+                  setOcrFiles(entries);
+                  setActiveOcrId(entries[0].id);
+                  setOcrPageIndex(0);
+              }
+          }
+          const { context, sessionId, audioPath } = await processFilesStable(pending);
+          if (mode === 'ocr') {
+              applyOcrContextStable(context, sessionId);
+          } else {
+              await applyFileContextStable(context, audioPath);
+          }
+      };
+      run();
+  }, [applyFileContextStable, applyOcrContextStable, buildOcrEntryStable, processFilesStable, selectedModel]);
+
+  useEffect(() => {
+    handleFileSelectRef.current = handleFileSelectStable;
+  }, [handleFileSelectStable]);
 
   const handleSubmitReportForm = () => {
       const listOrNone = (items) => (Array.isArray(items) && items.length ? items.join('、') : '无');
@@ -4870,18 +4723,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       );
   };
 
-  const buildSlidesMarkdownFromOutline = (outlinePayload) => {
-      const slides = Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [];
-      return slides.map((slide, idx) => {
-          const title = String(slide?.title || `第 ${idx + 1} 页`).trim();
-          const points = Array.isArray(slide?.points) ? slide.points.map((item) => String(item || '').trim()).filter(Boolean) : [];
-          const notes = String(slide?.notes || "").trim();
-          const pointLines = points.length ? points.map((item) => `- ${item}`).join('\n') : "- 待补充要点";
-          const noteBlock = notes ? `\n\n## 讲解展开\n${notes}` : "";
-          return `# ${title}\n\n## 本页要点\n${pointLines}${noteBlock}`;
-      });
-  };
-
   const inferStandaloneOutlineSlideRole = (slide, slideIndex, allSlides, focusConfig) => {
       const title = String(slide?.title || "").trim();
       const totalSlides = Array.isArray(allSlides) ? allSlides.length : 0;
@@ -4894,66 +4735,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (STANDALONE_PPT_TRAINING_TITLE_RE.test(title) || !focusConfig?.emphasizeMetrics) return "training";
       if (slideIndex === totalSlides - 1 && totalSlides > 1) return "closing";
       return "evidence";
-  };
-
-  const buildStandaloneSlideRoleGuidance = (slideRole, focusConfig, slideTitle, deckTitle) => {
-      const focusLabel = String(focusConfig?.label || "工作汇报").trim() || "工作汇报";
-      const title = String(slideTitle || "本页").trim() || "本页";
-      const deck = String(deckTitle || "本次演示").trim() || "本次演示";
-      if (slideRole === "cover") {
-          return [
-              `这是封面页，标题要准确承接“${deck}”主题，副标题可点出汇报对象、时间范围或场景。`,
-              "文字保持克制，不要堆砌内容，只保留能快速建立主题认知的信息。",
-          ];
-      }
-      if (slideRole === "agenda") {
-          return [
-              "这是目录页，只保留章节导航，不要写成长段说明。",
-              "目录名称应与后续正文页一一对应，避免使用重复或空泛标题。",
-          ];
-      }
-      if (slideRole === "summary") {
-          return [
-              `这是摘要/结论页，需要先讲清“${deck}”最重要的 2-3 个判断，再给出关键支撑。`,
-              focusConfig?.emphasizeMetrics
-                  ? "优先放结果指标、趋势变化和管理层最关心的结论。"
-                  : "优先提炼核心结论、适用对象和接下来要展开的重点。",
-          ];
-      }
-      if (slideRole === "background") {
-          return [
-              `这是背景铺垫页，要解释“${title}”与整体主题的关系，补足现状、目标、场景或痛点。`,
-              "不要只写定义，至少补一层业务原因或使用场景。",
-          ];
-      }
-      if (slideRole === "issue") {
-          return [
-              `这是问题/挑战页，要写清现象、原因、影响，避免只停留在列问题。`,
-              "如果能补对应风险、优先级或后续应对，会更像完整汇报页。",
-          ];
-      }
-      if (slideRole === "action") {
-          return [
-              `这是方案/动作页，要把“${title}”拆成可执行动作、路径、分工或节奏。`,
-              "尽量体现先后顺序、时间节点、资源要求或预期结果。",
-          ];
-      }
-      if (slideRole === "training") {
-          return [
-              `这是讲解型页面，要围绕“${title}”讲清概念、步骤、案例或注意事项。`,
-              "内容要有顺序感，便于现场讲解，不要只列抽象名词。",
-          ];
-      }
-      if (slideRole === "closing") {
-          return [
-              "这是收束页，要回到最终结论、行动建议或决策请求，形成完整闭环。",
-              "不要重复前文目录式表达，结尾要有明确收口。",
-          ];
-      }
-      return [
-          `这是正文展开页，需要把“${title}”写实，补足事实、分析、依据和落地含义。`,
-          `输出风格要贴合${focusLabel}，不能只是把大纲原句重新排一遍。`,
-      ];
   };
 
   const buildDenseSlidesMarkdownFromOutline = (outlinePayload) => {
@@ -6092,7 +5873,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               receivedEnd = true;
                           }
                       }
-                  } catch (e) {
+                  } catch {
                       // 忽略
                   }
               };
@@ -6154,7 +5935,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   hadAnyContent = hadAnyContent || !!result?.receivedAny;
                   completed = !!result?.completed;
                   interrupted = !!result?.aborted;
-              } catch (e) {
+              } catch {
                   completed = false;
                   interrupted = false;
               }
@@ -6246,7 +6027,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (uid && uid !== 'anonymous') {
           try {
               localStorage.setItem(`${ONBOARDING_STORAGE_PREFIX}${uid}`, new Date().toISOString());
-          } catch (e) {}
+          } catch {
+              // Ignore onboarding persistence errors.
+          }
       }
       setShowOnboarding(false);
       if (selectedModel !== 0) {
@@ -6256,67 +6039,27 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       handleNewChat();
   };
 
-  const renderWritingEntryHub = () => (
-      <div className="h-full w-full overflow-y-auto bg-gradient-to-br from-gray-100 via-white to-blue-50/40 dark:from-gray-950 dark:via-gray-950 dark:to-gray-900 px-4 py-6 md:px-8 md:py-8">
-          <div className="max-w-5xl mx-auto">
-              <div className="rounded-3xl border border-gray-200 dark:border-gray-800 bg-white/90 dark:bg-gray-900/85 shadow-sm px-6 py-7 mb-6">
-                  <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700 dark:border-blue-500/40 dark:bg-blue-900/30 dark:text-blue-200">
-                      <Sparkles size={14} /> 智能创作中心
-                  </div>
-                  <h2 className="mt-3 text-2xl font-bold text-gray-900 dark:text-white">请选择一级功能</h2>
-                  <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">先选择“写作助手”或“PPT生成”，再进入对应的二级配置界面。</p>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                  <button
-                      type="button"
-                      onClick={() => {
-                          setWritingEntryMode('assistant');
-                          setReportStep('selection');
-                          setReportType(null);
-                          setReportFormData({});
-                          setReportAudienceInput('');
-                      }}
-                      className="rounded-3xl border border-gray-200 dark:border-gray-700 bg-white/95 dark:bg-gray-900/80 p-6 text-left hover:shadow-lg hover:-translate-y-0.5 transition-all"
-                  >
-                      <div className="inline-flex rounded-xl border border-gray-200 dark:border-gray-700 p-2.5 text-gray-700 dark:text-gray-300">
-                          <PencilLine size={20} />
-                      </div>
-                      <div className="mt-4 text-xl font-semibold text-gray-900 dark:text-white">写作助手</div>
-                      <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">营销文案、行业分析、建议咨询等内容生成</div>
-                      <div className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-gray-700 dark:text-gray-300">
-                          进入写作助手 <ArrowRight size={14} />
-                      </div>
-                  </button>
-                  <button
-                      type="button"
-                      onClick={() => {
-                          setWritingEntryMode('ppt');
-                          setStandalonePptForm(buildDefaultStandalonePptFormData());
-                          setStandalonePptOutline(null);
-                          setIsOutlineEditorOpen(false);
-                          setIsPptWorkspaceOpen(false);
-                          setIsTemplatePreviewOpen(false);
-                          setTemplatePreviewSelection({ routeId: '', templateId: '' });
-                          setStandalonePptResult(null);
-                          setIsPresentonGenerating(false);
-                          setIsOutlineGenerating(false);
-                          setPresentonProgress(createIdlePresentonProgress());
-                      }}
-                      className="rounded-3xl border border-fuchsia-200 dark:border-fuchsia-800/50 bg-white/95 dark:bg-gray-900/80 p-6 text-left hover:shadow-lg hover:-translate-y-0.5 transition-all"
-                  >
-                      <div className="inline-flex rounded-xl border border-fuchsia-200 dark:border-fuchsia-800/50 p-2.5 text-fuchsia-700 dark:text-fuchsia-300">
-                          <Presentation size={20} />
-                      </div>
-                      <div className="mt-4 text-xl font-semibold text-gray-900 dark:text-white">PPT生成</div>
-                      <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">独立PPT生成页，支持进度展示与文件下载</div>
-                      <div className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300">
-                          进入PPT生成 <ArrowRight size={14} />
-                      </div>
-                  </button>
-              </div>
-          </div>
-      </div>
-  );
+  const handleOpenWritingAssistantEntry = useCallback(() => {
+      setWritingEntryMode('assistant');
+      setReportStep('selection');
+      setReportType(null);
+      setReportFormData({});
+      setReportAudienceInput('');
+  }, []);
+
+  const handleOpenStandalonePptEntry = useCallback(() => {
+      setWritingEntryMode('ppt');
+      setStandalonePptForm(buildDefaultStandalonePptFormData());
+      setStandalonePptOutline(null);
+      setIsOutlineEditorOpen(false);
+      setIsPptWorkspaceOpen(false);
+      setIsTemplatePreviewOpen(false);
+      setTemplatePreviewSelection({ routeId: '', templateId: '' });
+      setStandalonePptResult(null);
+      setIsPresentonGenerating(false);
+      setIsOutlineGenerating(false);
+      setPresentonProgress(createIdlePresentonProgress());
+  }, []);
 
   const renderStandalonePptGenerator = () => {
       const inputMode = standalonePptForm.inputMode || STANDALONE_PPT_INPUT_MODES[0].key;
@@ -6901,6 +6644,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                               <StandaloneTemplatePreviewCard
                                                   key={item.template_id}
                                                   template={item}
+                                                  resolvePreviewMeta={getStandalonePptTemplatePreviewMeta}
+                                                  resolveTemplateId={normalizeStandalonePptTemplateId}
+                                                  resolveTemplateLabel={getStandalonePptTemplateLabel}
                                                   selected={
                                                       normalizeStandalonePptTemplateId(templatePreviewSelection?.templateId || "")
                                                       === normalizeStandalonePptTemplateId(item.template_id || "")
@@ -7400,7 +7146,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const renderWritingWorkspace = () => {
       if (writingEntryMode === 'assistant') return renderReportWizard();
       if (writingEntryMode === 'ppt') return renderStandalonePptGenerator();
-      return renderWritingEntryHub();
+      return (
+          <WritingEntryHub
+              onOpenAssistant={handleOpenWritingAssistantEntry}
+              onOpenPptGenerator={handleOpenStandalonePptEntry}
+          />
+      );
   };
 
   const panelStyle = useMemo(() => {
@@ -7428,17 +7179,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         </h2>
       </div>
       <div className="mt-6 flex flex-col gap-3">
-        {mobileQuickActions.map(({ key, label, prompt, Icon }) => (
+        {mobileQuickActions.map((action) => {
+          const ActionIcon = action.Icon;
+          return (
           <button
-            key={key}
+            key={action.key}
             type="button"
-            onClick={() => setInputValue(prompt)}
+            onClick={() => setInputValue(action.prompt)}
             className="w-fit max-w-[85%] inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/90 dark:bg-gray-900/60 border border-gray-200/80 dark:border-gray-700 text-sm font-medium text-gray-700 dark:text-gray-200 shadow-sm hover:shadow-md hover:bg-white dark:hover:bg-gray-900 transition-all"
           >
-            <Icon size={16} className="text-gray-500 dark:text-gray-400" />
-            {label}
+            <ActionIcon size={16} className="text-gray-500 dark:text-gray-400" />
+            {action.label}
           </button>
-        ))}
+        );})}
       </div>
     </div>
   ) : (
@@ -8014,7 +7767,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       const parsed = JSON.parse(current);
                       updateOcrEntry(activeFile.id, { ocrData: parsed });
                       setJsonEditError('');
-                    } catch (err) {
+                    } catch {
                       setJsonEditError('JSON 格式错误，未保存到识别结果');
                     }
                   }}
@@ -8902,14 +8655,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         )}
         </div>
         <Suspense fallback={null}>
-            <SettingsModal
-              isOpen={settingsModalState.isOpen}
-              initialCategory={settingsModalState.category}
-              onClose={() => setSettingsModalState((prev) => ({ ...prev, isOpen: false }))}
-              userProfile={userProfile}
-              onLogout={onLogout}
-              onSettingsChange={(next) => setAppSettings(normalizeAppSettings(next || DEFAULT_APP_SETTINGS))}
-            />
+            {settingsModalState.isOpen && (
+              <SettingsModal
+                key={`${settingsModalState.category}:${userProfile?.id || 'anonymous'}`}
+                isOpen
+                initialCategory={settingsModalState.category}
+                onClose={() => setSettingsModalState((prev) => ({ ...prev, isOpen: false }))}
+                userProfile={userProfile}
+                onLogout={onLogout}
+                onSettingsChange={(next) => setAppSettings(normalizeAppSettings(next || DEFAULT_APP_SETTINGS))}
+              />
+            )}
             <ShareModal isOpen={shareModal.isOpen} onClose={() => setShareModal({ isOpen: false, sessionId: null, title: "" })} sessionId={shareModal.sessionId} sessionTitle={shareModal.title} userId={userProfile?.id || "anonymous"} />
             <OcrIngestModal
               isOpen={ocrIngestModal.isOpen}

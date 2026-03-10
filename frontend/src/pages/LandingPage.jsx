@@ -4,7 +4,7 @@ import {
   Database, FileText, LayoutTemplate, Search, Cpu, Globe, Lock, ShieldCheck, Mic, Sparkles, ClipboardCheck, Share2, Rocket
 } from 'lucide-react';
 import Button from '../components/Button';
-import { useTheme } from '../context/ThemeContext';
+import { useTheme } from '../context/themeContextValue';
 import useReveal from '../hooks/useReveal';
 
 // 内部小组件：SectionBadge

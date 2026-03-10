@@ -3,7 +3,6 @@ import { Loader2, Plus, X, Check } from 'lucide-react';
 import { convertWebMToWav } from '../utils/audio';
 
 const VoiceRecorder = ({ onCancel, onConfirm }) => {
-  const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const canvasRef = useRef(null);
 
@@ -62,7 +61,6 @@ const VoiceRecorder = ({ onCancel, onConfirm }) => {
 
       mediaRecorder.start();
       recordStartAtRef.current = Date.now();
-      setIsRecording(true);
       drawWaveform(analyser);
     } catch (err) {
       console.error('Error accessing microphone:', err);
@@ -92,8 +90,6 @@ const VoiceRecorder = ({ onCancel, onConfirm }) => {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
     }
-
-    setIsRecording(false);
   };
 
   const handleConfirm = () => {

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { X, Loader2, AlertTriangle, FileText, CheckCircle2 } from 'lucide-react';
 import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/apiClient';
 
@@ -29,7 +29,7 @@ const OcrIngestModal = ({ isOpen, onClose, content, userId, sessionId, llmBacken
     setTitle('');
   };
 
-  const requestParse = async (hintType = null) => {
+  const requestParse = useCallback(async (hintType = null) => {
     if (!content || !content.trim()) {
       setError('暂无可解析的内容');
       return;
@@ -66,7 +66,7 @@ const OcrIngestModal = ({ isOpen, onClose, content, userId, sessionId, llmBacken
     } finally {
       setLoading(false);
     }
-  };
+  }, [content, llmBackend]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -74,7 +74,7 @@ const OcrIngestModal = ({ isOpen, onClose, content, userId, sessionId, llmBacken
       return;
     }
     requestParse();
-  }, [isOpen]);
+  }, [isOpen, requestParse]);
 
   const handleDocTypeChange = (value) => {
     setDocType(value);

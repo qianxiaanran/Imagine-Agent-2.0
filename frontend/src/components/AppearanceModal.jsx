@@ -1,7 +1,7 @@
 import React from 'react';
 import { X, Sun, Moon, Monitor } from 'lucide-react';
 // 依赖 Context 模块
-import { useTheme } from '../context/ThemeContext';
+import { useTheme } from '../context/themeContextValue';
 
 const AppearanceModal = ({ isOpen, onClose }) => {
   // 如果尚未创建 ThemeContext，这个 hook 可能会报错，确保后续创建 context 文件

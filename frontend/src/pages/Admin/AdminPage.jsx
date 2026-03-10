@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, FileUp, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import adminApi from "../../api/admin";
 import userApi from "../../api/user";
@@ -52,7 +52,7 @@ const AdminPage = () => {
       try {
         const p = await userApi.getProfile();
         setProfile(p);
-      } catch (e) {
+      } catch {
         setProfile(null);
       } finally {
         setLoadingProfile(false);
@@ -152,21 +152,21 @@ const UsersTab = ({ currentUserId }) => {
     role: "user",
   });
 
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async () => {
     setLoading(true);
     try {
       const res = await adminApi.listUsers({ query });
       setUsers(res.data || []);
-    } catch (e) {
+    } catch {
       setUsers([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [query]);
 
   useEffect(() => {
     loadUsers();
-  }, []);
+  }, [loadUsers]);
 
   const updateRole = async (id, role) => {
     await adminApi.updateUserRole(id, role);
@@ -367,18 +367,18 @@ const RulesTab = () => {
   const [rules, setRules] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const loadRules = async () => {
+  const loadRules = useCallback(async () => {
     try {
       const res = await adminApi.getAuditRules(docType);
       setRules(JSON.stringify(res.data || [], null, 2));
     } catch {
       setRules("[]");
     }
-  };
+  }, [docType]);
 
   useEffect(() => {
     loadRules();
-  }, [docType]);
+  }, [loadRules]);
 
   const saveRules = async () => {
     setSaving(true);

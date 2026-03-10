@@ -22,7 +22,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import Button from '../components/Button';
-import { useTheme } from '../context/ThemeContext';
+import { useTheme } from '../context/themeContextValue';
 import useReveal from '../hooks/useReveal';
 
 const SectionBadge = ({ children }) => (

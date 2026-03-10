@@ -61,7 +61,7 @@ const SharedChatPage = () => {
         } else {
           setError(res.error || "内容无法访问或已过期");
         }
-      } catch (e) {
+      } catch {
         setError("无法加载分享内容");
       } finally {
         setLoading(false);

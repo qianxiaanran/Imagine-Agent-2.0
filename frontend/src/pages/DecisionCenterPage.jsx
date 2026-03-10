@@ -198,6 +198,7 @@ function DecisionCenterPage() {
   const aiRequestRef = useRef(null);
   const overviewBootstrappedRef = useRef(false);
   const currentAiBackendRef = useRef('local');
+  const initialBackendRef = useRef(backend);
 
   const fetchDataSection = useCallback(async ({ refreshData = false, silent = false } = {}) => {
     if (dataRequestRef.current) return dataRequestRef.current;
@@ -256,12 +257,16 @@ function DecisionCenterPage() {
 
     (async () => {
       try {
-        const overviewPayload = await decisionApi.getOverview({ refreshAi: false, refreshData: false, backend });
+        const overviewPayload = await decisionApi.getOverview({
+          refreshAi: false,
+          refreshData: false,
+          backend: initialBackendRef.current,
+        });
         if (disposed) return;
         setDashboardData(overviewPayload || null);
         setAiAnalysis(overviewPayload?.ai_analysis || {});
         overviewBootstrappedRef.current = true;
-        currentAiBackendRef.current = backend;
+        currentAiBackendRef.current = initialBackendRef.current;
         setLoading(false);
       } catch (dataError) {
         if (!disposed) {
@@ -316,7 +321,7 @@ function DecisionCenterPage() {
     };
   }, [dashboardData, fetchAiSection]);
 
-  const kpis = dashboardData?.kpis || [];
+  const kpis = useMemo(() => (Array.isArray(dashboardData?.kpis) ? dashboardData.kpis : []), [dashboardData?.kpis]);
   const warnings = dashboardData?.warnings || [];
   const aiPending = Boolean(aiAnalysis?.pending);
   const trends = dashboardData?.trends || [];

@@ -99,11 +99,9 @@ const MobileSidebar = memo(({
   const [optimisticDeletedIds, setOptimisticDeletedIds] = useState(new Set());
   const [optimisticRenames, setOptimisticRenames] = useState({});
 
-  // 可见列表：基列表减去乐观删除
-  const safeSessions = Array.isArray(sessionList) ? sessionList : [];
-
   // 排序逻辑
   const displaySessions = useMemo(() => {
+    const safeSessions = Array.isArray(sessionList) ? sessionList : [];
     const active = safeSessions.filter(s => !optimisticDeletedIds.has(s.id));
     return active.sort((a, b) => {
       const aPinned = pinnedSessionIds.has(a.id);
@@ -112,7 +110,7 @@ const MobileSidebar = memo(({
       if (!aPinned && bPinned) return 1;
       return 0; // 保持原有时间排序
     });
-  }, [safeSessions, optimisticDeletedIds, pinnedSessionIds]);
+  }, [sessionList, optimisticDeletedIds, pinnedSessionIds]);
 
   const filteredSessions = displaySessions.filter(session => {
     const t = optimisticRenames[session.id] || session.title;

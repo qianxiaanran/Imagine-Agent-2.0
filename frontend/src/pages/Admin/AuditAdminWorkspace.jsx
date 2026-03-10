@@ -1,4 +1,4 @@
-import React, { startTransition, useDeferredValue, useEffect, useState } from "react";
+import React, { startTransition, useCallback, useDeferredValue, useEffect, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -482,7 +482,7 @@ const AuditAdminWorkspace = () => {
   const [reviewSubmitting, setReviewSubmitting] = useState("");
   const deferredQuery = useDeferredValue(filters.query);
 
-  const loadRecords = async () => {
+  const loadRecords = useCallback(async () => {
     setLoading(true);
     const effectiveQuery = (deferredQuery || filters.query || "").trim();
     try {
@@ -505,7 +505,7 @@ const AuditAdminWorkspace = () => {
           has_more: Boolean(res?.meta?.has_more),
         });
       });
-    } catch (error) {
+    } catch {
       setRecords([]);
       setMeta({
         count: 0,
@@ -517,11 +517,11 @@ const AuditAdminWorkspace = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [deferredQuery, filters.docType, filters.query, filters.review, filters.risk, filters.status, page]);
 
   useEffect(() => {
     loadRecords();
-  }, [deferredQuery, filters.docType, filters.status, filters.risk, filters.review, page]);
+  }, [loadRecords]);
 
   const visibleRecords = records;
 
@@ -534,7 +534,7 @@ const AuditAdminWorkspace = () => {
       const res = await adminApi.getAuditDetail(record.job_id);
       setDetail(res?.data || null);
       setReviewComment(res?.data?.review?.comment || record?.review?.comment || "");
-    } catch (error) {
+    } catch {
       setDetail(null);
     } finally {
       setDetailLoading(false);

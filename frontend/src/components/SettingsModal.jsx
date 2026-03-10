@@ -10,7 +10,7 @@ import {
   LogOut,
   RotateCcw,
 } from "lucide-react";
-import { useTheme } from "../context/ThemeContext";
+import { useTheme } from "../context/themeContextValue";
 import {
   APP_SETTINGS_STORAGE_KEY,
   DEFAULT_APP_SETTINGS,
@@ -152,26 +152,20 @@ const SettingsModal = ({
   onSettingsChange,
 }) => {
   const { theme, setTheme } = useTheme();
-  const [activeCategory, setActiveCategory] = useState(initialCategory || "general");
-  const [settings, setSettings] = useState(loadAppSettings);
+  const [activeCategory, setActiveCategory] = useState(() => initialCategory || "general");
+  const [settings, setSettings] = useState(() => {
+    const loaded = loadAppSettings();
+    if (!loaded.aboutNickname && userProfile?.name) {
+      return normalizeAppSettings({ ...loaded, aboutNickname: userProfile.name });
+    }
+    return loaded;
+  });
   const [voiceOptions, setVoiceOptions] = useState([{ value: "auto", label: "自动选择" }]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    setActiveCategory(initialCategory || "general");
-    setSettings(loadAppSettings());
-  }, [isOpen, initialCategory]);
 
   useEffect(() => {
     const normalized = saveAppSettings(settings);
     onSettingsChange?.(normalized);
   }, [settings, onSettingsChange]);
-
-  useEffect(() => {
-    if (!settings.aboutNickname && userProfile?.name) {
-      setSettings((prev) => ({ ...prev, aboutNickname: userProfile.name }));
-    }
-  }, [userProfile?.name, settings.aboutNickname]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.speechSynthesis) return undefined;
@@ -262,7 +256,6 @@ const SettingsModal = ({
   const sendTestNotification = () => {
     if (typeof window === "undefined" || !("Notification" in window)) return;
     if (Notification.permission !== "granted") return;
-    // eslint-disable-next-line no-new
     new Notification("设置通知测试", {
       body: "通知已开启，后续会在回复完成或关键任务完成时提醒你。",
     });

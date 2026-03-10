@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 const useOnScreen = (ref, rootMargin = "0px") => {
   const [isIntersecting, setIntersecting] = useState(false);
   useEffect(() => {
+    const element = ref.current;
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -11,8 +12,8 @@ const useOnScreen = (ref, rootMargin = "0px") => {
         }
       }, { rootMargin, threshold: 0.1 }
     );
-    if (ref.current) observer.observe(ref.current);
-    return () => { if (ref.current) observer.unobserve(ref.current); };
+    if (element) observer.observe(element);
+    return () => { if (element) observer.unobserve(element); };
   }, [ref, rootMargin]);
   return isIntersecting;
 };
