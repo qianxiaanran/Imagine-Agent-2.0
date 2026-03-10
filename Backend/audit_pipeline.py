@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, ValidationError, Field
+from runtime_storage import RUNTIME_AUDIT_ROOT, ensure_runtime_layout, migrate_legacy_runtime_files
 
 try:
     from ocr_manager import OCRManager, get_shared_ocr_manager
@@ -51,7 +52,13 @@ except Exception:
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_STORAGE_ROOT = os.path.join(BASE_DIR, "storage", "audit")
+ensure_runtime_layout()
+migrate_legacy_runtime_files()
+LOCAL_STORAGE_ROOT = str(RUNTIME_AUDIT_ROOT)
+AUDIT_STATE_ROOT = os.path.join(LOCAL_STORAGE_ROOT, "_state")
+AUDIT_JOB_STATE_DIR = os.path.join(AUDIT_STATE_ROOT, "jobs")
+AUDIT_CASE_STATE_DIR = os.path.join(AUDIT_STATE_ROOT, "cases")
+AUDIT_ERP_QUEUE_STATE_DIR = os.path.join(AUDIT_STATE_ROOT, "erp_queue")
 RULES_DIR = os.path.join(BASE_DIR, "rules")
 AI_MAX_TEXT_CHARS = 4000
 AI_MAX_FINDINGS = 6
@@ -217,6 +224,8 @@ ERP_SYNC_QUEUE: Dict[str, Dict[str, Any]] = {}
 ERP_SYNC_LOCK = threading.Lock()
 _OCR_ENGINE: Optional[OCRManager] = None
 _OCR_ENGINE_LOCK = threading.Lock()
+_AUDIT_DB_SCHEMA_LOCK = threading.Lock()
+_AUDIT_DB_UNSUPPORTED_COLUMNS: Dict[str, set[str]] = {}
 
 
 class AuditFields(BaseModel):
@@ -405,6 +414,168 @@ def _ensure_storage_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _sanitize_db_payload(table: str, payload: Any) -> Any:
+    with _AUDIT_DB_SCHEMA_LOCK:
+        unsupported = set(_AUDIT_DB_UNSUPPORTED_COLUMNS.get(table) or set())
+    if not unsupported:
+        return payload
+    if isinstance(payload, dict):
+        return {k: v for k, v in payload.items() if k not in unsupported}
+    if isinstance(payload, list):
+        sanitized_items = []
+        for item in payload:
+            if isinstance(item, dict):
+                sanitized_items.append({k: v for k, v in item.items() if k not in unsupported})
+            else:
+                sanitized_items.append(item)
+        return sanitized_items
+    return payload
+
+
+def _record_missing_db_column(table: str, error: Exception) -> Optional[str]:
+    message = str(error or "")
+    match = re.search(
+        rf"Could not find the '([^']+)' column of '{re.escape(table)}' in the schema cache",
+        message,
+    )
+    if not match:
+        return None
+    column = _safe_text(match.group(1))
+    if not column:
+        return None
+    with _AUDIT_DB_SCHEMA_LOCK:
+        _AUDIT_DB_UNSUPPORTED_COLUMNS.setdefault(table, set()).add(column)
+    print(f"[Audit DB] Skip unsupported column '{column}' for table '{table}'")
+    return column
+
+
+def _audit_state_file_path(root: str, item_id: str) -> str:
+    safe_item_id = re.sub(r"[^A-Za-z0-9_\-]", "_", str(item_id or "").strip())
+    if not safe_item_id:
+        raise ValueError("State item id is required")
+    _ensure_storage_dir(root)
+    return os.path.join(root, f"{safe_item_id}.json")
+
+
+def _read_json_file(path: str) -> Optional[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _write_json_file(path: str, payload: Dict[str, Any]) -> None:
+    target_dir = os.path.dirname(path)
+    if target_dir:
+        _ensure_storage_dir(target_dir)
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+def _persist_job_state(job_payload: Dict[str, Any]) -> None:
+    if not isinstance(job_payload, dict):
+        return
+    job_id = _safe_text(job_payload.get("job_id"))
+    if not job_id:
+        return
+    try:
+        _write_json_file(_audit_state_file_path(AUDIT_JOB_STATE_DIR, job_id), job_payload)
+    except Exception as e:
+        print(f"[Audit State] Persist job failed ({job_id}): {e}")
+
+
+def _load_job_state(job_id: str) -> Optional[Dict[str, Any]]:
+    job_key = _safe_text(job_id)
+    if not job_key:
+        return None
+    return _read_json_file(_audit_state_file_path(AUDIT_JOB_STATE_DIR, job_key))
+
+
+def _persist_case_state(case_payload: Dict[str, Any]) -> None:
+    if not isinstance(case_payload, dict):
+        return
+    case_id = _safe_text(case_payload.get("case_id"))
+    if not case_id:
+        return
+    try:
+        _write_json_file(_audit_state_file_path(AUDIT_CASE_STATE_DIR, case_id), case_payload)
+    except Exception as e:
+        print(f"[Audit State] Persist case failed ({case_id}): {e}")
+
+
+def _load_case_state(case_id: str) -> Optional[Dict[str, Any]]:
+    case_key = _normalize_case_id(case_id)
+    if not case_key:
+        return None
+    return _read_json_file(_audit_state_file_path(AUDIT_CASE_STATE_DIR, case_key))
+
+
+def _persist_erp_queue_state(task_payload: Dict[str, Any]) -> None:
+    if not isinstance(task_payload, dict):
+        return
+    queue_id = _safe_text(task_payload.get("queue_id"))
+    if not queue_id:
+        return
+    try:
+        _write_json_file(_audit_state_file_path(AUDIT_ERP_QUEUE_STATE_DIR, queue_id), task_payload)
+    except Exception as e:
+        print(f"[Audit State] Persist ERP queue failed ({queue_id}): {e}")
+
+
+def _hydrate_case_from_storage(case_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    normalized_case_id = _normalize_case_id(case_id)
+    if not normalized_case_id:
+        return None
+    with AUDIT_CASE_LOCK:
+        existing = AUDIT_CASES.get(normalized_case_id)
+        if existing:
+            return existing
+    persisted = _load_case_state(normalized_case_id)
+    if not persisted:
+        return None
+    with AUDIT_CASE_LOCK:
+        current = AUDIT_CASES.get(normalized_case_id)
+        if current:
+            return current
+        AUDIT_CASES[normalized_case_id] = persisted
+        return AUDIT_CASES[normalized_case_id]
+
+
+def _hydrate_job_from_storage(job_id: str) -> Optional[Dict[str, Any]]:
+    job_key = _safe_text(job_id)
+    if not job_key:
+        return None
+    with AUDIT_LOCK:
+        existing = AUDIT_JOBS.get(job_key)
+        if existing:
+            return existing
+    persisted = _load_job_state(job_key) or _load_job_from_db(job_key)
+    if not persisted:
+        return None
+    case_id = _normalize_case_id(persisted.get("case_id"))
+    if case_id:
+        _hydrate_case_from_storage(case_id)
+    with AUDIT_LOCK:
+        current = AUDIT_JOBS.get(job_key)
+        if current:
+            return current
+        AUDIT_JOBS[job_key] = persisted
+        return AUDIT_JOBS[job_key]
+
+
 def _normalize_case_id(case_id: Optional[str]) -> Optional[str]:
     text = _safe_text(case_id)
     if not text:
@@ -417,6 +588,8 @@ def _normalize_case_id(case_id: Optional[str]) -> Optional[str]:
 
 def _ensure_case(case_id: str, user_id: str, doc_type: str = "auto") -> Dict[str, Any]:
     now = _now_iso()
+    _hydrate_case_from_storage(case_id)
+    case_snapshot: Optional[Dict[str, Any]] = None
     with AUDIT_CASE_LOCK:
         case = AUDIT_CASES.get(case_id)
         if case is None:
@@ -436,12 +609,16 @@ def _ensure_case(case_id: str, user_id: str, doc_type: str = "auto") -> Dict[str
                 case["user_id"] = user_id
             if doc_type:
                 case["doc_type_hint"] = normalize_doc_type(doc_type)
-        return case
+        case_snapshot = dict(case)
+    if case_snapshot:
+        _persist_case_state(case_snapshot)
+    return case_snapshot or {}
 
 
 def _case_public_documents(case_id: Optional[str]) -> List[Dict[str, Any]]:
     if not case_id:
         return []
+    _hydrate_case_from_storage(case_id)
     with AUDIT_CASE_LOCK:
         case = AUDIT_CASES.get(case_id) or {}
         documents = case.get("documents") or []
@@ -500,6 +677,89 @@ def _detect_case_doc_tag(file_name: str, doc_type: str) -> str:
     return "other"
 
 
+def _is_contract_like_upload(doc_type: str, file_name: str) -> bool:
+    normalized = normalize_doc_type(doc_type)
+    if normalized == "contract":
+        return True
+    if normalized != "auto":
+        return False
+    name = _safe_text(file_name).lower()
+    return any(token in name for token in ("合同", "contract", "agreement", "协议"))
+
+
+def _case_has_contract_document(case_id: Optional[str]) -> bool:
+    if not case_id:
+        return False
+    docs = _case_public_documents(case_id)
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        status = _safe_text(doc.get("status")).lower()
+        if status in {"failed", "cancelled"}:
+            continue
+        tag = _safe_text(doc.get("tag")).lower()
+        dtype = normalize_doc_type(doc.get("doc_type"))
+        if tag == "contract" or dtype == "contract":
+            return True
+    return False
+
+
+def _resolve_upload_sequence_step(doc_type: str, file_name: str) -> int:
+    normalized = normalize_doc_type(doc_type)
+    if normalized == "contract":
+        return 1
+    if normalized in {
+        "invoice",
+        "packing_list",
+        "bill_of_lading",
+        "air_waybill",
+        "import_declaration",
+        "export_declaration",
+        "certificate_of_origin",
+        "trade_case",
+    }:
+        return 2
+    if normalized in {"payment", "expense"}:
+        return 3
+    if normalized == "auto":
+        inferred_tag = _detect_case_doc_tag(file_name, normalized)
+        if inferred_tag == "contract":
+            return 1
+        if inferred_tag in {"invoice", "packing_list", "bill_of_lading", "air_waybill", "customs_declaration", "certificate_of_origin", "purchase_order"}:
+            return 2
+        if inferred_tag in {"payment", "expense"}:
+            return 3
+    return 2
+
+
+def _case_has_trade_document(case_id: Optional[str]) -> bool:
+    if not case_id:
+        return False
+    docs = _case_public_documents(case_id)
+    trade_tags = {"invoice", "packing_list", "bill_of_lading", "air_waybill", "customs_declaration", "certificate_of_origin", "purchase_order"}
+    trade_doc_types = {
+        "invoice",
+        "packing_list",
+        "bill_of_lading",
+        "air_waybill",
+        "import_declaration",
+        "export_declaration",
+        "certificate_of_origin",
+        "trade_case",
+    }
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        status = _safe_text(doc.get("status")).lower()
+        if status in {"failed", "cancelled"}:
+            continue
+        tag = _safe_text(doc.get("tag")).lower()
+        dtype = normalize_doc_type(doc.get("doc_type"))
+        if tag in trade_tags or dtype in trade_doc_types:
+            return True
+    return False
+
+
 def _add_case_document_entry(
     *,
     case_id: Optional[str],
@@ -512,6 +772,7 @@ def _add_case_document_entry(
     if not case_id:
         return
     now = _now_iso()
+    case_snapshot: Optional[Dict[str, Any]] = None
     with AUDIT_CASE_LOCK:
         case = AUDIT_CASES.get(case_id)
         if not case:
@@ -534,6 +795,9 @@ def _add_case_document_entry(
         )
         case["updated_at"] = now
         case["latest_job_id"] = job_id
+        case_snapshot = dict(case)
+    if case_snapshot:
+        _persist_case_state(case_snapshot)
 
 
 def _update_case_document_entry(
@@ -549,6 +813,7 @@ def _update_case_document_entry(
     if not case_id:
         return
     now = _now_iso()
+    case_snapshot: Optional[Dict[str, Any]] = None
     with AUDIT_CASE_LOCK:
         case = AUDIT_CASES.get(case_id)
         if not case:
@@ -573,6 +838,9 @@ def _update_case_document_entry(
             break
         case["updated_at"] = now
         case["latest_job_id"] = job_id
+        case_snapshot = dict(case)
+    if case_snapshot:
+        _persist_case_state(case_snapshot)
 
 
 def _build_case_combined_text(case_id: Optional[str], current_job_id: str, current_text: str) -> str:
@@ -628,23 +896,107 @@ def _save_local_file(file_bytes: bytes, user_id: str, job_id: str, filename: str
     return target_path, relative_path
 
 
+def _normalize_audit_relative_path(file_url: Optional[str]) -> str:
+    normalized = _safe_text(file_url).replace("\\", "/").strip()
+    if not normalized:
+        return ""
+    normalized = normalized.split("?", 1)[0].split("#", 1)[0].lstrip("/")
+    for prefix in ("api/static/", "static/"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+            break
+    return normalized.strip("/")
+
+
+def _resolve_audit_local_path(
+    file_url: Optional[str],
+    *,
+    user_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    file_name: Optional[str] = None,
+    local_path_hint: Optional[str] = None,
+) -> Optional[str]:
+    candidates: List[str] = []
+    hint = _safe_text(local_path_hint)
+    if hint:
+        candidates.append(hint)
+
+    normalized_file_url = _normalize_audit_relative_path(file_url)
+    if normalized_file_url:
+        if os.path.isabs(normalized_file_url):
+            candidates.append(normalized_file_url)
+        if normalized_file_url.startswith("audit/"):
+            relative_tail = normalized_file_url.split("/", 1)[1] if "/" in normalized_file_url else ""
+            if relative_tail:
+                candidates.append(os.path.join(LOCAL_STORAGE_ROOT, relative_tail.replace("/", os.sep)))
+            candidates.append(os.path.join(os.path.dirname(LOCAL_STORAGE_ROOT), normalized_file_url.replace("/", os.sep)))
+            candidates.append(os.path.join(BASE_DIR, "storage", normalized_file_url.replace("/", os.sep)))
+        else:
+            candidates.append(os.path.join(LOCAL_STORAGE_ROOT, normalized_file_url.replace("/", os.sep)))
+            candidates.append(os.path.join(BASE_DIR, "storage", normalized_file_url.replace("/", os.sep)))
+
+    safe_user_id = _safe_text(user_id) or "anonymous"
+    safe_job_id = _safe_text(job_id)
+    safe_file_name = _safe_text(file_name).replace("\\", "_").replace("/", "_")
+    if safe_job_id and safe_file_name:
+        candidates.append(os.path.join(LOCAL_STORAGE_ROOT, safe_user_id, safe_job_id, safe_file_name))
+
+    deduped_candidates: List[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized_candidate = os.path.normpath(str(candidate or "").strip())
+        if not normalized_candidate or normalized_candidate in seen:
+            continue
+        seen.add(normalized_candidate)
+        deduped_candidates.append(normalized_candidate)
+
+    for candidate in deduped_candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return deduped_candidates[0] if deduped_candidates else None
+
+
 def _insert_db(table: str, payload: Any) -> None:
     if not require_supabase:
         return
+    sanitized_payload = _sanitize_db_payload(table, payload)
     try:
         sb = require_supabase()
-        sb.table(table).insert(payload).execute()
+        sb.table(table).insert(sanitized_payload).execute()
     except Exception as e:
+        missing_column = _record_missing_db_column(table, e)
+        if missing_column:
+            retry_payload = _sanitize_db_payload(table, sanitized_payload)
+            if retry_payload != sanitized_payload:
+                try:
+                    sb = require_supabase()
+                    sb.table(table).insert(retry_payload).execute()
+                    return
+                except Exception as retry_error:
+                    print(f"[Audit DB] Insert retry failed ({table}): {retry_error}")
         print(f"[Audit DB] Insert failed ({table}): {e}")
 
 
 def _update_db(table: str, payload: Dict[str, Any], job_id: str, key: str = "job_id") -> None:
     if not require_supabase:
         return
+    sanitized_payload = _sanitize_db_payload(table, payload)
+    if not sanitized_payload:
+        return
     try:
         sb = require_supabase()
-        sb.table(table).update(payload).eq(key, job_id).execute()
+        sb.table(table).update(sanitized_payload).eq(key, job_id).execute()
     except Exception as e:
+        missing_column = _record_missing_db_column(table, e)
+        if missing_column:
+            retry_payload = _sanitize_db_payload(table, sanitized_payload)
+            if retry_payload != sanitized_payload:
+                try:
+                    sb = require_supabase()
+                    sb.table(table).update(retry_payload).eq(key, job_id).execute()
+                    return
+                except Exception as retry_error:
+                    print(f"[Audit DB] Update retry failed ({table}): {retry_error}")
         print(f"[Audit DB] Update failed ({table}): {e}")
 
 
@@ -707,7 +1059,20 @@ def create_job(
     normalized_case_id = _normalize_case_id(case_id) or str(uuid.uuid4())
     _ensure_case(normalized_case_id, safe_user_id, normalized_doc_type)
 
-    _, file_url = _save_local_file(file_bytes, safe_user_id, job_id, filename)
+    existing_case_docs = _case_public_documents(normalized_case_id)
+    upload_step = _resolve_upload_sequence_step(normalized_doc_type, filename)
+    if existing_case_docs:
+        has_contract_doc = _case_has_contract_document(normalized_case_id)
+        has_trade_doc = _case_has_trade_document(normalized_case_id)
+        if not has_contract_doc and upload_step != 1:
+            raise ValueError("当前审单包尚未上传合同主文档，请先上传合同后再上传其他单据。")
+        if upload_step == 3 and not has_trade_doc:
+            raise ValueError("请先上传至少一份履约/贸易单据（如发票、提单、装箱单）后，再上传付款或报销单据。")
+    else:
+        if upload_step != 1:
+            raise ValueError("新审单包请先上传合同主文档（建议将单据类型切换为“合同”）。")
+
+    local_path, file_url = _save_local_file(file_bytes, safe_user_id, job_id, filename)
     file_url = file_url.replace("\\", "/")
 
     job = {
@@ -723,6 +1088,7 @@ def create_job(
         "workflow_state": "pending_docs",
         "error_message": None,
         "file_url": file_url,
+        "local_path": local_path,
         "file_name": filename,
         "result": None,
         "created_at": _now_iso(),
@@ -731,6 +1097,7 @@ def create_job(
 
     with AUDIT_LOCK:
         AUDIT_JOBS[job_id] = job
+    _persist_job_state(job)
 
     _insert_db("audit_jobs", {
         "job_id": job_id,
@@ -766,11 +1133,19 @@ def create_job(
 
 def update_job(job_id: str, **updates: Any) -> None:
     now_iso = _now_iso()
+    job_snapshot: Optional[Dict[str, Any]] = None
     with AUDIT_LOCK:
         job = AUDIT_JOBS.get(job_id)
+        if not job:
+            job = _load_job_state(job_id) or _load_job_from_db(job_id)
+            if job:
+                AUDIT_JOBS[job_id] = job
         if job:
             job.update(updates)
             job["updated_at"] = now_iso
+            job_snapshot = dict(job)
+    if job_snapshot:
+        _persist_job_state(job_snapshot)
 
     payload = {k: v for k, v in updates.items() if k in AUDIT_JOB_DB_UPDATE_FIELDS}
     if payload:
@@ -779,10 +1154,9 @@ def update_job(job_id: str, **updates: Any) -> None:
 
 
 def _is_cancelled(job_id: str) -> bool:
-    with AUDIT_LOCK:
-        job = AUDIT_JOBS.get(job_id)
-        if job and job.get("cancelled"):
-            return True
+    job = _hydrate_job_from_storage(job_id)
+    if job and job.get("cancelled"):
+        return True
     snapshot = _load_job_from_db(job_id)
     if not snapshot:
         return False
@@ -793,8 +1167,13 @@ def _is_cancelled(job_id: str) -> bool:
 
 def cancel_audit_job(job_id: str) -> bool:
     found = False
+    job_snapshot: Optional[Dict[str, Any]] = None
     with AUDIT_LOCK:
         job = AUDIT_JOBS.get(job_id)
+        if not job:
+            job = _load_job_state(job_id) or _load_job_from_db(job_id)
+            if job:
+                AUDIT_JOBS[job_id] = job
         if job:
             found = True
             job["cancelled"] = True
@@ -802,6 +1181,9 @@ def cancel_audit_job(job_id: str) -> bool:
             job["stage"] = "cancelled"
             job["progress"] = 100
             job["updated_at"] = _now_iso()
+            job_snapshot = dict(job)
+    if job_snapshot:
+        _persist_job_state(job_snapshot)
 
     snapshot = _load_job_from_db(job_id)
     if snapshot:
@@ -819,8 +1201,7 @@ def cancel_audit_job(job_id: str) -> bool:
 
 
 def retry_audit_job(job_id: str) -> Tuple[bool, Optional[str]]:
-    with AUDIT_LOCK:
-        job = AUDIT_JOBS.get(job_id)
+    job = _hydrate_job_from_storage(job_id)
     if not job:
         job = _load_job_from_db(job_id)
     if not job:
@@ -830,10 +1211,15 @@ def retry_audit_job(job_id: str) -> Tuple[bool, Optional[str]]:
     file_name = job.get("file_name") or os.path.basename(str(file_url or "")) or "document"
     if not file_url:
         return False, "Missing file path"
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    local_path = os.path.join(base_dir, "storage", file_url.replace("/", os.sep))
-    if not os.path.exists(local_path):
-        return False, "File not found"
+    local_path = _resolve_audit_local_path(
+        file_url,
+        user_id=user_id,
+        job_id=job_id,
+        file_name=file_name,
+        local_path_hint=job.get("local_path"),
+    )
+    if not local_path or not os.path.exists(local_path):
+        return False, f"File not found: {local_path}"
     try:
         with open(local_path, "rb") as f:
             file_bytes = f.read()
@@ -852,8 +1238,7 @@ def retry_audit_job(job_id: str) -> Tuple[bool, Optional[str]]:
 
 def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
     snapshot = _load_job_from_db(job_id)
-    with AUDIT_LOCK:
-        local_job = AUDIT_JOBS.get(job_id)
+    local_job = _hydrate_job_from_storage(job_id)
     if snapshot:
         if local_job:
             if not snapshot.get("case_id"):
@@ -883,6 +1268,44 @@ def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
             "case_documents": _case_public_documents(job.get("case_id")),
         }
     return None
+
+
+def list_local_audit_jobs(limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+    ensure_runtime_layout()
+    if limit <= 0:
+        return []
+    try:
+        job_files = [
+            os.path.join(AUDIT_JOB_STATE_DIR, item)
+            for item in os.listdir(AUDIT_JOB_STATE_DIR)
+            if str(item).endswith(".json")
+        ]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"[Audit State] List jobs failed: {e}")
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for path in job_files:
+        try:
+            payload = _read_json_file(path)
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            continue
+        rows.append(payload)
+
+    rows.sort(
+        key=lambda item: (
+            _safe_text(item.get("created_at") or item.get("updated_at")),
+            _safe_text(item.get("job_id")),
+        ),
+        reverse=True,
+    )
+    if offset:
+        rows = rows[offset:]
+    return rows[:limit]
 
 
 DATE_PATTERN = r"(?:19|20)\d{2}\s*(?:[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\u5e74\s*\d{1,2}\s*\u6708\s*\d{1,2}\s*\u65e5?)"
@@ -2713,9 +3136,11 @@ def _run_cross_document_checks(
     fields: Dict[str, Any],
     erp_ctx: Dict[str, Any],
     history_records: List[Dict[str, Any]],
+    case_documents: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     findings: List[Dict[str, Any]] = []
     checks: List[Dict[str, Any]] = []
+    case_documents = case_documents or []
 
     amount = _safe_float(fields.get("total_amount"))
     contract_no = _safe_text(fields.get("contract_no"))
@@ -2772,6 +3197,32 @@ def _run_cross_document_checks(
                 confidence=confidence,
             )
         )
+
+    case_has_contract = any(
+        _safe_text(item.get("tag")).lower() == "contract" or normalize_doc_type(item.get("doc_type")) == "contract"
+        for item in case_documents
+        if isinstance(item, dict)
+    )
+    history_has_contract = any(
+        _safe_text(rec.get("doc_type")).lower() == "contract"
+        for rec in (history_records or [])
+    )
+    if doc_type != "contract":
+        has_contract_baseline = case_has_contract or history_has_contract
+        _add_check(
+            "contract_baseline",
+            "合同基线完整性校验",
+            has_contract_baseline,
+            "已找到合同主文档，可进行跨单据比对" if has_contract_baseline else "缺少合同主文档，暂无法进行有效比对",
+            severity="high",
+            suggestion="请先上传合同后再上传发票/提单/装箱单/付款单。",
+            confidence=0.99,
+            actual="已找到合同" if has_contract_baseline else "未找到合同",
+            expected="合同主文档已上传",
+            evidence={"text": contract_no or "未提供合同号", "highlight": contract_no or "合同"},
+        )
+        if not has_contract_baseline:
+            return findings[:AI_MAX_FINDINGS], checks
 
     _add_check(
         "vendor_blacklist",
@@ -3226,12 +3677,20 @@ def _persist_audit_result(job_id: str, result: Dict[str, Any]) -> None:
 
 
 def _update_job_result_in_memory(job_id: str, result: Dict[str, Any]) -> None:
+    job_snapshot: Optional[Dict[str, Any]] = None
     with AUDIT_LOCK:
         job = AUDIT_JOBS.get(job_id)
+        if not job:
+            job = _load_job_state(job_id) or _load_job_from_db(job_id)
+            if job:
+                AUDIT_JOBS[job_id] = job
         if not job:
             return
         job["result"] = result
         job["updated_at"] = _now_iso()
+        job_snapshot = dict(job)
+    if job_snapshot:
+        _persist_job_state(job_snapshot)
 
 
 def _queue_erp_sync_task(
@@ -3268,6 +3727,7 @@ def _queue_erp_sync_task(
     }
     with ERP_SYNC_LOCK:
         ERP_SYNC_QUEUE[queue_id] = task
+    _persist_erp_queue_state(task)
     return task
 
 
@@ -3493,14 +3953,13 @@ def run_audit_job_from_job_id(
     model_type: Optional[str] = None,
     case_id: Optional[str] = None,
 ) -> None:
-    local_job: Dict[str, Any] = {}
-    with AUDIT_LOCK:
-        if AUDIT_JOBS.get(job_id):
-            local_job = dict(AUDIT_JOBS[job_id])
+    local_job = dict(_hydrate_job_from_storage(job_id) or {})
 
     job = _load_job_from_db(job_id)
     if job and local_job.get("model_type"):
         job["model_type"] = local_job.get("model_type")
+    if job and local_job.get("local_path"):
+        job["local_path"] = local_job.get("local_path")
     if not job:
         job = local_job
     if not job:
@@ -3510,8 +3969,14 @@ def run_audit_job_from_job_id(
     if not file_url:
         raise RuntimeError(f"Audit job missing file path: {job_id}")
 
-    local_path = os.path.join(BASE_DIR, "storage", str(file_url).replace("/", os.sep))
-    if not os.path.exists(local_path):
+    local_path = _resolve_audit_local_path(
+        file_url,
+        user_id=job.get("user_id"),
+        job_id=job_id,
+        file_name=job.get("file_name"),
+        local_path_hint=job.get("local_path"),
+    )
+    if not local_path or not os.path.exists(local_path):
         raise FileNotFoundError(f"Audit file not found: {local_path}")
 
     with open(local_path, "rb") as f:
@@ -3544,6 +4009,17 @@ def _run_audit_job_inline_async(
         try:
             run_audit_job_from_job_id(job_id, model_type=model_type, case_id=case_id)
         except Exception as e:
+            snapshot = _hydrate_job_from_storage(job_id) or _load_job_from_db(job_id) or {}
+            effective_case_id = _normalize_case_id(case_id) or _normalize_case_id(snapshot.get("case_id"))
+            update_job(
+                job_id,
+                status="failed",
+                progress=STAGE_PROGRESS["failed"],
+                stage="failed",
+                workflow_state="failed",
+                error_message=str(e),
+            )
+            _update_case_document_entry(case_id=effective_case_id, job_id=job_id, status="failed")
             print(f"[Audit Queue Fallback] job {job_id} failed: {e}")
 
     thread = threading.Thread(
@@ -3689,7 +4165,14 @@ def run_audit_job(
         update_job(job_id, progress=STAGE_PROGRESS["extract"], stage="rules", workflow_state="rule_checking")
 
         rule_findings = _run_rules(effective_doc_type, fields, extraction_text, erp_ctx)
-        cross_findings, erp_checks = _run_cross_document_checks(effective_doc_type, fields, erp_ctx, history_records)
+        current_case_documents = _case_public_documents(normalized_case_id)
+        cross_findings, erp_checks = _run_cross_document_checks(
+            effective_doc_type,
+            fields,
+            erp_ctx,
+            history_records,
+            case_documents=current_case_documents,
+        )
         anomaly_findings, anomaly_stats = _run_anomaly_detection(effective_doc_type, fields, history_records)
         deterministic_findings = list(rule_findings) + list(cross_findings) + list(anomaly_findings)
         t_after_rules = time.perf_counter()
@@ -3833,6 +4316,8 @@ def run_audit_job(
             "erp_trace_id": None,
             "workflow_state": workflow_state,
             "next_action": next_action,
+            "upload_sequence": ["contract", "invoice", "packing_list", "bill_of_lading", "payment", "expense"],
+            "upload_sequence_hint": "建议顺序：先合同，再贸易/履约单据，最后付款/报销单据。",
             "case_summary": {
                 "case_id": normalized_case_id,
                 "documents": case_documents,

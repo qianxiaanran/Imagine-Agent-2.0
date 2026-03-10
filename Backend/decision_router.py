@@ -19,14 +19,22 @@ from supabase_client import engine
 router = APIRouter(prefix="/api/decision", tags=["Decision"])
 
 _AI_REFRESH_SECONDS = max(60, int(os.getenv("DECISION_AI_REFRESH_SECONDS", str(30 * 60))))
+_AI_CACHE_MAX_ENTRIES = max(4, int(os.getenv("DECISION_AI_CACHE_MAX_ENTRIES", "12")))
 _AI_CACHE_LOCK = threading.Lock()
 _AI_CACHE: Dict[str, Dict[str, Any]] = {}
 _AI_INFLIGHT: Dict[str, bool] = {}
 _OVERVIEW_CACHE_SECONDS = max(10, int(os.getenv("DECISION_OVERVIEW_CACHE_SECONDS", "120")))
-_OVERVIEW_CACHE_LOCK = threading.Lock()
-_OVERVIEW_CACHE: Dict[str, Any] = {
+_PREAGG_REFRESH_SECONDS = max(60, int(os.getenv("DECISION_PREAGG_REFRESH_SECONDS", "180")))
+_PREAGG_MAX_STALE_SECONDS = max(
+    _PREAGG_REFRESH_SECONDS,
+    int(os.getenv("DECISION_PREAGG_MAX_STALE_SECONDS", str(_PREAGG_REFRESH_SECONDS * 5))),
+)
+_PREAGG_CACHE_LOCK = threading.Lock()
+_PREAGG_CACHE: Dict[str, Any] = {
     "payload": None,
     "generated_at": None,
+    "refreshing": False,
+    "last_error": None,
 }
 
 
@@ -38,6 +46,60 @@ def _to_iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
+
+
+def _make_ai_cache_signature(data: Dict[str, Any]) -> str:
+    context_payload = _json_safe(_build_ai_context(data))
+    return hashlib.sha1(
+        json.dumps(context_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _make_ai_cache_key(backend: str, signature: str) -> str:
+    return f"{backend}:{signature}"
+
+
+def _prune_ai_cache_locked() -> None:
+    if len(_AI_CACHE) <= _AI_CACHE_MAX_ENTRIES:
+        return
+    ordered_items = sorted(
+        _AI_CACHE.items(),
+        key=lambda item: item[1].get("generated_at") or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    for cache_key, _ in ordered_items[: max(0, len(_AI_CACHE) - _AI_CACHE_MAX_ENTRIES)]:
+        _AI_CACHE.pop(cache_key, None)
+
+
+def _with_preaggregation_meta(
+    payload: Dict[str, Any],
+    generated_at: datetime,
+    *,
+    dashboard_cached: bool,
+    stale: bool,
+    pending_refresh: bool,
+    last_error: str | None,
+) -> Dict[str, Any]:
+    result = dict(payload or {})
+    cache_meta = dict(result.get("cache") or {})
+    age_seconds = max(0, int((_utc_now() - generated_at).total_seconds()))
+    cache_meta.update(
+        {
+            "dashboard_cached": dashboard_cached,
+            "dashboard_generated_at": _to_iso(generated_at),
+            "dashboard_ttl_seconds": _OVERVIEW_CACHE_SECONDS,
+            "preaggregation_enabled": True,
+            "preaggregation_generated_at": _to_iso(generated_at),
+            "preaggregation_age_seconds": age_seconds,
+            "preaggregation_refresh_seconds": _PREAGG_REFRESH_SECONDS,
+            "preaggregation_max_stale_seconds": _PREAGG_MAX_STALE_SECONDS,
+            "preaggregation_stale": stale,
+            "preaggregation_pending_refresh": pending_refresh,
+        }
+    )
+    if last_error:
+        cache_meta["preaggregation_last_error"] = last_error
+    result["cache"] = cache_meta
+    return result
 
 
 def _to_float(value: Any) -> float:
@@ -211,12 +273,9 @@ def _generate_ai_analysis(data: Dict[str, Any], backend: str) -> Dict[str, Any]:
 
 
 def _get_cached_ai_analysis(data: Dict[str, Any], backend: str, force_refresh: bool) -> Dict[str, Any]:
-    context_payload = _json_safe(_build_ai_context(data))
-    signature = hashlib.sha1(
-        json.dumps(context_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    signature = _make_ai_cache_signature(data)
     now = _utc_now()
-    cache_key = backend
+    cache_key = _make_ai_cache_key(backend, signature)
 
     with _AI_CACHE_LOCK:
         cached = _AI_CACHE.get(cache_key)
@@ -241,6 +300,7 @@ def _get_cached_ai_analysis(data: Dict[str, Any], backend: str, force_refresh: b
             "payload": payload,
             "generated_at": now,
         }
+        _prune_ai_cache_locked()
         return {
             **payload,
             "generated_at": _to_iso(now),
@@ -253,10 +313,11 @@ def _get_cached_ai_analysis(data: Dict[str, Any], backend: str, force_refresh: b
 
 
 def _start_ai_refresh_async(data: Dict[str, Any], backend: str, signature: str):
+    cache_key = _make_ai_cache_key(backend, signature)
     with _AI_CACHE_LOCK:
-        if _AI_INFLIGHT.get(backend):
+        if _AI_INFLIGHT.get(cache_key):
             return
-        _AI_INFLIGHT[backend] = True
+        _AI_INFLIGHT[cache_key] = True
 
     snapshot = dict(data)
 
@@ -269,12 +330,13 @@ def _start_ai_refresh_async(data: Dict[str, Any], backend: str, signature: str):
         finally:
             now = _utc_now()
             with _AI_CACHE_LOCK:
-                _AI_CACHE[backend] = {
+                _AI_CACHE[cache_key] = {
                     "signature": signature,
                     "payload": payload,
                     "generated_at": now,
                 }
-                _AI_INFLIGHT.pop(backend, None)
+                _prune_ai_cache_locked()
+                _AI_INFLIGHT.pop(cache_key, None)
 
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -286,14 +348,12 @@ def _get_ai_analysis_fast(data: Dict[str, Any], backend: str, force_refresh: boo
     - If no cache and not forced -> return fallback immediately and refresh AI in background.
     - If forced -> block and compute latest AI.
     """
-    context_payload = _json_safe(_build_ai_context(data))
-    signature = hashlib.sha1(
-        json.dumps(context_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    signature = _make_ai_cache_signature(data)
     now = _utc_now()
+    cache_key = _make_ai_cache_key(backend, signature)
 
     with _AI_CACHE_LOCK:
-        cached = _AI_CACHE.get(backend)
+        cached = _AI_CACHE.get(cache_key)
         if cached and not force_refresh:
             cached_signature = str(cached.get("signature") or "")
             cached_at = cached.get("generated_at")
@@ -860,36 +920,95 @@ def _collect_dashboard_data() -> Dict[str, Any]:
     }
 
 
-def _get_cached_dashboard_data(force_refresh: bool = False) -> Dict[str, Any]:
-    now = _utc_now()
-    with _OVERVIEW_CACHE_LOCK:
-        cached_payload = _OVERVIEW_CACHE.get("payload")
-        cached_at = _OVERVIEW_CACHE.get("generated_at")
-        if (
-            (not force_refresh)
-            and isinstance(cached_payload, dict)
-            and isinstance(cached_at, datetime)
-            and int((now - cached_at).total_seconds()) < _OVERVIEW_CACHE_SECONDS
-        ):
-            result = dict(cached_payload)
-            result["cache"] = {
-                "dashboard_cached": True,
-                "dashboard_generated_at": _to_iso(cached_at),
-                "dashboard_ttl_seconds": _OVERVIEW_CACHE_SECONDS,
-            }
-            return result
+def _store_preaggregated_snapshot(payload: Dict[str, Any], generated_at: datetime) -> None:
+    with _PREAGG_CACHE_LOCK:
+        _PREAGG_CACHE["payload"] = payload
+        _PREAGG_CACHE["generated_at"] = generated_at
+        _PREAGG_CACHE["refreshing"] = False
+        _PREAGG_CACHE["last_error"] = None
 
-    fresh = _collect_dashboard_data()
-    with _OVERVIEW_CACHE_LOCK:
-        _OVERVIEW_CACHE["payload"] = fresh
-        _OVERVIEW_CACHE["generated_at"] = now
-    result = dict(fresh)
-    result["cache"] = {
-        "dashboard_cached": False,
-        "dashboard_generated_at": _to_iso(now),
-        "dashboard_ttl_seconds": _OVERVIEW_CACHE_SECONDS,
-    }
-    return result
+
+def _refresh_preaggregated_snapshot() -> Dict[str, Any]:
+    payload = _collect_dashboard_data()
+    generated_at = _utc_now()
+    _store_preaggregated_snapshot(payload, generated_at)
+    return _with_preaggregation_meta(
+        payload,
+        generated_at,
+        dashboard_cached=False,
+        stale=False,
+        pending_refresh=False,
+        last_error=None,
+    )
+
+
+def _start_preaggregated_refresh_async() -> bool:
+    with _PREAGG_CACHE_LOCK:
+        if _PREAGG_CACHE.get("refreshing"):
+            return False
+        _PREAGG_CACHE["refreshing"] = True
+
+    def _worker():
+        try:
+            payload = _collect_dashboard_data()
+            generated_at = _utc_now()
+        except Exception as exc:
+            print(f"[Decision] preaggregation refresh failed: {exc}")
+            with _PREAGG_CACHE_LOCK:
+                _PREAGG_CACHE["refreshing"] = False
+                _PREAGG_CACHE["last_error"] = str(exc)
+            return
+
+        with _PREAGG_CACHE_LOCK:
+            _PREAGG_CACHE["payload"] = payload
+            _PREAGG_CACHE["generated_at"] = generated_at
+            _PREAGG_CACHE["refreshing"] = False
+            _PREAGG_CACHE["last_error"] = None
+
+    threading.Thread(target=_worker, daemon=True, name="decision-preagg-refresh").start()
+    return True
+
+
+def _get_cached_dashboard_data(force_refresh: bool = False) -> Dict[str, Any]:
+    cached_payload: Dict[str, Any] | None = None
+    cached_at: datetime | None = None
+    pending_refresh = False
+    last_error: str | None = None
+
+    with _PREAGG_CACHE_LOCK:
+        payload = _PREAGG_CACHE.get("payload")
+        generated_at = _PREAGG_CACHE.get("generated_at")
+        refreshing = bool(_PREAGG_CACHE.get("refreshing"))
+        cached_error = _PREAGG_CACHE.get("last_error")
+        if isinstance(payload, dict) and isinstance(generated_at, datetime):
+            cached_payload = dict(payload)
+            cached_at = generated_at
+            last_error = str(cached_error) if cached_error else None
+            age_seconds = max(0, int((_utc_now() - generated_at).total_seconds()))
+            if (not force_refresh) and age_seconds < _PREAGG_REFRESH_SECONDS:
+                return _with_preaggregation_meta(
+                    cached_payload,
+                    cached_at,
+                    dashboard_cached=True,
+                    stale=False,
+                    pending_refresh=refreshing,
+                    last_error=last_error,
+                )
+            if (not force_refresh) and age_seconds < _PREAGG_MAX_STALE_SECONDS:
+                pending_refresh = True
+
+    if cached_payload is not None and cached_at is not None and pending_refresh:
+        _start_preaggregated_refresh_async()
+        return _with_preaggregation_meta(
+            cached_payload,
+            cached_at,
+            dashboard_cached=True,
+            stale=True,
+            pending_refresh=True,
+            last_error=last_error,
+        )
+
+    return _refresh_preaggregated_snapshot()
 
 
 def warmup_decision_cache():

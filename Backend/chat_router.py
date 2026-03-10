@@ -103,6 +103,8 @@ except Exception as e:
 router = APIRouter(prefix="/api", tags=["Chat"])
 _ACTIVE_STREAM_CANCELS: Dict[str, threading.Event] = {}
 _ACTIVE_STREAM_LOCK = threading.Lock()
+_CONTEXT_COMPACTION_INFLIGHT: set[str] = set()
+_CONTEXT_COMPACTION_LOCK = threading.Lock()
 
 
 class ChatRequest(BaseModel):
@@ -647,6 +649,92 @@ def _append_meta_history_event(user_id: str, session_id: str, func_type: str, pa
         print(f"⚠️ Context event save failed ({func_type}): {e}")
 
 
+def _save_history_turn(
+        user_id: str,
+        session_id: str,
+        func_type: str,
+        user_message: str,
+        assistant_message: str,
+) -> None:
+    if user_id == "anonymous":
+        return
+    rows = [
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "role": "user",
+            "content": user_message,
+            "func_type": func_type,
+        },
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "role": "assistant",
+            "content": assistant_message,
+            "func_type": func_type,
+        },
+    ]
+    sb = require_supabase()
+    sb.table("history").insert(rows).execute()
+
+
+async def _save_history_turn_async(
+        user_id: str,
+        session_id: str,
+        func_type: str,
+        user_message: str,
+        assistant_message: str,
+) -> None:
+    if user_id == "anonymous":
+        return
+    await asyncio.to_thread(
+        _save_history_turn,
+        user_id,
+        session_id,
+        func_type,
+        user_message,
+        assistant_message,
+    )
+
+
+async def _maybe_append_context_event_async(
+        user_id: str,
+        session_id: str,
+        mode: str,
+        model_id: str,
+        model_backend: str,
+        context_content: str,
+        personalization: Dict[str, str],
+) -> None:
+    await asyncio.to_thread(
+        _maybe_append_context_event,
+        user_id,
+        session_id,
+        mode,
+        model_id,
+        model_backend,
+        context_content,
+        personalization,
+    )
+
+
+async def _maybe_store_long_term_hint_async(user_id: str, text: str) -> None:
+    await asyncio.to_thread(_maybe_store_long_term_hint, user_id, text)
+
+
+def _schedule_background_io(awaitable: "asyncio.Future[Any] | asyncio.Task[Any] | Any", label: str) -> None:
+    async def _runner():
+        try:
+            await awaitable
+        except Exception as e:
+            print(f"⚠️ Background IO failed ({label}): {e}")
+
+    try:
+        asyncio.create_task(_runner())
+    except RuntimeError:
+        pass
+
+
 def _latest_meta_event(records: List[Dict[str, Any]], func_type: str) -> Optional[Dict[str, Any]]:
     target = (func_type or "").strip().lower()
     for r in reversed(records):
@@ -758,6 +846,164 @@ def _messages_since_last_compaction(records: List[Dict[str, Any]]) -> int:
         if role in {"user", "assistant", "context"}:
             count += 1
     return count
+
+
+def _make_context_compaction_key(
+        user_id: str,
+        session_id: str,
+        mode: Optional[str],
+        model_backend: str,
+) -> str:
+    return "|".join(
+        [
+            str(user_id or "").strip(),
+            str(session_id or "").strip(),
+            str(mode or "").strip().lower() or "general",
+            str(model_backend or "local").strip().lower() or "local",
+        ]
+    )
+
+
+def _claim_context_compaction(key: str) -> bool:
+    with _CONTEXT_COMPACTION_LOCK:
+        if key in _CONTEXT_COMPACTION_INFLIGHT:
+            return False
+        _CONTEXT_COMPACTION_INFLIGHT.add(key)
+        return True
+
+
+def _release_context_compaction(key: str) -> None:
+    with _CONTEXT_COMPACTION_LOCK:
+        _CONTEXT_COMPACTION_INFLIGHT.discard(key)
+
+
+def _collect_context_compaction_snapshot(
+        user_id: str,
+        session_id: str,
+        mode: Optional[str],
+) -> Dict[str, Any]:
+    if user_id == "anonymous":
+        return {
+            "payload": None,
+            "needs_refresh": False,
+            "source_text": "",
+            "source_chars": 0,
+            "source_messages": 0,
+        }
+
+    records = _read_recent_history_records(user_id, session_id, limit=CONTEXT_COMPACTION_SCAN_LIMIT)
+    if not records:
+        return {
+            "payload": None,
+            "needs_refresh": False,
+            "source_text": "",
+            "source_chars": 0,
+            "source_messages": 0,
+        }
+
+    latest_payload = _latest_meta_event(records, "context_compaction")
+    source_lines = _collect_compaction_source_lines(records, mode=mode)
+    if not source_lines:
+        return {
+            "payload": latest_payload,
+            "needs_refresh": False,
+            "source_text": "",
+            "source_chars": 0,
+            "source_messages": 0,
+        }
+
+    source_text = "\n".join(source_lines).strip()
+    source_chars = len(source_text)
+    if source_chars < CONTEXT_COMPACTION_TRIGGER_CHARS:
+        return {
+            "payload": latest_payload,
+            "needs_refresh": False,
+            "source_text": source_text,
+            "source_chars": source_chars,
+            "source_messages": len(source_lines),
+        }
+
+    since_last = _messages_since_last_compaction(records)
+    needs_refresh = (not latest_payload) or since_last >= CONTEXT_COMPACTION_MIN_INTERVAL
+    return {
+        "payload": latest_payload,
+        "needs_refresh": needs_refresh,
+        "source_text": source_text,
+        "source_chars": source_chars,
+        "source_messages": len(source_lines),
+    }
+
+
+def _refresh_context_compaction(
+        user_id: str,
+        session_id: str,
+        mode: Optional[str],
+        model_backend: str,
+) -> Optional[Dict[str, Any]]:
+    key = _make_context_compaction_key(user_id, session_id, mode, model_backend)
+    if not _claim_context_compaction(key):
+        return None
+
+    try:
+        snapshot = _collect_context_compaction_snapshot(user_id, session_id, mode)
+        latest_payload = snapshot.get("payload")
+        if not snapshot.get("needs_refresh"):
+            return latest_payload
+
+        source_text = str(snapshot.get("source_text") or "")
+        if not source_text:
+            return latest_payload
+
+        compact_prompt = (
+            "You are a context compactor for an enterprise assistant.\n"
+            "Summarize the dialogue into stable, reusable state as strict JSON.\n"
+            "Required JSON keys: summary, facts, preferences, constraints, open_items.\n"
+            "- Keep facts verifiable and concise.\n"
+            "- Keep user preferences and hard constraints explicit.\n"
+            "- Do not include tool logs, status lines, or transient debug text.\n"
+            "- Use Chinese output in JSON values.\n\n"
+            f"Conversation:\n{source_text[:CONTEXT_COMPACTION_SOURCE_MAX_CHARS]}\n\n"
+            "Return JSON only."
+        )
+
+        raw = ask_llm(compact_prompt, model_type=model_backend)
+        parsed = _safe_json_loads(raw)
+        normalized = _normalize_compaction_payload(
+            parsed,
+            source_chars=int(snapshot.get("source_chars") or 0),
+            source_messages=int(snapshot.get("source_messages") or 0),
+        )
+        has_content = bool(
+            normalized.get("summary")
+            or normalized.get("facts")
+            or normalized.get("preferences")
+            or normalized.get("constraints")
+            or normalized.get("open_items")
+        )
+        if not has_content:
+            return latest_payload
+        _append_meta_history_event(user_id, session_id, "context_compaction", normalized)
+        return normalized
+    except Exception as e:
+        print(f"⚠️ Context compaction refresh failed: {e}")
+        return None
+    finally:
+        _release_context_compaction(key)
+
+
+async def _refresh_context_compaction_async(
+        user_id: str,
+        session_id: str,
+        mode: Optional[str],
+        model_backend: str,
+) -> Optional[Dict[str, Any]]:
+    return await asyncio.to_thread(
+        _refresh_context_compaction,
+        user_id,
+        session_id,
+        mode,
+        model_backend,
+    )
 
 
 def _maybe_compact_context(
@@ -2226,21 +2472,13 @@ async def chat(
 
             if user_id != "anonymous":
                 try:
-                    sb = require_supabase()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "user",
-                        "content": message,
-                        "func_type": "identity",
-                    }).execute()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "assistant",
-                        "content": IDENTITY_FIXED_REPLY,
-                        "func_type": "identity",
-                    }).execute()
+                    await _save_history_turn_async(
+                        user_id,
+                        session_id,
+                        "identity",
+                        message,
+                        IDENTITY_FIXED_REPLY,
+                    )
                 except Exception as e:
                     print(f"Identity reply history save failed: {e}")
 
@@ -2266,22 +2504,30 @@ async def chat(
     ]
     personalization = _normalize_personalization(req.personalization)
     personalization_system_prompt = _build_personalization_system_prompt(personalization)
-    _maybe_append_context_event(
-        user_id=user_id,
-        session_id=session_id,
-        mode=mode,
-        model_id=model_id,
-        model_backend=model_backend,
-        context_content=context_content,
-        personalization=personalization,
-    )
-    _maybe_store_long_term_hint(user_id, message)
+    if user_id != "anonymous":
+        _schedule_background_io(
+            _maybe_append_context_event_async(
+                user_id=user_id,
+                session_id=session_id,
+                mode=mode,
+                model_id=model_id,
+                model_backend=model_backend,
+                context_content=context_content,
+                personalization=personalization,
+            ),
+            "context_event",
+        )
+        _schedule_background_io(
+            _maybe_store_long_term_hint_async(user_id, message),
+            "long_term_hint",
+        )
 
     print(
         f"🚀 [Chat] New Request: User={user_id}, Session={session_id}, Mode={mode}, Backend={model_backend}, Files={len(requested_source_files)}"
     )
 
     shared_context_cache: Dict[str, Dict[str, str]] = {}
+    shared_context_refresh_flags: Dict[str, bool] = {}
 
     def _get_shared_context(target_mode: Optional[str] = None, history_limit: int = FAST_CHAT_HISTORY_LIMIT) -> Dict[str, str]:
         normalized_mode = (target_mode or mode or "general").strip().lower() or "general"
@@ -2302,16 +2548,18 @@ async def chat(
         compaction_payload: Optional[Dict[str, Any]] = None
         session_state = ""
         try:
-            compaction_payload = _maybe_compact_context(
+            compaction_snapshot = _collect_context_compaction_snapshot(
                 user_id=user_id,
                 session_id=session_id,
                 mode=normalized_mode,
-                model_backend=model_backend,
             )
+            compaction_payload = compaction_snapshot.get("payload")
             session_state = _build_compaction_context_block(compaction_payload)
+            shared_context_refresh_flags[cache_key] = bool(compaction_snapshot.get("needs_refresh"))
         except Exception:
             compaction_payload = None
             session_state = ""
+            shared_context_refresh_flags[cache_key] = False
 
         summary_context = ""
         try:
@@ -2398,7 +2646,20 @@ async def chat(
             target_mode: Optional[str] = None,
             history_limit: int = FAST_CHAT_HISTORY_LIMIT,
     ) -> Dict[str, str]:
-        return await asyncio.to_thread(_get_shared_context, target_mode, history_limit)
+        normalized_mode = (target_mode or mode or "general").strip().lower() or "general"
+        cache_key = f"{normalized_mode}:{history_limit}"
+        bundle = await asyncio.to_thread(_get_shared_context, target_mode, history_limit)
+        if shared_context_refresh_flags.pop(cache_key, False):
+            _schedule_background_io(
+                _refresh_context_compaction_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    mode=normalized_mode,
+                    model_backend=model_backend,
+                ),
+                "context_compaction",
+            )
+        return bundle
 
     def _wrap_prompt_with_shared_context(
             base_prompt: str,
@@ -2475,15 +2736,13 @@ async def chat(
 
             if user_id != "anonymous":
                 try:
-                    sb = require_supabase()
-                    sb.table("history").insert({
-                        "user_id": user_id, "session_id": session_id,
-                        "role": "user", "content": message, "func_type": func_type
-                    }).execute()
-                    sb.table("history").insert({
-                        "user_id": user_id, "session_id": session_id,
-                        "role": "assistant", "content": full_reply, "func_type": func_type
-                    }).execute()
+                    await _save_history_turn_async(
+                        user_id,
+                        session_id,
+                        func_type,
+                        message,
+                        full_reply,
+                    )
                 except Exception as e:
                     print(f" History save failed: {e}")
 
@@ -2868,21 +3127,13 @@ async def chat(
 
             if user_id != "anonymous":
                 try:
-                    sb = require_supabase()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "user",
-                        "content": message,
-                        "func_type": "search",
-                    }).execute()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "assistant",
-                        "content": full_reply_clean,
-                        "func_type": "search",
-                    }).execute()
+                    await _save_history_turn_async(
+                        user_id,
+                        session_id,
+                        "search",
+                        message,
+                        full_reply_clean,
+                    )
                 except Exception as e:
                     print(f"[Search] history save failed: {e}")
 
@@ -2959,21 +3210,13 @@ async def chat(
             # 保留对话历史记录
             if user_id != "anonymous":
                 try:
-                    sb = require_supabase()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "user",
-                        "content": message,
-                        "func_type": "database"
-                    }).execute()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "assistant",
-                        "content": full_reply,
-                        "func_type": "database"
-                    }).execute()
+                    await _save_history_turn_async(
+                        user_id,
+                        session_id,
+                        "database",
+                        message,
+                        full_reply,
+                    )
                 except Exception as e:
                     print(f"History save failed: {e}")
 
@@ -3043,15 +3286,13 @@ async def chat(
             if _is_cancelled():
                 return
             if user_id != "anonymous":
-                sb = require_supabase()
-                sb.table("history").insert({
-                    "user_id": user_id, "session_id": session_id,
-                    "role": "user", "content": message, "func_type": "audit"
-                }).execute()
-                sb.table("history").insert({
-                    "user_id": user_id, "session_id": session_id,
-                    "role": "assistant", "content": full_reply, "func_type": "audit"
-                }).execute()
+                await _save_history_turn_async(
+                    user_id,
+                    session_id,
+                    "audit",
+                    message,
+                    full_reply,
+                )
 
             if _is_cancelled():
                 return
@@ -3172,21 +3413,13 @@ async def chat(
 
             if user_id != "anonymous":
                 try:
-                    sb = require_supabase()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "user",
-                        "content": message,
-                        "func_type": "rag",
-                    }).execute()
-                    sb.table("history").insert({
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": "assistant",
-                        "content": full_reply,
-                        "func_type": "rag",
-                    }).execute()
+                    await _save_history_turn_async(
+                        user_id,
+                        session_id,
+                        "rag",
+                        message,
+                        full_reply,
+                    )
                 except Exception as e:
                     print(f"[RAG] history save failed: {e}")
 
@@ -3310,18 +3543,13 @@ async def chat(
             # === 保留历史记录（用户+助手）===
             if user_id != "anonymous":
                 try:
-                    sb = require_supabase()
-                    sb.table("history").insert({
-                        "user_id": user_id, "session_id": session_id,
-                        "role": "user", "content": message, "func_type": final_intent
-                    }).execute()
-                    sb.table("history").insert({
-                        "user_id": user_id, "session_id": session_id,
-                        "role": "assistant", "content": full_reply_clean,
-                        "func_type": final_intent,
-                        # 可选：如果表支持 metadata，可以把 sources 存进去
-                        # “元数据”：{“来源”：来源}
-                    }).execute()
+                    await _save_history_turn_async(
+                        user_id,
+                        session_id,
+                        final_intent,
+                        message,
+                        full_reply_clean,
+                    )
                 except Exception as e:
                     print(f"History save failed: {e}")
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy, useMemo, useCallback } from 'react';
 import {
   Bot, Zap, FileText, Layout, PanelLeftOpen, ChevronDown, Check, User,
   BookOpen, X, Mic, StopCircle, ArrowRight, Plus,
@@ -10,9 +10,6 @@ import {
   FileUp, Cloud, Cpu
 } from 'lucide-react';
 
-import Sidebar from './Sidebar';
-import MobileSidebar from './MobileSidebar';
-import Suggestions from './Suggestions';
 // 原料药进口
 import { API_BASE_URL, AUTH_TOKEN_KEY, refreshAccessToken as refreshAccessTokenFromApiClient } from '../../api/apiClient';
 import userApi from '../../api/user';
@@ -29,6 +26,9 @@ import {
 
 const SettingsModal = lazy(() => import('../../components/SettingsModal'));
 const VoiceRecorder = lazy(() => import('../../components/VoiceRecorder'));
+const Sidebar = lazy(() => import('./Sidebar'));
+const MobileSidebar = lazy(() => import('./MobileSidebar'));
+const Suggestions = lazy(() => import('./Suggestions'));
 const ShareModal = lazy(() => import('./ShareModal'));
 const OcrIngestModal = lazy(() => import('./OcrIngestModal'));
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
@@ -66,22 +66,468 @@ const WRITING_CONTENT_TYPE_OPTIONS = ["营销文案", "功能发布公告", "产
 const WRITING_PLATFORM_OPTIONS = ["微信公众号", "企业微信", "官网", "小红书", "抖音", "LinkedIn", "邮件触达"];
 const WRITING_AUDIENCE_PRESET = ["外贸业务员", "采购负责人", "运营主管", "财务/合规", "管理层", "跨境电商团队"];
 const WRITING_TONE_OPTIONS = ["专业严谨", "商务简洁", "数据驱动", "亲和易读", "行动导向"];
-const WRITING_ANALYSIS_FRAMEWORK_OPTIONS = ["4P框架", "SWOT", "PEST", "波特五力", "STP"];
 const STANDALONE_PPT_INPUT_MODES = [
   { key: "topic", label: "输入PPT主题", icon: Sparkles },
-  { key: "document", label: "Word/PDF文档生成PPT", icon: FileUp },
+  { key: "document", label: "上传文档生成PPT", icon: FileUp },
   { key: "longText", label: "大段文本生成PPT", icon: FileText },
 ];
-const STANDALONE_PPT_TOPIC_SUGGESTIONS = ["学术报告", "教学备课", "政策宣讲", "心得体会分享", "工作总结"];
-const STANDALONE_PPT_BUILTIN_TEMPLATES = [
-  { template_id: "general", name: "general", source: "builtin" },
-  { template_id: "corporate", name: "corporate", source: "builtin" },
-  { template_id: "minimal", name: "minimal", source: "builtin" },
+const STANDALONE_PPT_DEFAULT_CONTENT_FOCUS = "work_report";
+const STANDALONE_PPT_CONTENT_FOCUS_OPTIONS = [
+  {
+    key: "work_report",
+    label: "工作汇报",
+    description: "适合阶段总结、项目复盘、进展同步",
+    emphasizeMetrics: true,
+    previewSections: ["封面", "汇报摘要", "目录", "背景与目标", "阶段进展", "核心成果", "问题与挑战", "原因复盘", "改进动作", "下一步计划", "资源诉求", "总结"],
+    promptLines: [
+      "内容导向：工作汇报，适合周报、月报、阶段复盘、项目总结类 PPT。",
+      "结构重点：交代目标背景、阶段进展、关键成果、存在问题、复盘原因和下一步计划。",
+      "表达方式：结论前置，结果清晰，既能支撑管理汇报，也便于团队同步。",
+      "页面组织：优先使用结论式标题，每页围绕一个核心信息展开，再补充事实、数据和行动要点。",
+    ],
+  },
+  {
+    key: "proposal",
+    label: "方案提案",
+    description: "适合项目方案、解决方案、立项汇报",
+    emphasizeMetrics: true,
+    previewSections: ["封面", "提案摘要", "目录", "现状痛点", "目标与原则", "方案总览", "关键模块", "实施路径", "资源与分工", "收益评估", "风险保障", "结论"],
+    promptLines: [
+      "内容导向：方案提案，适合项目立项、解决方案、实施建议类 PPT。",
+      "结构重点：讲清现状痛点、目标原则、方案设计、实施路径、资源需求、收益与风险。",
+      "表达方式：强调决策价值和可执行性，让听众能快速判断是否推进。",
+      "页面组织：优先使用问题-方案-收益的表达顺序，让每页都能服务于决策判断。",
+    ],
+  },
+  {
+    key: "analysis",
+    label: "分析解读",
+    description: "适合研究分析、行业洞察、专题汇报",
+    emphasizeMetrics: true,
+    previewSections: ["封面", "核心结论", "目录", "研究背景", "现状与趋势", "关键数据", "原因拆解", "对比分析", "洞察发现", "策略建议", "风险提示", "总结"],
+    promptLines: [
+      "内容导向：分析解读，适合行业研究、专题分析、经营复盘类 PPT。",
+      "结构重点：基于事实和数据得出洞察，形成结论、判断与建议。",
+      "表达方式：强调逻辑链和证据链，避免只有结论没有支撑。",
+      "页面组织：优先使用结论-证据-影响的表达顺序，让听众能快速跟上分析逻辑。",
+    ],
+  },
+  {
+    key: "training",
+    label: "培训讲解",
+    description: "适合课程分享、制度讲解、方法培训",
+    emphasizeMetrics: false,
+    previewSections: ["封面", "培训目标", "目录", "概念导入", "知识拆解", "方法步骤", "案例演示", "常见问题", "注意事项", "实操建议", "练习复盘", "总结"],
+    promptLines: [
+      "内容导向：培训讲解，适合课程分享、制度宣讲、方法培训类 PPT。",
+      "结构重点：概念解释、知识拆解、步骤演示、案例说明、注意事项和练习复盘。",
+      "表达方式：更注重可理解性和可学习性，内容要循序渐进。",
+      "页面组织：优先使用概念-步骤-示例-提醒的表达顺序，帮助听众边看边学。",
+    ],
+  },
+  {
+    key: "product_pitch",
+    label: "产品路演",
+    description: "适合产品介绍、业务路演、价值展示",
+    emphasizeMetrics: true,
+    previewSections: ["封面", "一句话价值", "目录", "用户场景", "痛点机会", "产品方案", "核心亮点", "竞争优势", "商业价值", "客户案例", "实施计划", "结语"],
+    promptLines: [
+      "内容导向：产品路演，适合产品介绍、业务宣讲、商业展示类 PPT。",
+      "结构重点：说明场景与痛点、产品价值、核心亮点、竞争优势、商业价值和落地计划。",
+      "表达方式：强调价值主张和说服力，让听众快速理解卖点。",
+      "页面组织：优先使用场景-价值-亮点-证明的表达顺序，让页面更有路演说服力。",
+    ],
+  },
 ];
+const STANDALONE_PPT_TOPIC_SUGGESTIONS = ["学术报告", "教学备课", "政策宣讲", "心得体会分享", "工作总结"];
+const STANDALONE_PPT_TOPIC_SUGGESTION_PROMPTS = {
+  "学术报告": "PPT主题：\n研究对象：\n希望突出：研究背景、方法思路、核心结论",
+  "教学备课": "PPT主题：\n适用课程：\n希望突出：教学目标、重点难点、课堂安排",
+  "政策宣讲": "PPT主题：\n适用范围：\n希望突出：政策背景、关键要点、落实建议",
+  "心得体会分享": "PPT主题：\n分享场景：\n希望突出：主要经历、体会收获、后续行动",
+  "工作总结": "PPT主题：\n时间范围/项目：\n希望突出：重点成果、问题复盘、下一步计划",
+};
+const STANDALONE_PPT_TEMPLATE_ID_ALIASES = {
+  corporate: "standard",
+  minimal: "modern",
+};
+const STANDALONE_PPT_TEMPLATE_ORDER = [
+  "neo-general",
+  "neo-standard",
+  "neo-modern",
+  "neo-swift",
+  "general",
+  "modern",
+  "standard",
+  "swift",
+];
+const STANDALONE_PPT_BUILTIN_TEMPLATES = [
+  { template_id: "neo-general", name: "Neo 通用", source: "builtin" },
+  { template_id: "neo-standard", name: "Neo 标准", source: "builtin" },
+  { template_id: "neo-modern", name: "Neo 现代", source: "builtin" },
+  { template_id: "neo-swift", name: "Neo 迅捷", source: "builtin" },
+  { template_id: "general", name: "经典通用", source: "builtin" },
+  { template_id: "modern", name: "经典现代", source: "builtin" },
+  { template_id: "standard", name: "经典标准", source: "builtin" },
+  { template_id: "swift", name: "经典迅捷", source: "builtin" },
+];
+const STANDALONE_PPT_TEMPLATE_LABELS = {
+  "neo-general": "Neo 通用",
+  "neo-standard": "Neo 标准",
+  "neo-modern": "Neo 现代",
+  "neo-swift": "Neo 迅捷",
+  general: "经典通用",
+  modern: "经典现代",
+  standard: "经典标准",
+  swift: "经典迅捷",
+  corporate: "经典标准",
+  minimal: "经典现代",
+};
+const STANDALONE_PPT_TEMPLATE_PREVIEW_META = {
+  "neo-general": {
+    summary: "新版通用风格，适合综合汇报、日常演示与常规业务表达。",
+    tags: ["新版", "平衡型", "综合汇报"],
+    gradient: "from-sky-500 via-cyan-400 to-emerald-300",
+    shell: "bg-[#0a2742]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-sky-500",
+    mutedTone: "bg-sky-100",
+    linesTone: "bg-slate-300",
+  },
+  "neo-standard": {
+    summary: "新版标准风格，章节层次更规整，适合正式汇报与制度宣讲。",
+    tags: ["新版", "规整结构", "正式汇报"],
+    gradient: "from-indigo-600 via-slate-500 to-slate-300",
+    shell: "bg-[#141b2d]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-indigo-600",
+    mutedTone: "bg-indigo-100",
+    linesTone: "bg-slate-300",
+  },
+  "neo-modern": {
+    summary: "新版现代风格，视觉更鲜明，适合方案展示、产品介绍与重点表达。",
+    tags: ["新版", "视觉强化", "方案展示"],
+    gradient: "from-fuchsia-500 via-rose-400 to-orange-300",
+    shell: "bg-[#2a1231]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-rose-500",
+    mutedTone: "bg-rose-100",
+    linesTone: "bg-slate-300",
+  },
+  "neo-swift": {
+    summary: "新版迅捷风格，节奏更明快，适合路演展示、数据快报与结论先行表达。",
+    tags: ["新版", "节奏明快", "路演展示"],
+    gradient: "from-emerald-500 via-teal-400 to-lime-300",
+    shell: "bg-[#0d2c29]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-emerald-500",
+    mutedTone: "bg-emerald-100",
+    linesTone: "bg-slate-300",
+  },
+  general: {
+    summary: "经典通用模板，适合常规商务汇报、周报月报和多场景演示。",
+    tags: ["经典", "商务蓝", "多场景"],
+    gradient: "from-sky-500 via-cyan-500 to-blue-300",
+    shell: "bg-[#0f1b33]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-sky-500",
+    mutedTone: "bg-sky-100",
+    linesTone: "bg-slate-300",
+  },
+  modern: {
+    summary: "经典现代模板，适合产品介绍、品牌表达和较强视觉感的页面。",
+    tags: ["经典", "现代感", "视觉型"],
+    gradient: "from-violet-500 via-fuchsia-400 to-rose-300",
+    shell: "bg-[#28163d]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-fuchsia-500",
+    mutedTone: "bg-fuchsia-100",
+    linesTone: "bg-slate-300",
+  },
+  standard: {
+    summary: "经典标准模板，适合制度宣讲、项目汇报、章节内容较重的文稿。",
+    tags: ["经典", "正式感", "章节清晰"],
+    gradient: "from-slate-700 via-slate-600 to-slate-300",
+    shell: "bg-[#161c28]",
+    slideTone: "bg-white",
+    accentTone: "bg-slate-900",
+    mutedTone: "bg-slate-100",
+    linesTone: "bg-slate-200",
+  },
+  swift: {
+    summary: "经典迅捷模板，适合快节奏汇报、数据概览与行动建议型页面。",
+    tags: ["经典", "节奏快", "重点突出"],
+    gradient: "from-amber-500 via-orange-400 to-yellow-200",
+    shell: "bg-[#2b1e0f]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-amber-500",
+    mutedTone: "bg-amber-100",
+    linesTone: "bg-slate-300",
+  },
+  corporate: {
+    summary: "旧模板别名，已对应到经典标准模板。",
+    tags: ["旧别名", "正式汇报"],
+    gradient: "from-slate-700 via-slate-600 to-slate-300",
+    shell: "bg-[#161c28]",
+    slideTone: "bg-white",
+    accentTone: "bg-slate-900",
+    mutedTone: "bg-slate-100",
+    linesTone: "bg-slate-200",
+  },
+  minimal: {
+    summary: "旧模板别名，已对应到经典现代模板。",
+    tags: ["旧别名", "视觉型"],
+    gradient: "from-violet-500 via-fuchsia-400 to-rose-300",
+    shell: "bg-[#28163d]",
+    slideTone: "bg-white/95",
+    accentTone: "bg-fuchsia-500",
+    mutedTone: "bg-fuchsia-100",
+    linesTone: "bg-slate-300",
+  },
+};
+const normalizeStandalonePptTemplateId = (value) => {
+  const templateId = String(value || "").trim();
+  if (!templateId) return "";
+  return STANDALONE_PPT_TEMPLATE_ID_ALIASES[templateId] || templateId;
+};
+const sortStandalonePptTemplateCatalog = (items) => {
+  const templateOrderIndex = new Map(STANDALONE_PPT_TEMPLATE_ORDER.map((item, index) => [item, index]));
+  return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
+    const leftId = normalizeStandalonePptTemplateId(left?.template_id || left?.id || "");
+    const rightId = normalizeStandalonePptTemplateId(right?.template_id || right?.id || "");
+    const leftIndex = templateOrderIndex.has(leftId) ? templateOrderIndex.get(leftId) : Number.MAX_SAFE_INTEGER;
+    const rightIndex = templateOrderIndex.has(rightId) ? templateOrderIndex.get(rightId) : Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+    const leftName = String(left?.name || leftId || "").trim();
+    const rightName = String(right?.name || rightId || "").trim();
+    return leftName.localeCompare(rightName, "zh-CN");
+  });
+};
+const getStandalonePptTemplateLabel = (template) => {
+  const rawTemplateId = String(template?.template_id || template?.id || template || "").trim();
+  const templateId = normalizeStandalonePptTemplateId(rawTemplateId);
+  if (!templateId) return "";
+  const fallbackName = typeof template === "object" && template
+    ? String(template.name || template.template_name || "").trim()
+    : "";
+  return STANDALONE_PPT_TEMPLATE_LABELS[templateId] || STANDALONE_PPT_TEMPLATE_LABELS[rawTemplateId] || fallbackName || templateId;
+};
+const getStandalonePptTemplatePreviewMeta = (template) => {
+  const rawTemplateId = String(template?.template_id || template?.id || template || "").trim();
+  const templateId = normalizeStandalonePptTemplateId(rawTemplateId);
+  return STANDALONE_PPT_TEMPLATE_PREVIEW_META[templateId]
+    || STANDALONE_PPT_TEMPLATE_PREVIEW_META[rawTemplateId]
+    || STANDALONE_PPT_TEMPLATE_PREVIEW_META.general;
+};
+const getStandalonePptContentFocusConfig = (focusKey) => {
+  const rawValue = String(focusKey || '').trim();
+  if (!rawValue) return STANDALONE_PPT_CONTENT_FOCUS_OPTIONS[0];
+  return STANDALONE_PPT_CONTENT_FOCUS_OPTIONS.find((item) => item.key === rawValue)
+    || STANDALONE_PPT_CONTENT_FOCUS_OPTIONS.find((item) => item.label === rawValue)
+    || STANDALONE_PPT_CONTENT_FOCUS_OPTIONS[0];
+};
+const getStandalonePptTopicSuggestionPrompt = (topic) =>
+  STANDALONE_PPT_TOPIC_SUGGESTION_PROMPTS[String(topic || "").trim()]
+  || `PPT主题：\n内容方向：${String(topic || "").trim()}`;
+const StandalonePptSelect = ({
+  label,
+  value,
+  options,
+  onChange,
+  disabled = false,
+  className = "",
+}) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
+        setOpen(false);
+      }
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  const normalizedOptions = Array.isArray(options) ? options : [];
+  const selectedOption = normalizedOptions.find((item) => String(item?.value) === String(value)) || normalizedOptions[0];
+  const selectedLabel = String(selectedOption?.label || value || "").trim();
+
+  return (
+    <div ref={rootRef} className={`relative ${className}`}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((prev) => !prev)}
+        className="inline-flex min-w-[112px] items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-left text-sm text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-gray-100 dark:hover:bg-slate-800"
+      >
+        <span className="shrink-0 text-gray-500 dark:text-gray-300">{label}</span>
+        <span className="max-w-[140px] flex-1 truncate font-medium text-gray-900 dark:text-white">{selectedLabel}</span>
+        <ChevronDown size={15} className={`shrink-0 text-gray-400 transition-transform dark:text-gray-500 ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && normalizedOptions.length > 0 && (
+        <div className="absolute left-0 top-full z-30 mt-2 min-w-full overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-[#081224]">
+          <div className="max-h-72 overflow-y-auto p-1.5">
+            {normalizedOptions.map((item) => {
+              const itemValue = item?.value;
+              const active = String(itemValue) === String(selectedOption?.value);
+              return (
+                <button
+                  key={String(itemValue)}
+                  type="button"
+                  onClick={() => {
+                    onChange?.(itemValue);
+                    setOpen(false);
+                  }}
+                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition ${
+                    active
+                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/12 dark:text-emerald-300"
+                      : "text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-slate-800/90"
+                  }`}
+                >
+                  <span className="flex-1 truncate">{item.label}</span>
+                  {active && <Check size={14} className="shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+const StandaloneTemplatePreviewCard = ({
+  template,
+  selected = false,
+  onSelect,
+}) => {
+  const previewMeta = getStandalonePptTemplatePreviewMeta(template);
+  const templateId = normalizeStandalonePptTemplateId(template?.template_id || template?.id || "");
+  const title = getStandalonePptTemplateLabel(template);
+  const description = String(previewMeta.summary || template?.description || "").trim();
+  const thumbnailUrl = String(template?.thumbnail_url || "").trim();
+  const tags = Array.isArray(previewMeta.tags) ? previewMeta.tags : [];
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect?.(templateId)}
+      className={`group w-full overflow-hidden rounded-2xl border text-left transition ${
+        selected
+          ? "border-emerald-400 bg-emerald-50/80 shadow-[0_18px_60px_rgba(16,185,129,0.18)] dark:border-emerald-400/70 dark:bg-emerald-500/10"
+          : "border-gray-200 bg-white shadow-sm hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-xl dark:border-slate-700 dark:bg-slate-900/90 dark:hover:border-emerald-500/40"
+      }`}
+    >
+      <div className={`relative h-44 overflow-hidden bg-gradient-to-br ${previewMeta.gradient}`}>
+        <div className={`absolute inset-0 ${previewMeta.shell} opacity-90`} />
+        {thumbnailUrl ? (
+          <div
+            className="absolute inset-0 bg-cover bg-center opacity-95"
+            style={{ backgroundImage: `url(${thumbnailUrl})` }}
+          />
+        ) : (
+          <div className="absolute inset-0 p-4">
+            <div className="grid h-full grid-cols-[1.15fr_0.85fr] gap-3">
+              <div className={`rounded-2xl ${previewMeta.slideTone} p-3 shadow-lg`}>
+                <div className={`h-2.5 w-20 rounded-full ${previewMeta.accentTone}`} />
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div className={`h-14 rounded-xl ${previewMeta.mutedTone}`} />
+                  <div className={`h-14 rounded-xl ${previewMeta.mutedTone}`} />
+                </div>
+                <div className="mt-3 space-y-2">
+                  <div className={`h-2 rounded-full ${previewMeta.linesTone}`} />
+                  <div className={`h-2 w-4/5 rounded-full ${previewMeta.linesTone}`} />
+                </div>
+              </div>
+              <div className="flex flex-col gap-3">
+                <div className={`flex-1 rounded-2xl ${previewMeta.slideTone} p-3 shadow-lg`}>
+                  <div className={`h-2.5 w-14 rounded-full ${previewMeta.accentTone}`} />
+                  <div className="mt-3 space-y-2">
+                    <div className={`h-2 rounded-full ${previewMeta.linesTone}`} />
+                    <div className={`h-2 w-3/4 rounded-full ${previewMeta.linesTone}`} />
+                    <div className={`h-2 w-2/3 rounded-full ${previewMeta.linesTone}`} />
+                  </div>
+                </div>
+                <div className={`h-16 rounded-2xl ${previewMeta.slideTone} p-3 shadow-lg`}>
+                  <div className="flex h-full items-end gap-1.5">
+                    <div className={`w-3 rounded-md ${previewMeta.linesTone}`} style={{ height: "38%" }} />
+                    <div className={`w-3 rounded-md ${previewMeta.accentTone}`} style={{ height: "78%" }} />
+                    <div className={`w-3 rounded-md ${previewMeta.linesTone}`} style={{ height: "55%" }} />
+                    <div className={`w-3 rounded-md ${previewMeta.linesTone}`} style={{ height: "68%" }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="absolute left-4 top-4 inline-flex items-center gap-1.5 rounded-full bg-white/14 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur">
+          <Layout size={12} />
+          {templateId || "template"}
+        </div>
+        {selected && (
+          <div className="absolute right-4 top-4 inline-flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg">
+            <Check size={16} />
+          </div>
+        )}
+      </div>
+      <div className="space-y-3 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-base font-semibold text-gray-900 dark:text-white">{title}</div>
+            <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">{description || "适合当前 PPT 生成场景。"}</div>
+          </div>
+          <div className={`shrink-0 rounded-full px-2 py-1 text-[11px] font-medium ${
+            selected
+              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-200"
+              : "bg-gray-100 text-gray-600 dark:bg-slate-800 dark:text-gray-300"
+          }`}>
+            {String(template?.source || "builtin").trim() || "builtin"}
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {tags.map((tag) => (
+            <span
+              key={`${templateId}-${tag}`}
+              className="rounded-full bg-gray-100 px-2.5 py-1 text-[11px] text-gray-600 dark:bg-slate-800 dark:text-gray-300"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>
+    </button>
+  );
+};
 const WRITING_CONSULTING_TYPE_OPTIONS = ["流程优化建议", "合规风控建议", "增长策略咨询", "系统落地方案"];
 const WRITING_CONSULTING_ROLE_OPTIONS = ["管理层", "运营团队", "销售团队", "财务风控团队", "IT实施团队"];
 const WRITING_OUTPUT_FORMAT_OPTIONS = ["执行清单", "分阶段计划", "OKR/KPI方案", "风险-对策矩阵"];
 const WRITING_PROJECT_CONTEXT = "项目是 Enterprise Intelligent Office Agent 2.0，面向进出口企业，核心能力包括：智能对话、会议纪要、OCR识别、智能审单、企业数据库查询、数据决策驾驶舱，以及本地/云模型切换。";
+const WRITING_FIELD_SUGGESTIONS = {
+  report: {
+    referenceContent: "围绕“企业智能办公助手”场景，突出会议纪要、OCR识别、智能审单、数据决策等能力，强调可在进出口企业真实业务中落地。",
+    keywords: "进出口企业, 智能办公, 会议纪要, OCR识别, 智能审单",
+  },
+  ppt: {
+    analysisInput: "PPT主题：进出口企业智能办公升级方案\n汇报目标：向管理层说明当前问题、建设思路、预期收益和推进计划。\n希望重点突出：效率提升、风险控制、跨部门协同和数据决策价值。",
+  },
+  email: {
+    consultingContext: "公司准备将智能办公系统用于进出口业务全流程，需要给出可执行的落地建议。",
+    consultingConstraints: "预算有限；需分阶段实施；合规优先；兼容现有流程。",
+  },
+};
 const ONBOARDING_STORAGE_PREFIX = "onboarding_seen_v1_";
 const ONBOARDING_MESSAGES = [
   "顶部左侧的模式下拉可切换到报告/PPT/邮件写作、会议纪要、OCR、审单等场景。",
@@ -141,22 +587,6 @@ const normalizePresentonEditUrl = (rawUrl) => {
     }
 };
 
-const parseTemplatePreviewPath = (rawPathname) => {
-    const pathname = String(rawPathname || "").trim();
-    if (!pathname) return null;
-    const cleanPath = pathname.replace(/^\/api\/presentation\/presenton\/proxy/i, "");
-    const matched = cleanPath.match(/^\/template-preview\/([^/?#]+)/i);
-    if (!matched) return null;
-    const routeIdRaw = matched[1] || "";
-    let routeId = routeIdRaw;
-    try {
-        routeId = decodeURIComponent(routeIdRaw);
-    } catch {}
-    const templateId = String(routeId || "").trim();
-    if (!templateId) return null;
-    return { routeId: String(routeId || templateId), templateId };
-};
-
 const buildFallbackOutlineSlides = (count = 8) => {
     const safeCount = Math.max(3, Math.min(40, Number(count) || 8));
     return Array.from({ length: safeCount }, (_, idx) => ({
@@ -166,6 +596,262 @@ const buildFallbackOutlineSlides = (count = 8) => {
         notes: "",
     }));
 };
+
+const PPT_OUTLINE_PREVIEW_SECTIONS = getStandalonePptContentFocusConfig(STANDALONE_PPT_DEFAULT_CONTENT_FOCUS).previewSections;
+const STANDALONE_PPT_METRIC_HINT_RE = /(\d+(?:\.\d+)?%|ROI|同比|环比|增长|下降|提升|万元|亿元|人天|小时|天|周|月|季度|年度)/i;
+const STANDALONE_PPT_EVIDENCE_HINT_RE = /(数据|指标|案例|样本|调研|反馈|对比|图表|结果|证据|事实依据)/i;
+const STANDALONE_PPT_ACTION_HINT_RE = /(行动|动作|计划|推进|执行|落实|安排|实施|优化|建议|下一步|里程碑)/i;
+const STANDALONE_PPT_CONTEXT_HINT_RE = /(背景|现状|场景|目标|问题|痛点|机会|定义|范围|对象)/i;
+const STANDALONE_PPT_EXAMPLE_HINT_RE = /(案例|示例|演示|场景|易错|注意事项|提醒)/i;
+const STANDALONE_PPT_TIME_OWNER_HINT_RE = /(本周|本月|季度|年度|阶段|时间节点|里程碑|负责人|牵头|协同|部门|排期)/i;
+const STANDALONE_PPT_AGENDA_TITLE_RE = /(目录|议程|章节安排|内容导航)/;
+const STANDALONE_PPT_SUMMARY_TITLE_RE = /(汇报摘要|提案摘要|核心结论|总结|结语|一句话价值|汇报结论)/;
+const STANDALONE_PPT_BACKGROUND_TITLE_RE = /(背景|目标|现状|场景|痛点|机会|研究背景|概念导入)/;
+const STANDALONE_PPT_ISSUE_TITLE_RE = /(问题|挑战|风险|原因|复盘|难点|瓶颈|常见问题)/;
+const STANDALONE_PPT_ACTION_TITLE_RE = /(方案|路径|动作|计划|建议|实施|分工|资源|下一步|实操建议|练习复盘)/;
+const STANDALONE_PPT_TRAINING_TITLE_RE = /(知识拆解|方法步骤|案例演示|注意事项|实操建议|练习复盘)/;
+const STANDALONE_PPT_GENERIC_POINT_RE = /^(补充|说明|围绕|提炼|介绍|梳理|分析|给出|明确|保留)/;
+const STANDALONE_PPT_LANGUAGE_LEAK_RE = /\s*[·•｜|]\s*(?:Chinese|中文|简体中文|Simplified Chinese|zh-CN|zh_cn)\s*$/i;
+
+const createIdlePresentonProgress = () => ({
+    taskId: '',
+    status: 'idle',
+    progress: 0,
+    message: '',
+    previewLines: [],
+    previewCursor: 0,
+});
+
+const sanitizeStandaloneHistoryLine = (value = '', maxLength = 300) =>
+    String(value || '')
+        .replace(/\r?\n+/g, '；')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, maxLength);
+
+const sanitizeStandaloneOutlineSubtitle = (value = '', focusLabel = '') => {
+    const raw = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return '';
+    const cleaned = raw
+        .replace(STANDALONE_PPT_LANGUAGE_LEAK_RE, '')
+        .replace(/^(?:language|语言)\s*[:：]\s*(?:Chinese|中文|简体中文|Simplified Chinese|zh-CN|zh_cn)\s*$/i, '')
+        .trim();
+    if (!cleaned) return '';
+    const normalizedFocus = String(focusLabel || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (normalizedFocus && cleaned.toLowerCase() === normalizedFocus) {
+        return '';
+    }
+    return cleaned;
+};
+
+const parseStructuredStandaloneOutlineHistory = (rawText = '') => {
+    const lines = String(rawText || '')
+        .split(/\r?\n/)
+        .map((line) => String(line || '').trim())
+        .filter(Boolean);
+    if (!lines.length) return null;
+
+    const headerMatch = lines[0].match(/\]\s*(.+?)(?:[（(]\s*(\d+)\s*页\s*[）)])?$/);
+    const title = String(headerMatch?.[1] || '业务汇报').trim() || '业务汇报';
+    let subtitle = '';
+    let contentFocus = '';
+    const slides = [];
+    let currentSlide = null;
+
+    const pushCurrentSlide = () => {
+        if (!currentSlide?.title) return;
+        slides.push({
+            index: slides.length + 1,
+            title: currentSlide.title,
+            points: Array.isArray(currentSlide.points) && currentSlide.points.length
+                ? currentSlide.points.slice(0, 10)
+                : ["补充本页核心观点", "补充本页关键支撑信息"],
+            notes: String(currentSlide.notes || '').trim(),
+        });
+    };
+
+    lines.slice(1).forEach((line) => {
+        if (line.startsWith('副标题：')) {
+            subtitle = line.slice('副标题：'.length).trim();
+            return;
+        }
+        if (line.startsWith('内容导向：')) {
+            contentFocus = line.slice('内容导向：'.length).trim();
+            return;
+        }
+
+        const slideMatch = line.match(/^(\d+)\.\s*(.+)$/);
+        if (slideMatch) {
+            pushCurrentSlide();
+            currentSlide = {
+                title: String(slideMatch[2] || '').trim(),
+                points: [],
+                notes: '',
+            };
+            return;
+        }
+
+        if (!currentSlide) return;
+        if (/^(?:[-*•]|\u2022)\s*/.test(line)) {
+            const point = line.replace(/^(?:[-*•]|\u2022)\s*/, '').trim();
+            if (point) currentSlide.points.push(point);
+            return;
+        }
+        if (/^(?:备注|讲解备注|讲解展开)[:：]\s*/.test(line)) {
+            currentSlide.notes = line.replace(/^(?:备注|讲解备注|讲解展开)[:：]\s*/, '').trim();
+        }
+    });
+    pushCurrentSlide();
+
+    if (!slides.length) return null;
+    return {
+        title,
+        subtitle: sanitizeStandaloneOutlineSubtitle(subtitle, contentFocus),
+        contentFocus,
+        slides,
+    };
+};
+
+const formatStandaloneOutlineHistory = (outlinePayload, headerLabel = '[智能创作/PPT大纲]') => {
+    const focusConfig = getStandalonePptContentFocusConfig(
+        outlinePayload?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
+    );
+    const safeTitle = String(outlinePayload?.title || '业务汇报').trim() || '业务汇报';
+    const normalized = {
+        title: safeTitle,
+        subtitle: sanitizeStandaloneOutlineSubtitle(
+            outlinePayload?.subtitle || '',
+            focusConfig?.label || '',
+        ),
+        slides: (Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [])
+            .map((slide, idx) => ({
+                index: idx + 1,
+                title: String(slide?.title || `第 ${idx + 1} 页`).trim(),
+                points: (Array.isArray(slide?.points) ? slide.points : [])
+                    .map((item) => String(item || '').trim())
+                    .filter(Boolean)
+                    .slice(0, 10),
+                notes: String(slide?.notes || '').trim(),
+            }))
+            .filter((slide) => slide.title),
+    };
+    const slides = Array.isArray(normalized?.slides) ? normalized.slides : [];
+    const lines = [`${headerLabel} ${normalized.title || '业务汇报'}（${slides.length || 0}页）`];
+    if (normalized.subtitle) {
+        lines.push(`副标题：${sanitizeStandaloneHistoryLine(normalized.subtitle, 160)}`);
+    }
+    if (focusConfig?.label) {
+        lines.push(`内容导向：${focusConfig.label}`);
+    }
+    slides.forEach((slide, idx) => {
+        lines.push(`${idx + 1}. ${sanitizeStandaloneHistoryLine(slide?.title || `第 ${idx + 1} 页`, 120)}`);
+        const points = Array.isArray(slide?.points) ? slide.points : [];
+        points
+            .map((item) => sanitizeStandaloneHistoryLine(item, 220))
+            .filter(Boolean)
+            .slice(0, 6)
+            .forEach((point) => lines.push(`- ${point}`));
+        const notes = sanitizeStandaloneHistoryLine(slide?.notes || '', 260);
+        if (notes) {
+            lines.push(`讲解备注：${notes}`);
+        }
+    });
+    return lines.join('\n');
+};
+
+const pickOutlinePreviewTopic = (rawText = '', fallback = '业务汇报') => {
+    const lines = String(rawText || '')
+        .split(/\r?\n/)
+        .map((line) => String(line || '').trim())
+        .filter(Boolean);
+    for (const rawLine of lines) {
+        const line = rawLine
+            .replace(/^(分析对象|主题|标题|题目|课题|研究主题|汇报主题|演示主题|文档名称|参考文档|文档补充说明)\s*[：:]\s*/i, '')
+            .trim();
+        if (!line) continue;
+        const sentence = line.split(/[。！？!?；;]/)[0]?.trim() || '';
+        if (sentence) return sentence.slice(0, 60);
+    }
+    return String(fallback || '业务汇报').trim() || '业务汇报';
+};
+
+const buildOutlinePreviewLinesFromResolved = (resolved) => {
+    const slideCount = Math.max(3, Math.min(40, Number(resolved?.slideCount) || 8));
+    const focusConfig = getStandalonePptContentFocusConfig(resolved?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
+    const inputMode = String(resolved?.inputMode || 'topic').trim() || 'topic';
+    const rawSource = [resolved?.documentName, resolved?.analysisInput, resolved?.typedInput].filter(Boolean).join('\n');
+    const topic = pickOutlinePreviewTopic(rawSource, resolved?.documentName || resolved?.typedInput || '业务汇报');
+    const subtitle = `${focusConfig.label} · 预计 ${slideCount} 页`;
+    const sections = Array.isArray(focusConfig.previewSections) && focusConfig.previewSections.length
+        ? focusConfig.previewSections
+        : PPT_OUTLINE_PREVIEW_SECTIONS;
+    const lines = [`标题：${topic}`, `副标题：${subtitle}`, `输入模式：${inputMode}`];
+    for (let idx = 0; idx < slideCount; idx += 1) {
+        const sectionTitle = sections[idx] || `补充页 ${idx + 1}`;
+        lines.push(`${idx + 1}. ${sectionTitle}`);
+        if (idx > 0) {
+            lines.push(`   - 围绕“${topic}”补全本页核心观点`);
+            lines.push("   - 补充关键事实、分析逻辑或数据依据");
+        }
+    }
+    return lines;
+};
+
+const buildOutlinePreviewLinesFromOutline = (outlinePayload) => {
+    const title = String(outlinePayload?.title || '业务汇报').trim() || '业务汇报';
+    const focusConfig = getStandalonePptContentFocusConfig(
+        outlinePayload?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
+    );
+    const subtitle = sanitizeStandaloneOutlineSubtitle(
+        outlinePayload?.subtitle || '',
+        focusConfig?.label || '',
+    );
+    const slides = Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [];
+    const lines = [`标题：${title}`];
+    if (subtitle) lines.push(`副标题：${subtitle}`);
+    slides.forEach((slide, idx) => {
+        const slideTitle = String(slide?.title || `第 ${idx + 1} 页`).trim();
+        lines.push(`${idx + 1}. ${slideTitle}`);
+        const points = Array.isArray(slide?.points)
+            ? slide.points.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 3)
+            : [];
+        points.forEach((point) => lines.push(`   - ${point}`));
+    });
+    return lines.slice(0, 42);
+};
+
+const compactStandaloneSourceContext = (rawText = '', maxItems = 6) =>
+    Array.from(new Set(
+        String(rawText || '')
+            .split(/\r?\n/)
+            .map((line) => String(line || '').trim())
+            .filter(Boolean)
+            .flatMap((line) => line.split(/[；;。！？!?]/))
+            .map((item) => item.replace(/\s+/g, ' ').trim())
+            .filter(Boolean),
+    )).slice(0, maxItems);
+
+const normalizeStandaloneOutlineTextLine = (value = '') =>
+    String(value || '')
+        .replace(/^#{1,6}\s*/, '')
+        .replace(/^\s*[-*•]\s*/, '')
+        .replace(/^\s*\d+\s*[\.、\)\）]\s*/, '')
+        .replace(/^\s*[一二三四五六七八九十]+\s*[、\.\)\）]\s*/, '')
+        .trim();
+
+const splitStandaloneOutlinePointCandidates = (value = '') =>
+    Array.from(new Set(
+        String(value || '')
+            .split(/\r?\n/)
+            .flatMap((line) => {
+                const normalizedLine = normalizeStandaloneOutlineTextLine(line);
+                if (!normalizedLine) return [];
+                return normalizedLine
+                    .split(/[；;。！？!?]/)
+                    .map((item) => item.replace(/\s+/g, ' ').trim())
+                    .filter(Boolean);
+            }),
+    )).slice(0, 36);
 
 const parseStandalonePptHistoryState = (messages = []) => {
     const contexts = (Array.isArray(messages) ? messages : [])
@@ -209,21 +895,28 @@ const parseStandalonePptHistoryState = (messages = []) => {
         return line ? String(line.slice(cleanPrefix.length)).trim() : "";
     };
 
+    const parsedStructuredOutline = parseStructuredStandaloneOutlineHistory(latestOutline?.content || "");
     const outlineLines = splitLines(latestOutline?.content || "");
     const outlineHeader = parseHeader(outlineLines[0] || "");
-    const outlineSubtitle = extractLineValue(outlineLines, "副标题：");
+    const outlineContentFocusLabel = parsedStructuredOutline?.contentFocus || extractLineValue(outlineLines, "内容导向：");
+    const outlineSubtitle = sanitizeStandaloneOutlineSubtitle(
+        parsedStructuredOutline?.subtitle || extractLineValue(outlineLines, "副标题："),
+        outlineContentFocusLabel,
+    );
     const outlineSlideTitles = outlineLines
         .filter((line) => /^\d+\.\s*/.test(line))
         .map((line) => line.replace(/^\d+\.\s*/, "").trim())
         .filter(Boolean);
-    const outlineSlides = outlineSlideTitles.length
-        ? outlineSlideTitles.map((title, idx) => ({
-              index: idx + 1,
-              title,
-              points: ["补充本页核心观点", "补充本页关键支撑信息"],
-              notes: "",
-          }))
-        : buildFallbackOutlineSlides(outlineHeader.count || 8);
+    const outlineSlides = Array.isArray(parsedStructuredOutline?.slides) && parsedStructuredOutline.slides.length
+        ? parsedStructuredOutline.slides
+        : outlineSlideTitles.length
+            ? outlineSlideTitles.map((title, idx) => ({
+                  index: idx + 1,
+                  title,
+                  points: ["补充本页核心观点", "补充本页关键支撑信息"],
+                  notes: "",
+              }))
+            : buildFallbackOutlineSlides(outlineHeader.count || 8);
 
     const resultLines = splitLines(latestResult?.content || "");
     const taskLines = splitLines(latestTask?.content || "");
@@ -242,7 +935,7 @@ const parseStandalonePptHistoryState = (messages = []) => {
     const latestHeader = String(latestLines[0] || "").trim();
     const latestType = String(latest?.func_type || "").toLowerCase();
 
-    let progress = { taskId: "", status: "idle", progress: 0, message: "" };
+    let progress = createIdlePresentonProgress();
     if (latestType === "ppt_result") {
         const isFailed = latestHeader.includes("失败") || !!errorText;
         progress = {
@@ -250,6 +943,8 @@ const parseStandalonePptHistoryState = (messages = []) => {
             status: isFailed ? "failed" : "completed",
             progress: isFailed ? 0 : 100,
             message: isFailed ? (errorText || latestHeader || "PPT 生成失败") : (latestHeader || "PPT 生成完成"),
+            previewLines: [],
+            previewCursor: 0,
         };
     } else if (latestType === "ppt_task") {
         progress = {
@@ -257,13 +952,17 @@ const parseStandalonePptHistoryState = (messages = []) => {
             status: "pending",
             progress: 35,
             message: latestHeader || "任务已提交，正在生成...",
+            previewLines: [],
+            previewCursor: 0,
         };
     } else if (latestType === "ppt_outline") {
         progress = {
             taskId: "",
             status: "outline_ready",
             progress: 100,
-            message: latestHeader || "大纲已生成",
+            message: latestHeader || "内容结构已就绪",
+            previewLines: [],
+            previewCursor: 0,
         };
     }
 
@@ -271,7 +970,7 @@ const parseStandalonePptHistoryState = (messages = []) => {
         ? {
               provider: "presenton",
               slideCount: outlineSlides.length || resultHeader.count || 8,
-              framework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+              contentFocus: STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
               downloadUrl: downloadUrl || "",
               editUrl: normalizePresentonEditUrl(editUrl || ""),
               finishedAt: latestResult?.created_at || new Date().toISOString(),
@@ -281,9 +980,10 @@ const parseStandalonePptHistoryState = (messages = []) => {
 
     return {
         outline: {
-            title: outlineHeader.title || resultHeader.title || "业务汇报",
+            title: parsedStructuredOutline?.title || outlineHeader.title || resultHeader.title || "业务汇报",
             subtitle: outlineSubtitle,
             slides: outlineSlides,
+            contentFocus: getStandalonePptContentFocusConfig(outlineContentFocusLabel || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS).key,
         },
         template: restoredTemplate,
         result: resultPayload,
@@ -517,7 +1217,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   // 通用内容面板状态
   const [panelContent, setPanelContent] = useState('');
-  const [auditDocType, setAuditDocType] = useState('');
+  const [auditDocType, setAuditDocType] = useState('contract');
   const [auditModelBackend, setAuditModelBackend] = useState('local');
   const [auditFile, setAuditFile] = useState(null);
   const [auditNotice, setAuditNotice] = useState('');
@@ -546,11 +1246,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [writingEntryMode, setWritingEntryMode] = useState('root');
   const [standalonePptForm, setStandalonePptForm] = useState({
     inputMode: STANDALONE_PPT_INPUT_MODES[0].key,
-    analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+    contentFocus: STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
     pptSlideCount: 8,
     analysisInput: "",
     documentName: "",
-    requireMetrics: true,
+    requireMetrics: getStandalonePptContentFocusConfig(STANDALONE_PPT_DEFAULT_CONTENT_FOCUS).emphasizeMetrics,
     includeImages: false,
     template: 'general',
   });
@@ -564,12 +1264,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [isTemplateCatalogLoading, setIsTemplateCatalogLoading] = useState(false);
   const [standalonePptResult, setStandalonePptResult] = useState(null);
   const [isPresentonGenerating, setIsPresentonGenerating] = useState(false);
-  const [presentonProgress, setPresentonProgress] = useState({
-    taskId: '',
-    status: 'idle',
-    progress: 0,
-    message: '',
-  });
+  const [presentonProgress, setPresentonProgress] = useState(() => createIdlePresentonProgress());
+  const presentonPollingTaskRef = useRef('');
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
@@ -583,7 +1279,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const [userProfile, setUserProfile] = useState({ id: 'anonymous', name: 'User', avatar: '' });
   const [currentSessionId, setCurrentSessionId] = useState(null);
+  const currentSessionIdRef = useRef(null);
   const [sessionList, setSessionList] = useState([]);
+  const sessionRefreshPromiseRef = useRef(null);
+  const sessionRefreshQueuedUidRef = useRef('');
   const [isRecordingMode, setIsRecordingMode] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
@@ -667,9 +1366,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const newChatHandlerRef = useRef(null);
   const hasHandledInitialRouteRef = useRef(false);
   const isApplyingRouteSessionRef = useRef(false);
-  const templatePreviewFrameRef = useRef(null);
-  const templatePreviewPollRef = useRef(null);
-
 
   const dropdownRef = useRef(null);
   const mobileDropdownRef = useRef(null);
@@ -1129,6 +1825,45 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     };
   }, [shouldPreloadMarkdown]);
 
+  const refreshSessionList = useCallback(async (uid, { silent = true } = {}) => {
+    const safeUid = String(uid || userProfile.id || 'anonymous').trim();
+    if (!safeUid || safeUid === 'undefined') return [];
+
+    if (sessionRefreshPromiseRef.current) {
+      sessionRefreshQueuedUidRef.current = safeUid;
+      return sessionRefreshPromiseRef.current;
+    }
+
+    if (!silent) {
+      setIsSessionsLoading(true);
+    }
+
+    const request = (async () => {
+      try {
+        const sessions = await historyApi.getSessions(safeUid);
+        setSessionList(sessions || []);
+        return sessions || [];
+      } catch (e) {
+        console.error('Failed to load sessions', e);
+        return [];
+      } finally {
+        sessionRefreshPromiseRef.current = null;
+        if (!silent) {
+          setIsSessionsLoading(false);
+        }
+
+        const queuedUid = sessionRefreshQueuedUidRef.current;
+        if (queuedUid) {
+          sessionRefreshQueuedUidRef.current = '';
+          void refreshSessionList(queuedUid, { silent: true });
+        }
+      }
+    })();
+
+    sessionRefreshPromiseRef.current = request;
+    return request;
+  }, [userProfile.id]);
+
   useEffect(() => {
     let isActive = true;
     const schedule = (fn, delay = 500) => {
@@ -1138,19 +1873,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
       const id = setTimeout(fn, delay);
       return () => clearTimeout(id);
-    };
-
-    const loadSessions = async (uid) => {
-      if (!isActive) return;
-      setIsSessionsLoading(true);
-      try {
-        const sessions = await historyApi.getSessions(uid);
-        if (isActive) setSessionList(sessions || []);
-      } catch (e) {
-        console.error('Failed to load sessions', e);
-      } finally {
-        if (isActive) setIsSessionsLoading(false);
-      }
     };
 
     const loadProfile = async () => {
@@ -1181,7 +1903,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (!isActive) return;
       const uid = profile.id || 'anonymous';
       if (uid && uid !== 'undefined') {
-        schedule(() => loadSessions(uid), 600);
+        schedule(() => {
+          void refreshSessionList(uid, { silent: false });
+        }, 600);
       } else {
         if (isActive) setIsSessionsLoading(false);
       }
@@ -1192,7 +1916,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       isActive = false;
       cancelProfile();
     };
-  }, []);
+  }, [refreshSessionList]);
 
   useEffect(() => {
     if (isProfileLoading || isSessionsLoading) return;
@@ -1548,7 +2272,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       await savePanelContext(targetSessionId, serialized, 'ocr_context');
       if (!currentSessionId) {
           const uid = userProfile.id || 'anonymous';
-          historyApi.getSessions(uid).then(sessions => setSessionList(sessions || []));
+          void refreshSessionList(uid);
       }
       return targetSessionId;
   };
@@ -1818,6 +2542,46 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           return;
       }
 
+      const currentCaseDocs = Array.isArray(auditState?.caseDocuments) ? auditState.caseDocuments : [];
+      const hasContractDoc = currentCaseDocs.some((doc) => {
+          const status = String(doc?.status || '').trim().toLowerCase();
+          if (status === 'failed' || status === 'cancelled') return false;
+          const tag = String(doc?.tag || doc?.doc_type || '').trim().toLowerCase();
+          return tag === 'contract';
+      });
+      const tradeTags = new Set([
+          'invoice',
+          'packing_list',
+          'bill_of_lading',
+          'air_waybill',
+          'customs_declaration',
+          'certificate_of_origin',
+          'purchase_order',
+          'import_declaration',
+          'export_declaration',
+          'trade_case'
+      ]);
+      const hasTradeDoc = currentCaseDocs.some((doc) => {
+          const status = String(doc?.status || '').trim().toLowerCase();
+          if (status === 'failed' || status === 'cancelled') return false;
+          const tag = String(doc?.tag || '').trim().toLowerCase();
+          const docType = String(doc?.doc_type || '').trim().toLowerCase();
+          return tradeTags.has(tag) || tradeTags.has(docType);
+      });
+      const selectedDocType = String(auditDocType || '').trim().toLowerCase();
+      const contractLikeByName = /合同|contract|agreement|协议/i.test(name);
+      const currentUploadIsContract = selectedDocType === 'contract' || ((selectedDocType === '' || selectedDocType === 'auto') && contractLikeByName);
+      const settlementLikeByName = /付款|支付|payment|expense|报销/i.test(name);
+      const currentUploadIsSettlement = ['payment', 'expense'].includes(selectedDocType) || ((selectedDocType === '' || selectedDocType === 'auto') && settlementLikeByName);
+      if (!hasContractDoc && !currentUploadIsContract) {
+          showAuditNotice('请先上传合同主文档，再按顺序上传发票/提单/装箱单/付款单等单据。');
+          return;
+      }
+      if (currentUploadIsSettlement && !hasTradeDoc) {
+          showAuditNotice('请先上传发票/提单/装箱单等履约单据，再上传付款或报销单据。');
+          return;
+      }
+
       setAuditNotice('');
       setAuditFile({ name: file.name, size: file.size, sizeLabel: formatFileSize(file.size) });
       setAuditState((prev) => ({
@@ -1888,7 +2652,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const files = Array.from(e?.target?.files || []);
       if (!files.length) return;
       if (files.length > 1) {
-          showAuditNotice('当前按顺序处理单据包，请逐个上传。');
+          showAuditNotice('系统按顺序处理单据包，请逐个上传（先合同，再其他单据）。');
       }
       await startAuditJob(files[0]);
       if (e?.target) e.target.value = '';
@@ -1958,7 +2722,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               setStandalonePptResult(null);
               setIsPresentonGenerating(false);
               setIsOutlineGenerating(false);
-              setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+              setPresentonProgress(createIdlePresentonProgress());
           }
           return;
       }
@@ -2025,7 +2789,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setStandalonePptResult(null);
       setIsPresentonGenerating(false);
       setIsOutlineGenerating(false);
-      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+      setPresentonProgress(createIdlePresentonProgress());
       setSpeakingIdx(null);
       window.speechSynthesis.cancel();
   };
@@ -2060,7 +2824,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setIsPptWorkspaceOpen(false);
     setIsTemplatePreviewOpen(false);
     setTemplatePreviewSelection({ routeId: '', templateId: '' });
-    setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+    setPresentonProgress(createIdlePresentonProgress());
     setAudioFileUrl(null);
     setCurrentAudioPath(null);
     setPendingFiles([]);
@@ -2242,13 +3006,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           const restoredOutline = restoredStandalonePptState?.outline || null;
           const restoredResult = restoredStandalonePptState?.result || null;
           const restoredTemplate = String(restoredStandalonePptState?.template || "general").trim() || "general";
-          const restoredProgress = restoredStandalonePptState?.progress || { taskId: '', status: 'idle', progress: 0, message: '' };
+          const restoredProgress = restoredStandalonePptState?.progress || createIdlePresentonProgress();
+          const restoredFocusKey = String(restoredStandalonePptState?.outline?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS).trim();
+          const restoredFocus = getStandalonePptContentFocusConfig(restoredFocusKey);
           const hasRestoredOutline = Array.isArray(restoredOutline?.slides) && restoredOutline.slides.length > 0;
           const hasRestoredResult = !!(restoredResult?.downloadUrl || restoredResult?.editUrl || restoredResult?.error);
           setWritingEntryMode('ppt');
           setStandalonePptForm((prev) => ({
             ...buildDefaultStandalonePptFormData(),
-            analysisFramework: prev?.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+            contentFocus: restoredFocus.key,
+            requireMetrics: !!restoredFocus.emphasizeMetrics,
             template: restoredTemplate,
             includeImages: false,
           }));
@@ -2260,6 +3027,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             status: String(restoredProgress?.status || 'idle'),
             progress: Math.max(0, Math.min(100, Number(restoredProgress?.progress) || 0)),
             message: String(restoredProgress?.message || ''),
+            previewLines: Array.isArray(restoredProgress?.previewLines) ? restoredProgress.previewLines : [],
+            previewCursor: Math.max(0, Number(restoredProgress?.previewCursor) || 0),
           });
         } else {
           // 写作模式普通会话回到一级入口（写作助手 / PPT生成）
@@ -2268,7 +3037,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           setStandalonePptOutline(null);
           setStandalonePptResult(null);
           setIsPptWorkspaceOpen(false);
-          setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+          setPresentonProgress(createIdlePresentonProgress());
         }
         setIsOutlineEditorOpen(false);
         setIsTemplatePreviewOpen(false);
@@ -2290,7 +3059,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         setStandalonePptResult(null);
         setIsPresentonGenerating(false);
         setIsOutlineGenerating(false);
-        setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+        setPresentonProgress(createIdlePresentonProgress());
       }
     } catch (e) {
       console.error("Failed to load session", e);
@@ -2340,7 +3109,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setStandalonePptResult(null);
       setIsPresentonGenerating(false);
       setIsOutlineGenerating(false);
-      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+      setPresentonProgress(createIdlePresentonProgress());
       setSpeakingIdx(null);
       window.speechSynthesis.cancel();
   };
@@ -2407,6 +3176,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   }, [models, selectedModel]);
 
   useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  useEffect(() => {
     if (!models.some((item) => item.id === selectedModel)) {
       setSelectedModel(0);
     }
@@ -2455,8 +3228,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const refreshSessionListForCreative = async () => {
       const uid = userProfile.id || 'anonymous';
       try {
-          const sessions = await historyApi.getSessions(uid);
-          setSessionList(sessions || []);
+          await refreshSessionList(uid);
       } catch (e) {
           console.error("Failed to refresh creative sessions", e);
       }
@@ -2475,6 +3247,187 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
       return sid;
   };
+
+  const pollPresentonTaskUntilSettled = useCallback(async ({
+      taskId,
+      outlineTitle,
+      slideCount,
+      templateId,
+      contentFocusLabel,
+      sessionId,
+      shouldPersistResult = true,
+  }) => {
+      const safeTaskId = String(taskId || '').trim();
+      if (!safeTaskId) return null;
+      if (presentonPollingTaskRef.current === safeTaskId) return null;
+
+      presentonPollingTaskRef.current = safeTaskId;
+      const boundSessionId = String(sessionId || currentSessionIdRef.current || '').trim();
+
+      try {
+          const deadline = Date.now() + 15 * 60 * 1000;
+          let finalResult = null;
+
+          while (Date.now() < deadline) {
+              if (boundSessionId && currentSessionIdRef.current && boundSessionId !== currentSessionIdRef.current) {
+                  return null;
+              }
+
+              const statusResult = await presentationApi.getPresentonPptTaskStatus(safeTaskId);
+              const status = String(statusResult?.status || 'pending').toLowerCase();
+              const progressValue = Math.max(0, Math.min(100, Number(statusResult?.progress) || 0));
+              const message = String(statusResult?.message || '');
+              const isSuccessStatus = ['completed', 'done', 'success', 'succeeded'].includes(status);
+              const isFailureStatus = ['failed', 'error', 'cancelled', 'canceled'].includes(status);
+
+              setPresentonProgress((prev) => {
+                  const previous = Math.max(0, Math.min(100, Number(prev?.progress) || 0));
+                  let nextProgress = progressValue;
+                  if (isSuccessStatus) {
+                      nextProgress = 100;
+                  } else if (!isFailureStatus) {
+                      nextProgress = Math.max(previous, progressValue, 12);
+                  }
+                  const nextMessage = message || prev?.message || '';
+                  if (
+                      prev?.taskId === safeTaskId
+                      && prev?.status === status
+                      && Number(prev?.progress || 0) === nextProgress
+                      && String(prev?.message || '') === nextMessage
+                  ) {
+                      return prev;
+                  }
+                  return {
+                      taskId: safeTaskId,
+                      status,
+                      progress: nextProgress,
+                      message: nextMessage,
+                  };
+              });
+
+              if (isSuccessStatus) {
+                  finalResult = statusResult;
+                  break;
+              }
+
+              if (isFailureStatus) {
+                  throw new Error(message || 'PPT 生成失败');
+              }
+
+              await new Promise((resolve) => setTimeout(resolve, 1800));
+          }
+
+          if (!finalResult) {
+              throw new Error('PPT 生成超时，请稍后重试');
+          }
+
+          const provider = finalResult?.provider || 'presenton';
+          const downloadUrl = finalResult?.download_url || '';
+          const editUrl = normalizePresentonEditUrl(finalResult?.edit_url || '');
+          setPresentonProgress({
+              taskId: safeTaskId,
+              status: 'completed',
+              progress: 100,
+              message: 'PPT 生成完成',
+          });
+          setStandalonePptResult({
+              provider,
+              slideCount,
+              contentFocus: contentFocusLabel,
+              downloadUrl,
+              editUrl,
+              finishedAt: new Date().toISOString(),
+          });
+          setIsPptWorkspaceOpen(true);
+
+          if (shouldPersistResult) {
+              await persistStandaloneCreativeHistory(
+                  [
+                      `[智能创作/PPT生成完成] ${outlineTitle}（${slideCount}页）`,
+                      `模板：${templateId}`,
+                      `下载链接：${downloadUrl || '无'}`,
+                      `在线编辑：${editUrl || '无'}`,
+                  ].join('\n'),
+                  'ppt_result',
+              );
+          }
+
+          return finalResult;
+      } catch (error) {
+          const errMsg = String(error?.message || '未知错误');
+          setPresentonProgress((prev) => ({
+              ...prev,
+              taskId: safeTaskId,
+              status: 'failed',
+              message: errMsg,
+          }));
+          setStandalonePptResult({
+              error: errMsg,
+          });
+          setIsPptWorkspaceOpen(true);
+
+          if (shouldPersistResult) {
+              await persistStandaloneCreativeHistory(
+                  [
+                      `[智能创作/PPT生成失败] ${outlineTitle}（${slideCount}页）`,
+                      `模板：${templateId}`,
+                      `错误：${errMsg}`,
+                  ].join('\n'),
+                  'ppt_result',
+              );
+          }
+
+          return null;
+      } finally {
+          if (presentonPollingTaskRef.current === safeTaskId) {
+              presentonPollingTaskRef.current = '';
+          }
+          setIsPresentonGenerating(false);
+      }
+  }, [persistStandaloneCreativeHistory]);
+
+  useEffect(() => {
+      const taskId = String(presentonProgress?.taskId || '').trim();
+      const status = String(presentonProgress?.status || 'idle').toLowerCase();
+      const hasResult = !!(standalonePptResult?.downloadUrl || standalonePptResult?.editUrl || standalonePptResult?.error);
+      const isTerminalStatus = ['completed', 'done', 'success', 'succeeded', 'failed', 'error', 'cancelled', 'canceled', 'idle', 'outline_ready'].includes(status);
+
+      if (!taskId || hasResult || isTerminalStatus || isPresentonGenerating) return;
+      if (presentonPollingTaskRef.current === taskId) return;
+
+      const outlineTitle = String(standalonePptOutline?.title || '业务汇报').trim() || '业务汇报';
+      const slideCount = Math.max(
+          1,
+          Number(standalonePptOutline?.slides?.length) || Number(standalonePptForm?.pptSlideCount) || 8,
+      );
+      const templateId = normalizeStandalonePptTemplateId(standalonePptForm?.template || 'general') || 'general';
+      const focusConfig = getStandalonePptContentFocusConfig(
+          standalonePptOutline?.contentFocus || standalonePptForm?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
+      );
+
+      setIsPresentonGenerating(true);
+      pollPresentonTaskUntilSettled({
+          taskId,
+          outlineTitle,
+          slideCount,
+          templateId,
+          contentFocusLabel: focusConfig.label,
+          sessionId: currentSessionId,
+      }).catch((error) => {
+          console.error('Failed to resume Presenton task polling', error);
+      });
+  }, [
+      currentSessionId,
+      isPresentonGenerating,
+      pollPresentonTaskUntilSettled,
+      presentonProgress?.status,
+      presentonProgress?.taskId,
+      standalonePptForm?.contentFocus,
+      standalonePptForm?.pptSlideCount,
+      standalonePptForm?.template,
+      standalonePptOutline,
+      standalonePptResult,
+  ]);
 
   useEffect(() => {
       if (!isAuditMode) return;
@@ -2498,7 +3451,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
               if (!currentSessionId) {
                   const uid = userProfile.id || 'anonymous';
-                  historyApi.getSessions(uid).then(sessions => setSessionList(sessions || []));
+                  void refreshSessionList(uid);
               }
           } catch (e) {
               auditHistorySavedRef.current = null;
@@ -2536,7 +3489,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       if (!currentSessionId) {
           const uid = userProfile.id || 'anonymous';
-          historyApi.getSessions(uid).then(sessions => setSessionList(sessions || []));
+          void refreshSessionList(uid);
       }
   };
 
@@ -2573,7 +3526,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       if (!currentSessionId) {
           const uid = userProfile.id || 'anonymous';
-          historyApi.getSessions(uid).then(sessions => setSessionList(sessions || []));
+          void refreshSessionList(uid);
       }
   };
 
@@ -3365,7 +4318,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                         shouldPostProcessReply = true;
                         const uid = userProfile.id || 'anonymous';
                         if (uid && uid !== 'anonymous') {
-                            historyApi.getSessions(uid).then(sessions => setSessionList(sessions || []));
+                            void refreshSessionList(uid);
                         }
                     }
                 }
@@ -3576,7 +4529,27 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           prompt = `[指令:创意内容生成]\n项目背景：${WRITING_PROJECT_CONTEXT}\n我要写一个：${reportFormData.contentType || WRITING_CONTENT_TYPE_OPTIONS[0]}\n发布平台：${reportFormData.platform || WRITING_PLATFORM_OPTIONS[0]}\n目标人群：${listOrNone(reportFormData.targetAudiences)}\n语气风格：${reportFormData.tone || WRITING_TONE_OPTIONS[0]}\n字数不少于：${minWords}\n参考内容：${reportFormData.referenceContent || '无'}\n包含关键词：${reportFormData.keywords || '无'}\n是否允许适量emoji：${reportFormData.withEmoji ? '是' : '否'}\n请输出以下内容（使用中文，Markdown结构清晰）：\n1) 标题候选 3 个\n2) 正文 1 篇（至少 ${minWords} 字）\n3) 末尾行动引导（CTA）\n4) 适合该平台的标签/话题建议\n要求：必须结合“进出口企业办公协同”与本项目能力，不要写成泛泛的互联网文案。`;
       } else if (reportType === 'ppt') {
           const minWords = Math.max(200, Number(reportFormData.analysisMinWords) || 350);
-          prompt = `[指令:市场行业分析]\n项目背景：${WRITING_PROJECT_CONTEXT}\n分析框架：${reportFormData.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]}\n字数不少于：${minWords}\n输入信息：${reportFormData.analysisInput || '无'}\n是否要求丰富数据指标：${reportFormData.requireMetrics ? '是' : '否'}\n请输出一份可执行的行业/市场分析（Markdown）：\n1) 执行摘要\n2) 基于所选框架的结构化分析\n3) 关键数据指标（如效率、成本、准确率、时效、人效、ROI）\n4) 竞争格局与差异化优势\n5) 风险与机会\n6) 30/60/90天落地建议\n若缺少关键数据，请明确列出“建议补采的数据字段”。`;
+          const pptFocusConfig = getStandalonePptContentFocusConfig(reportFormData.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
+          prompt = [
+              `[指令:PPT内容策划]`,
+              `项目背景：${WRITING_PROJECT_CONTEXT}`,
+              `内容导向：${pptFocusConfig.label}`,
+              `字数不少于：${minWords}`,
+              `输入信息：${reportFormData.analysisInput || '无'}`,
+              `是否要求丰富数据指标：${reportFormData.requireMetrics ? '是' : '否'}`,
+              ...pptFocusConfig.promptLines,
+              "请输出一份适合直接制作成 PPT 的中文内容方案（Markdown）：",
+              "1) 演示标题与副标题",
+              "2) 适合开场页呈现的 3 条核心结论",
+              "3) 推荐目录（6-8 个章节）",
+              "4) 每个章节建议的页标题与 3-5 条页面要点",
+              "5) 建议补充的数据、案例或图表表达",
+              "6) 结尾页的行动建议、决策诉求或总结收束",
+              pptFocusConfig.emphasizeMetrics
+                  ? "要求：尽量补充效率、成本、时效、准确率、转化率、ROI 等可验证指标，避免只有观点没有支撑。"
+                  : "要求：尽量补充步骤、案例、注意事项和实操建议，确保内容适合讲解和培训场景。",
+              "表达要求：标题更像结论，正文更像提纲，适合直接转成页级演示内容，不要写成传统长篇报告。",
+          ].join('\n');
       } else if (reportType === 'email') {
           const minWords = Math.max(200, Number(reportFormData.consultingMinWords) || 300);
           prompt = `[指令:建议咨询]\n项目背景：${WRITING_PROJECT_CONTEXT}\n咨询类型：${reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]}\n面向对象：${reportFormData.consultingRole || WRITING_CONSULTING_ROLE_OPTIONS[0]}\n输出形式偏好：${reportFormData.outputFormat || WRITING_OUTPUT_FORMAT_OPTIONS[0]}\n字数不少于：${minWords}\n业务背景：${reportFormData.consultingContext || '无'}\n约束条件：${reportFormData.consultingConstraints || '无'}\n是否需要分阶段时间表：${reportFormData.includeTimeline ? '是' : '否'}\n请给出一份可执行建议方案（Markdown）：\n1) 问题定义\n2) 方案建议（含优先级）\n3) 风险与应对\n4) 关键指标/KPI\n5) 执行步骤与负责人建议\n${reportFormData.includeTimeline ? '6) 分阶段时间表（周/月）' : ''}\n要求：建议必须贴合进出口企业场景，不要空泛。`;
@@ -3589,13 +4562,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const inputMode = standalonePptForm.inputMode || STANDALONE_PPT_INPUT_MODES[0].key;
       const rawSlides = Number(standalonePptForm.pptSlideCount);
       const slideCount = Math.max(3, Math.min(40, rawSlides || 8));
-      const framework = standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0];
+      const focusConfig = getStandalonePptContentFocusConfig(standalonePptForm.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
       const typedInput = String(standalonePptForm.analysisInput || '').trim();
       const documentName = String(standalonePptForm.documentName || '').trim();
 
       if (inputMode === "topic") {
           if (!typedInput) return { error: "请先输入 PPT 主题。" };
-          return { inputMode, slideCount, framework, analysisInput: typedInput, documentName, typedInput };
+          return { inputMode, slideCount, contentFocus: focusConfig.key, analysisInput: typedInput, documentName, typedInput };
       }
 
       if (inputMode === "document") {
@@ -3607,7 +4580,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           return {
               inputMode,
               slideCount,
-              framework,
+              contentFocus: focusConfig.key,
               analysisInput: docInputs.join('\n'),
               documentName,
               typedInput,
@@ -3618,7 +4591,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return {
           inputMode,
           slideCount,
-          framework,
+          contentFocus: focusConfig.key,
           analysisInput: typedInput,
           documentName,
           typedInput,
@@ -3627,21 +4600,135 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const normalizeOutline = (outlinePayload, fallbackTitle = "业务汇报") => {
       const slides = Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [];
+      const deckTitle = String(outlinePayload?.title || fallbackTitle || "业务汇报").trim();
+      const focusConfig = getStandalonePptContentFocusConfig(
+          outlinePayload?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
+      );
       const normalizedSlides = slides.map((slide, idx) => {
+          const title = String(slide?.title || `第 ${idx + 1} 页`).trim();
           const pointsRaw = Array.isArray(slide?.points) ? slide.points : [];
           const points = pointsRaw.map((item) => String(item || '').trim()).filter(Boolean);
+          const fallbackPoints = [
+              `说明“${title}”与“${deckTitle}”的关系和本页核心结论。`,
+              "补充关键事实、现状、案例或数据依据。",
+              "拆解主要影响因素、分析逻辑或结构要点。",
+              "给出对应建议、行动方向或预期结果。",
+          ];
+          const mergedPoints = [...points];
+          fallbackPoints.forEach((item) => {
+              if (mergedPoints.length < 4 && !mergedPoints.includes(item)) {
+                  mergedPoints.push(item);
+              }
+          });
           return {
               index: idx + 1,
-              title: String(slide?.title || `第 ${idx + 1} 页`).trim(),
-              points: points.length ? points : ["补充本页核心观点", "补充本页关键支撑信息"],
-              notes: String(slide?.notes || '').trim(),
+              title,
+              points: mergedPoints.length ? mergedPoints.slice(0, 10) : fallbackPoints,
+              notes: String(slide?.notes || '').trim() || `围绕“${title}”补充定义、案例、数据指标或图表建议，避免内容过于简略。`,
           };
       }).filter((slide) => slide.title);
       return {
-          title: String(outlinePayload?.title || fallbackTitle || "业务汇报").trim(),
-          subtitle: String(outlinePayload?.subtitle || "").trim(),
+          title: deckTitle,
+          subtitle: sanitizeStandaloneOutlineSubtitle(
+              outlinePayload?.subtitle || "",
+              focusConfig?.label || "",
+          ),
           slides: normalizedSlides,
       };
+  };
+
+  const buildStandaloneOutlineFromLongText = (resolved) => {
+      const rawText = String(resolved?.analysisInput || "").trim();
+      const focusConfig = getStandalonePptContentFocusConfig(resolved?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
+      const targetSlideCount = Math.max(3, Math.min(40, Number(resolved?.slideCount) || 8));
+      const previewSections = Array.isArray(focusConfig?.previewSections) && focusConfig.previewSections.length
+          ? focusConfig.previewSections
+          : PPT_OUTLINE_PREVIEW_SECTIONS;
+      const fallbackTitle = pickOutlinePreviewTopic(rawText, focusConfig.label || "业务汇报");
+      const rawBlocks = rawText
+          .split(/\n\s*\n+/)
+          .map((block) => String(block || "").trim())
+          .filter(Boolean);
+
+      let slideDrafts = rawBlocks
+          .map((block, idx) => {
+              const rawLines = String(block || "")
+                  .split(/\r?\n/)
+                  .map((line) => normalizeStandaloneOutlineTextLine(line))
+                  .filter(Boolean);
+              if (!rawLines.length) return null;
+              const firstLine = rawLines[0];
+              const hasStructuredLines = rawLines.length > 1 || String(block || "").trim().startsWith("#");
+              const title = hasStructuredLines && firstLine.length <= 32
+                  ? firstLine
+                  : (previewSections[idx] || `第 ${idx + 1} 页`);
+              const detailSource = hasStructuredLines ? rawLines.slice(1).join("\n") : rawLines.join("\n");
+              const points = splitStandaloneOutlinePointCandidates(detailSource).filter((item) => item !== title);
+              return {
+                  title,
+                  points: points.slice(0, 6),
+                  notes: rawLines.join("；").slice(0, 180),
+              };
+          })
+          .filter(Boolean)
+          .slice(0, targetSlideCount);
+
+      if (slideDrafts.length < 3) {
+          const pointCandidates = splitStandaloneOutlinePointCandidates(rawText);
+          const effectiveCount = Math.max(3, Math.min(targetSlideCount, Math.max(3, Math.ceil(pointCandidates.length / 3) || 3)));
+          const chunkSize = Math.max(2, Math.ceil(Math.max(pointCandidates.length, effectiveCount * 2) / effectiveCount));
+          slideDrafts = Array.from({ length: effectiveCount }, (_, idx) => {
+              const chunk = pointCandidates.slice(idx * chunkSize, (idx + 1) * chunkSize).filter(Boolean);
+              return {
+                  title: previewSections[idx] || `第 ${idx + 1} 页`,
+                  points: chunk.slice(0, 6),
+                  notes: chunk.join("；").slice(0, 180),
+              };
+          });
+      }
+
+      const normalizedOutline = normalizeOutline(
+          {
+              title: fallbackTitle,
+              subtitle: `${focusConfig.label} · 文本整理`,
+              slides: slideDrafts,
+          },
+          fallbackTitle,
+      );
+      const nextSlides = Array.isArray(normalizedOutline.slides) ? [...normalizedOutline.slides] : [];
+      while (nextSlides.length < 3) {
+          const nextIndex = nextSlides.length;
+          const title = previewSections[nextIndex] || `第 ${nextIndex + 1} 页`;
+          nextSlides.push({
+              index: nextIndex + 1,
+              title,
+              points: [
+                  `围绕“${fallbackTitle}”补充“${title}”的核心内容。`,
+                  "补充关键观点、事实依据或案例支撑。",
+                  "提炼适合直接展示在 PPT 页面中的重点信息。",
+                  "保留必要的结论、提示或后续动作。",
+              ],
+              notes: `从原始长文本中提炼“${title}”相关内容，保持表达紧凑清晰。`,
+          });
+      }
+      return {
+          ...normalizedOutline,
+          slides: nextSlides.map((slide, idx) => ({ ...slide, index: idx + 1 })),
+          sourceContext: rawText,
+          inputMode: String(resolved?.inputMode || "longText").trim() || "longText",
+          documentName: String(resolved?.documentName || "").trim(),
+          contentFocus: focusConfig.key,
+      };
+  };
+
+  const shouldRefreshStandaloneOutlineForResolvedInput = (resolved) => {
+      if (!standalonePptOutline?.slides?.length) return true;
+      return (
+          String(standalonePptOutline?.sourceContext || "").trim() !== String(resolved?.analysisInput || "").trim()
+          || String(standalonePptOutline?.inputMode || "").trim() !== String(resolved?.inputMode || "").trim()
+          || String(standalonePptOutline?.documentName || "").trim() !== String(resolved?.documentName || "").trim()
+          || String(standalonePptOutline?.contentFocus || "").trim() !== String(resolved?.contentFocus || "").trim()
+      );
   };
 
   const buildSlidesMarkdownFromOutline = (outlinePayload) => {
@@ -3651,13 +4738,398 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           const points = Array.isArray(slide?.points) ? slide.points.map((item) => String(item || '').trim()).filter(Boolean) : [];
           const notes = String(slide?.notes || "").trim();
           const pointLines = points.length ? points.map((item) => `- ${item}`).join('\n') : "- 待补充要点";
-          const noteBlock = notes ? `\n\n> 讲解备注：${notes}` : "";
-          return `# ${title}\n${pointLines}${noteBlock}`;
+          const noteBlock = notes ? `\n\n## 讲解展开\n${notes}` : "";
+          return `# ${title}\n\n## 本页要点\n${pointLines}${noteBlock}`;
+      });
+  };
+
+  const inferStandaloneOutlineSlideRole = (slide, slideIndex, allSlides, focusConfig) => {
+      const title = String(slide?.title || "").trim();
+      const totalSlides = Array.isArray(allSlides) ? allSlides.length : 0;
+      if (slideIndex === 0 && /封面|标题/.test(title)) return "cover";
+      if (STANDALONE_PPT_AGENDA_TITLE_RE.test(title)) return "agenda";
+      if (STANDALONE_PPT_SUMMARY_TITLE_RE.test(title)) return "summary";
+      if (STANDALONE_PPT_BACKGROUND_TITLE_RE.test(title)) return "background";
+      if (STANDALONE_PPT_ISSUE_TITLE_RE.test(title)) return "issue";
+      if (STANDALONE_PPT_ACTION_TITLE_RE.test(title)) return "action";
+      if (STANDALONE_PPT_TRAINING_TITLE_RE.test(title) || !focusConfig?.emphasizeMetrics) return "training";
+      if (slideIndex === totalSlides - 1 && totalSlides > 1) return "closing";
+      return "evidence";
+  };
+
+  const buildStandaloneSlideRoleGuidance = (slideRole, focusConfig, slideTitle, deckTitle) => {
+      const focusLabel = String(focusConfig?.label || "工作汇报").trim() || "工作汇报";
+      const title = String(slideTitle || "本页").trim() || "本页";
+      const deck = String(deckTitle || "本次演示").trim() || "本次演示";
+      if (slideRole === "cover") {
+          return [
+              `这是封面页，标题要准确承接“${deck}”主题，副标题可点出汇报对象、时间范围或场景。`,
+              "文字保持克制，不要堆砌内容，只保留能快速建立主题认知的信息。",
+          ];
+      }
+      if (slideRole === "agenda") {
+          return [
+              "这是目录页，只保留章节导航，不要写成长段说明。",
+              "目录名称应与后续正文页一一对应，避免使用重复或空泛标题。",
+          ];
+      }
+      if (slideRole === "summary") {
+          return [
+              `这是摘要/结论页，需要先讲清“${deck}”最重要的 2-3 个判断，再给出关键支撑。`,
+              focusConfig?.emphasizeMetrics
+                  ? "优先放结果指标、趋势变化和管理层最关心的结论。"
+                  : "优先提炼核心结论、适用对象和接下来要展开的重点。",
+          ];
+      }
+      if (slideRole === "background") {
+          return [
+              `这是背景铺垫页，要解释“${title}”与整体主题的关系，补足现状、目标、场景或痛点。`,
+              "不要只写定义，至少补一层业务原因或使用场景。",
+          ];
+      }
+      if (slideRole === "issue") {
+          return [
+              `这是问题/挑战页，要写清现象、原因、影响，避免只停留在列问题。`,
+              "如果能补对应风险、优先级或后续应对，会更像完整汇报页。",
+          ];
+      }
+      if (slideRole === "action") {
+          return [
+              `这是方案/动作页，要把“${title}”拆成可执行动作、路径、分工或节奏。`,
+              "尽量体现先后顺序、时间节点、资源要求或预期结果。",
+          ];
+      }
+      if (slideRole === "training") {
+          return [
+              `这是讲解型页面，要围绕“${title}”讲清概念、步骤、案例或注意事项。`,
+              "内容要有顺序感，便于现场讲解，不要只列抽象名词。",
+          ];
+      }
+      if (slideRole === "closing") {
+          return [
+              "这是收束页，要回到最终结论、行动建议或决策请求，形成完整闭环。",
+              "不要重复前文目录式表达，结尾要有明确收口。",
+          ];
+      }
+      return [
+          `这是正文展开页，需要把“${title}”写实，补足事实、分析、依据和落地含义。`,
+          `输出风格要贴合${focusLabel}，不能只是把大纲原句重新排一遍。`,
+      ];
+  };
+
+  const buildDenseSlidesMarkdownFromOutline = (outlinePayload) => {
+      const slides = Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [];
+      const deckTitle = String(outlinePayload?.title || "业务汇报").trim() || "业务汇报";
+      const focusConfig = getStandalonePptContentFocusConfig(
+          outlinePayload?.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
+      );
+      const sourceContextHints = compactStandaloneSourceContext(outlinePayload?.sourceContext || "", 8);
+
+      return slides.map((slide, idx) => {
+          const title = String(slide?.title || `第 ${idx + 1} 页`).trim();
+          const points = Array.isArray(slide?.points) ? slide.points.map((item) => String(item || '').trim()).filter(Boolean) : [];
+          const notes = String(slide?.notes || "").trim();
+          const slideRole = inferStandaloneOutlineSlideRole(slide, idx, slides, focusConfig);
+          const sourceHints = sourceContextHints
+              .filter((item) => item.includes(title.slice(0, 6)) || item.includes(deckTitle.slice(0, 6)))
+              .slice(0, 3);
+          const fallbackSourceHints = sourceHints.length ? sourceHints : sourceContextHints.slice(idx, idx + 2);
+          const expandedPoints = points.length ? points : [
+              `先点明“${title}”这一页最重要的判断或结论。`,
+              "补充关键事实、现状、案例或数据依据。",
+              "拆解主要影响因素、分析逻辑或结构要点。",
+              "给出对应建议、行动方向或预期结果。",
+          ];
+
+          const agendaPoints = slides
+              .map((item, slideIdx) => (slideIdx === idx ? "" : String(item?.title || "").trim()))
+              .filter(Boolean)
+              .filter((item) => !STANDALONE_PPT_AGENDA_TITLE_RE.test(item))
+              .slice(0, 5);
+
+          const bulletCandidates = slideRole === "agenda" && agendaPoints.length
+              ? agendaPoints.map((item, orderIdx) => `第 ${orderIdx + 1} 部分：${item}`)
+              : expandedPoints.slice();
+
+          if (notes && bulletCandidates.length < 6) {
+              bulletCandidates.push(notes);
+          }
+          fallbackSourceHints.forEach((item) => {
+              if (bulletCandidates.length >= 6) return;
+              bulletCandidates.push(item);
+          });
+
+          const normalizedBullets = Array.from(new Set(
+              bulletCandidates
+                  .map((item) => String(item || '')
+                      .replace(/^(?:页面角色|内容导向|讲解备注|可参考素材|展开要求|Language|语言)\s*[:：]\s*/i, '')
+                      .replace(STANDALONE_PPT_LANGUAGE_LEAK_RE, '')
+                      .replace(/\s+/g, ' ')
+                      .trim())
+                  .filter(Boolean),
+          )).filter((item) => item !== title).slice(0, slideRole === "cover" ? 3 : 6);
+
+          return [
+              `# ${title}`,
+              normalizedBullets.map((item) => `- ${item}`).join('\n'),
+          ].filter(Boolean).join('\n\n');
+      });
+  };
+
+  const buildStandaloneOutlineRevisionSuggestions = (slide, slideIndex, allSlides, focusConfig) => {
+      const title = String(slide?.title || "").trim();
+      const points = Array.isArray(slide?.points) ? slide.points.map((item) => String(item || "").trim()).filter(Boolean) : [];
+      const notes = String(slide?.notes || "").trim();
+      const combinedText = [title, ...points, notes].join(" ");
+      const role = inferStandaloneOutlineSlideRole(slide, slideIndex, allSlides, focusConfig);
+      const hasMetrics = STANDALONE_PPT_METRIC_HINT_RE.test(combinedText);
+      const hasEvidence = STANDALONE_PPT_EVIDENCE_HINT_RE.test(combinedText);
+      const hasAction = STANDALONE_PPT_ACTION_HINT_RE.test(combinedText);
+      const hasContext = STANDALONE_PPT_CONTEXT_HINT_RE.test(combinedText);
+      const hasExample = STANDALONE_PPT_EXAMPLE_HINT_RE.test(combinedText);
+      const hasTimeOwner = STANDALONE_PPT_TIME_OWNER_HINT_RE.test(combinedText);
+      const longPointCount = points.filter((item) => item.length > 28).length;
+      const genericPointCount = points.filter((item) => STANDALONE_PPT_GENERIC_POINT_RE.test(item) || item.length < 10).length;
+      const suggestions = [];
+      const seen = new Set();
+
+      const pushSuggestion = (code, text) => {
+          if (!code || !text || seen.has(code)) return;
+          seen.add(code);
+          suggestions.push({ code, text });
+      };
+
+      if (title && role !== "cover" && role !== "agenda" && !/(结论|建议|目标|计划|风险|问题|亮点|复盘|方案|路径|动作)/.test(title)) {
+          pushSuggestion("title_conclusion", "建议把页标题改成结论或动作句，让听众一眼看懂这页要表达什么。");
+      }
+
+      if (role === "agenda") {
+          if (points.length < 3 || longPointCount > 0) {
+              pushSuggestion("agenda_chapters", "这一页更适合只保留 4-5 个章节短语作为目录，不要混入解释性长句。");
+          }
+      } else if (role === "summary" || role === "closing") {
+          if (focusConfig?.emphasizeMetrics && !hasMetrics) {
+              pushSuggestion("summary_evidence", "建议补 1 个结果指标或关键对比，让开场/结尾页更有抓手。");
+          }
+          if (!hasAction) {
+              pushSuggestion("add_next_step", role === "closing"
+                  ? "建议补一句下一步动作或决策请求，形成明确收束。"
+                  : "建议补一句总判断后的业务影响或行动方向，让摘要页更完整。");
+          }
+      } else if (role === "background") {
+          if (!hasContext) {
+              pushSuggestion("add_context", "建议补充业务背景、适用场景或当前现状，为后文分析做好铺垫。");
+          }
+          if (!hasEvidence) {
+              pushSuggestion("add_fact_basis", "建议增加一条事实、案例或数据依据，避免背景页只有概念描述。");
+          }
+      } else if (role === "issue") {
+          if (!/(原因|影响|导致|制约|优先级)/.test(combinedText)) {
+              pushSuggestion("add_cause_impact", "建议把问题写成“现象-原因-影响”，不要只罗列现象。");
+          }
+          if (!hasAction) {
+              pushSuggestion("add_risk_response", "建议补充对应缓解动作或应对方案，让问题页能承接后文。");
+          }
+      } else if (role === "action") {
+          if (!hasTimeOwner) {
+              pushSuggestion("add_plan_owner", "建议写明时间节点、负责人或里程碑，方案页会更可执行。");
+          }
+          if (points.length < 3) {
+              pushSuggestion("expand_points", "建议把方案拆成 2-3 个关键动作，而不是只写一句总话。");
+          }
+      } else if (role === "training") {
+          if (!hasExample) {
+              pushSuggestion("add_example", "建议补一个案例、演示步骤或易错提醒，讲解会更具体。");
+          }
+          if (!/(步骤|先|再|最后|注意|提醒)/.test(combinedText)) {
+              pushSuggestion("add_step_sequence", "建议按步骤顺序重写要点，帮助听众跟上讲解节奏。");
+          }
+      } else {
+          if (focusConfig?.emphasizeMetrics && !hasMetrics) {
+              pushSuggestion("add_metrics", "建议加入量化指标、结果对比或阶段数据，增强这一页的说服力。");
+          }
+          if (!hasEvidence) {
+              pushSuggestion("add_evidence", "建议补 1 条事实、案例或对比结果，支撑这一页的判断。");
+          }
+          if (!hasAction && /(成果|分析|洞察|亮点|价值|优势)/.test(title)) {
+              pushSuggestion("add_implication", "建议补一句业务影响或后续动作，避免停留在描述层。");
+          }
+      }
+
+      if (points.length < 3 && role !== "agenda" && !seen.has("expand_points")) {
+          pushSuggestion("expand_points", "建议再补 1-2 条支撑要点，避免页面信息量过薄。");
+      }
+      if (longPointCount >= 2 || genericPointCount >= Math.max(2, points.length)) {
+          pushSuggestion("tighten_bullets", "建议把过长或过泛的要点拆成短 bullet，每条只表达一个信息点。");
+      }
+      if (!notes) {
+          pushSuggestion("add_notes", role === "training"
+              ? "建议补充讲解顺序、示例说明或注意事项，方便现场讲解。"
+              : "建议补充讲解备注，说明数据口径、案例背景或下一步动作。");
+      }
+
+      return suggestions.slice(0, 3);
+  };
+
+  const applyStandaloneOutlineSuggestion = (slideIndex, suggestionCode) => {
+      const focusConfig = getStandalonePptContentFocusConfig(
+          standalonePptOutline?.contentFocus || standalonePptForm.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
+      );
+      const allSlides = Array.isArray(standalonePptOutline?.slides) ? standalonePptOutline.slides : [];
+      updateStandaloneOutlineSlide(slideIndex, (prevSlide) => {
+          const currentTitle = String(prevSlide?.title || `第 ${slideIndex + 1} 页`).trim();
+          const currentPoints = Array.isArray(prevSlide?.points) ? prevSlide.points.map((item) => String(item || "").trim()).filter(Boolean) : [];
+          const currentNotes = String(prevSlide?.notes || "").trim();
+          const slideRole = inferStandaloneOutlineSlideRole(prevSlide, slideIndex, allSlides, focusConfig);
+          const nextSlide = {
+              ...prevSlide,
+              title: currentTitle,
+              points: currentPoints.slice(),
+              notes: currentNotes,
+          };
+          const pushUniquePoint = (value) => {
+              const normalized = String(value || "").trim();
+              if (!normalized || nextSlide.points.includes(normalized) || nextSlide.points.length >= 8) return;
+              nextSlide.points.push(normalized);
+          };
+
+          if (suggestionCode === "title_conclusion") {
+              if (currentTitle && !/^结论[:：]/.test(currentTitle)) {
+                  nextSlide.title = `结论：${currentTitle}`;
+              }
+              return nextSlide;
+          }
+
+          if (suggestionCode === "agenda_chapters") {
+              const chapterTitles = allSlides
+                  .map((item, idx) => idx === slideIndex ? "" : String(item?.title || "").trim())
+                  .filter(Boolean)
+                  .filter((item) => !STANDALONE_PPT_AGENDA_TITLE_RE.test(item))
+                  .slice(0, 4);
+              nextSlide.points = chapterTitles.length
+                  ? chapterTitles.map((item, idx) => `第 ${idx + 1} 部分：${item}`)
+                  : ["第一部分：背景与目标", "第二部分：分析与判断", "第三部分：关键动作", "第四部分：结论与下一步"];
+              if (!nextSlide.notes) {
+                  nextSlide.notes = "目录页只保留章节导航，不展开解释性内容。";
+              }
+              return nextSlide;
+          }
+
+          if (suggestionCode === "summary_evidence") {
+              pushUniquePoint(focusConfig?.emphasizeMetrics
+                  ? "补充一个最能代表结果的关键指标或阶段变化，支撑本页结论。"
+                  : "补充本次分享最值得记住的一条核心收获。");
+              pushUniquePoint("用一句话说明这页结论对后续内容或决策意味着什么。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_next_step") {
+              pushUniquePoint(slideRole === "closing"
+                  ? "明确下一步动作、责任分工或决策请求，形成页面收束。"
+                  : "补充结论落地后的业务影响或后续推进方向。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_context") {
+              pushUniquePoint("补充当前业务背景、适用场景和本次内容聚焦范围。");
+              pushUniquePoint("说明现状或目标，为后续分析和建议建立起点。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_fact_basis" || suggestionCode === "add_evidence") {
+              pushUniquePoint("补充一条事实、案例或数据依据，说明本页判断来自哪里。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_cause_impact") {
+              pushUniquePoint("拆解主要问题产生的原因，并说明对结果或进度的影响。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_risk_response") {
+              pushUniquePoint("补充对应缓解动作、优先级和触发条件，形成闭环。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_plan_owner") {
+              pushUniquePoint("明确时间节点、负责人和关键里程碑，说明推进节奏。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "expand_points") {
+              const additions = slideRole === "action"
+                  ? ["拆分 2-3 个关键动作，分别说明目标、动作和输出。", "补充阶段安排、依赖条件或资源需求。"]
+                  : focusConfig?.emphasizeMetrics
+                      ? ["补充关键数据表现、变化趋势或结果对比。", "补充对应动作、阶段目标或落地安排。"]
+                      : ["补充步骤拆解、案例说明或关键提醒。", "补充适合讲解的结论和行动提示。"];
+              additions.forEach((item) => {
+                  pushUniquePoint(item);
+              });
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_metrics") {
+              pushUniquePoint("补充量化指标、结果对比或时间节点，说明变化幅度与业务价值。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_example") {
+              pushUniquePoint("补充一个案例、演示步骤或典型场景，帮助听众理解。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_step_sequence") {
+              pushUniquePoint("按“先准备、再执行、最后检查”的顺序重写本页要点。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_implication") {
+              pushUniquePoint("补充这一页结论对应的业务影响、管理启示或后续动作。");
+              return nextSlide;
+          }
+
+          if (suggestionCode === "tighten_bullets") {
+              nextSlide.points = nextSlide.points.map((item) => {
+                  if (item.length <= 26) return item;
+                  const fragments = item
+                      .split(/[，；;。]/)
+                      .map((part) => part.trim())
+                      .filter(Boolean);
+                  return fragments.length > 1 ? fragments.slice(0, 2).join("，") : item.slice(0, 26);
+              });
+              if (!nextSlide.notes) {
+                  nextSlide.notes = "每条要点尽量只表达一个信息点，解释性内容放到讲解备注里。";
+              }
+              return nextSlide;
+          }
+
+          if (suggestionCode === "add_notes") {
+              if (!nextSlide.notes) {
+                  nextSlide.notes = slideRole === "training"
+                      ? "补充本页讲解顺序、示例说明和注意事项，便于现场表达。"
+                      : focusConfig?.emphasizeMetrics
+                          ? "补充本页数据口径、案例背景和下一步动作，支撑页面结论。"
+                          : "补充本页讲解顺序、案例说明和核心提醒，便于现场表达。";
+              }
+              return nextSlide;
+          }
+
+          const logicNote = slideRole === "issue"
+              ? "建议本页按“现象/原因/影响/动作”顺序展开，减少信息跳跃。"
+              : focusConfig?.emphasizeMetrics
+                  ? "建议本页按“现状/结果/动作”顺序展开，减少信息跳跃。"
+                  : "建议本页按“概念/步骤/提醒”顺序展开，增强可理解性。";
+          if (!nextSlide.notes) {
+              nextSlide.notes = logicNote;
+          } else if (!nextSlide.notes.includes(logicNote)) {
+              nextSlide.notes = `${nextSlide.notes}\n${logicNote}`.trim();
+          }
+          return nextSlide;
       });
   };
 
   const applyTemplateSelection = (templateId, routeId = "") => {
-      const selectedId = String(templateId || "").trim();
+      const selectedId = normalizeStandalonePptTemplateId(templateId || "");
       if (!selectedId) return;
       setStandalonePptForm((prev) => ({
           ...prev,
@@ -3668,17 +5140,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           const existing = Array.isArray(prev) ? prev : [];
           if (existing.some((item) => item.template_id === selectedId)) return existing;
           return [
-              { template_id: selectedId, name: selectedId, description: "来自模板预览页", source: "template_preview" },
+              { template_id: selectedId, name: getStandalonePptTemplateLabel(selectedId), description: "来自模板预览页", source: "template_preview" },
               ...existing,
           ];
       });
-      setTemplatePreviewSelection({ routeId: String(routeId || selectedId), templateId: selectedId });
+      setTemplatePreviewSelection({ routeId: normalizeStandalonePptTemplateId(routeId || selectedId), templateId: selectedId });
   };
 
   const openTemplatePreviewPicker = () => {
       setTemplatePreviewSelection((prev) => {
           if (prev?.templateId) return prev;
-          const currentTemplate = String(standalonePptForm.template || "").trim();
+          const currentTemplate = normalizeStandalonePptTemplateId(standalonePptForm.template || "");
           return currentTemplate ? { routeId: currentTemplate, templateId: currentTemplate } : { routeId: "", templateId: "" };
       });
       setIsTemplatePreviewOpen(true);
@@ -3700,41 +5172,67 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const resolved = resolveStandalonePptInput();
       if (resolved.error) {
           setStandalonePptResult({ error: resolved.error });
-          return;
+          return null;
       }
 
       setIsOutlineGenerating(true);
       setIsOutlineEditorOpen(false);
       setIsTemplatePreviewOpen(false);
       setStandalonePptResult(null);
+      const initialPreviewLines = buildOutlinePreviewLinesFromResolved(resolved);
       setPresentonProgress({
           taskId: "",
           status: "outline_generating",
           progress: 12,
-          message: "正在生成大纲，请稍候...",
+          message: "正在整理内容结构，请稍候...",
+          previewLines: initialPreviewLines,
+          previewCursor: Math.min(3, initialPreviewLines.length),
       });
       const outlineStartAt = Date.now();
       const progressTimer = setInterval(() => {
           setPresentonProgress((prev) => {
               if (prev.status !== "outline_generating") return prev;
               const current = Math.max(12, Number(prev.progress) || 12);
-              const step = current < 35 ? 3 : (current < 68 ? 2 : 1);
-              const next = Math.min(89, current + step);
+              const elapsedMs = Date.now() - outlineStartAt;
+              const step = current < 36 ? 3 : (current < 72 ? 2 : 1);
+              let phaseCap = 40;
+              if (elapsedMs >= 6000) phaseCap = 68;
+              if (elapsedMs >= 12000) phaseCap = 84;
+              if (elapsedMs >= 18000) phaseCap = 93;
+              if (elapsedMs >= 26000) phaseCap = 96;
+              const next = Math.min(phaseCap, current + step);
+              const previewLines = Array.isArray(prev.previewLines) && prev.previewLines.length ? prev.previewLines : initialPreviewLines;
+              const targetCursor = Math.max(
+                  1,
+                  Math.min(
+                      previewLines.length,
+                      Math.ceil((next / 100) * previewLines.length) + (next >= 55 ? 2 : 0),
+                  ),
+              );
               const message = next < 30
                   ? "正在解析输入内容..."
                   : next < 55
                       ? "正在规划章节结构..."
                       : next < 80
                           ? "正在补全页级要点..."
-                          : "正在整理最终大纲...";
-              return { ...prev, progress: next, message };
+                          : next < 94
+                              ? "正在校验页间逻辑..."
+                              : "正在整理最终结果...";
+              return {
+                  ...prev,
+                  progress: next,
+                  message,
+                  previewLines,
+                  previewCursor: Math.max(Number(prev.previewCursor) || 0, targetCursor),
+              };
           });
       }, 420);
 
       try {
           const outlineResp = await presentationApi.generatePresentonOutline({
               input_mode: resolved.inputMode,
-              analysis_framework: resolved.framework,
+              content_focus: resolved.contentFocus,
+              analysis_framework: getStandalonePptContentFocusConfig(resolved.contentFocus).label,
               analysis_input: resolved.analysisInput,
               document_name: resolved.documentName,
               n_slides: resolved.slideCount,
@@ -3744,7 +5242,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               model_backend: llmBackend === "cloud" ? "cloud" : "local",
           });
 
-          const outlineData = normalizeOutline(outlineResp?.outline, resolved.typedInput || resolved.documentName || "业务汇报");
+          const normalizedOutline = normalizeOutline(outlineResp?.outline, resolved.typedInput || resolved.documentName || "业务汇报");
+          const outlineData = {
+              ...normalizedOutline,
+              sourceContext: resolved.analysisInput,
+              inputMode: resolved.inputMode,
+              documentName: resolved.documentName,
+              contentFocus: resolved.contentFocus,
+          };
           if (!outlineData.slides.length) {
               throw new Error("未生成有效大纲，请重试。");
           }
@@ -3753,28 +5258,30 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           if (elapsed < minDurationMs) {
               await new Promise((resolve) => setTimeout(resolve, minDurationMs - elapsed));
           }
+          const finalPreviewLines = buildOutlinePreviewLinesFromOutline(outlineData);
           setPresentonProgress({
               taskId: "",
               status: "outline_ready",
               progress: 100,
-              message: "大纲生成完成，正在打开编辑窗口...",
+              message: "内容结构已整理完成，正在打开编辑窗口...",
+              previewLines: finalPreviewLines,
+              previewCursor: finalPreviewLines.length,
           });
-          await new Promise((resolve) => setTimeout(resolve, 260));
+          await new Promise((resolve) => setTimeout(resolve, 520));
           setStandalonePptOutline(outlineData);
           setIsOutlineEditorOpen(true);
           setIsPptWorkspaceOpen(false);
-          const outlineHistory = [
-              `[智能创作/PPT大纲] ${outlineData.title || "业务汇报"}（${outlineData.slides.length}页）`,
-              outlineData.subtitle ? `副标题：${outlineData.subtitle}` : "",
-              ...outlineData.slides.slice(0, 8).map((slide, idx) => `${idx + 1}. ${slide.title || `第${idx + 1}页`}`),
-          ].filter(Boolean).join('\n');
+          const outlineHistory = formatStandaloneOutlineHistory(outlineData, '[智能创作/PPT大纲]');
           await persistStandaloneCreativeHistory(outlineHistory, 'ppt_outline');
           setPresentonProgress({
               taskId: "",
               status: "outline_ready",
               progress: 100,
-              message: "大纲生成完成，可编辑后再生成 PPT。",
+              message: "内容结构已整理完成，可编辑后继续生成 PPT。",
+              previewLines: finalPreviewLines,
+              previewCursor: finalPreviewLines.length,
           });
+          return outlineData;
       } catch (error) {
           const errMsg = String(error?.message || "大纲生成失败");
           await persistStandaloneCreativeHistory(`[智能创作/PPT大纲失败]\n${errMsg}`, 'ppt_outline');
@@ -3783,58 +5290,93 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               status: "failed",
               progress: 0,
               message: errMsg,
+              previewLines: [],
+              previewCursor: 0,
           });
           setIsOutlineEditorOpen(false);
           setStandalonePptResult({ error: errMsg });
+          return null;
       } finally {
           clearInterval(progressTimer);
           setIsOutlineGenerating(false);
       }
   };
 
-  const handleGeneratePresentonPpt = async () => {
-      if (isPresentonGenerating || isOutlineGenerating) return;
-      setStandalonePptForm((prev) => (prev.includeImages ? { ...prev, includeImages: false } : prev));
-      if (!standalonePptOutline?.slides?.length) {
-          setStandalonePptResult({ error: "请先生成并确认大纲，再生成 PPT。" });
+  const submitPresentonPptFromOutline = async (outlinePayload) => {
+      if (!outlinePayload?.slides?.length) {
+          setStandalonePptResult({ error: "当前内容不足以生成 PPT，请先补充输入信息。" });
           return;
       }
-
-      const slideCount = Math.max(3, Math.min(40, standalonePptOutline.slides.length));
-      const framework = standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0];
-      const outlineTitle = String(standalonePptOutline?.title || "业务汇报").trim();
-      const outlineSubtitle = String(standalonePptOutline?.subtitle || "").trim();
-      const slidesMarkdown = buildSlidesMarkdownFromOutline(standalonePptOutline);
+      setStandalonePptOutline(outlinePayload);
+      const slideCount = Math.max(3, Math.min(40, outlinePayload.slides.length));
+      const focusConfig = getStandalonePptContentFocusConfig(
+          outlinePayload?.contentFocus || standalonePptForm.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS,
+      );
+      const outlineTitle = String(outlinePayload?.title || "业务汇报").trim();
+      const outlineSubtitle = sanitizeStandaloneOutlineSubtitle(
+          outlinePayload?.subtitle || "",
+          focusConfig?.label || "",
+      );
+      const sourceContext = String(outlinePayload?.sourceContext || "").trim();
+      const sourceContextSnippet = sourceContext.length > 1800 ? `${sourceContext.slice(0, 1800)}...` : sourceContext;
+      const sourceMode = String(outlinePayload?.inputMode || standalonePptForm.inputMode || "topic").trim();
+      const sourceDocumentName = String(outlinePayload?.documentName || "").trim();
+      const slidesMarkdown = buildDenseSlidesMarkdownFromOutline(outlinePayload);
+      const slideTitleLines = (Array.isArray(outlinePayload?.slides) ? outlinePayload.slides : [])
+          .map((slide, idx) => `${idx + 1}. ${String(slide?.title || `第 ${idx + 1} 页`).trim()}`)
+          .filter(Boolean)
+          .slice(0, 40);
+      await persistStandaloneCreativeHistory(
+          formatStandaloneOutlineHistory(outlinePayload, '[智能创作/PPT大纲]'),
+          'ppt_outline',
+      );
 
       const projectPrompt = [
-          `请根据已确认大纲生成一个 ${slideCount} 页的中文商务汇报 PPT。`,
-          `项目背景：${WRITING_PROJECT_CONTEXT}`,
-          `分析框架：${framework}`,
+          `请根据已确认大纲生成一个 ${slideCount} 页的中文 PPT。`,
+          `内容导向：${focusConfig.label}`,
           `演示主题：${outlineTitle}`,
           outlineSubtitle ? `副标题：${outlineSubtitle}` : "副标题：无",
-          standalonePptForm.requireMetrics ? "要求：每个关键章节尽量给出可量化指标和图表建议。" : "要求：内容结构清晰，结论明确。",
-          "图片策略：默认关闭并禁止配图，仅允许文字与图表结构表达。",
-          "执行要求：严格依据 slides_markdown 的页级结构生成，避免新增无关章节。",
-      ].join('\n');
+          `输入来源：${sourceMode}`,
+          sourceDocumentName ? `参考文档：${sourceDocumentName}` : "",
+          sourceContextSnippet ? `原始输入素材：${sourceContextSnippet}` : "",
+          ...focusConfig.promptLines,
+          focusConfig.emphasizeMetrics
+              ? "内容要求：优先补充关键数据、事实依据、结果对比、量化收益或可验证指标，让页面更有支撑。"
+              : "内容要求：优先补充概念解释、步骤拆解、案例说明、注意事项和可执行建议，让页面更容易讲清楚。",
+          "一致性要求：最终内容必须以用户输入和已确认大纲为准，允许补充同主题下的细节，但不得偏离主题或重写成其他项目。",
+          "禁止事项：如果用户输入或已确认大纲未明确提到 Enterprise Intelligent Office Agent 2.0、进出口企业协同办公、会议纪要、OCR、审单、数据库、数据决策等内容，禁止自行引入这些项目背景。",
+          "执行要求：严格依据 slides_markdown 的页级结构生成，保持章节顺序一致；允许在同主题下补充细节，但不能只复述大纲原句。",
+          "页标题规则：封面页可使用演示主题；从第 2 页开始，必须使用对应页标题，不得把“演示主题”重复写成每一页的大标题。",
+          slideTitleLines.length ? `页标题清单：\n${slideTitleLines.join('\n')}` : "",
+          "控制要求：language、内容导向、页面角色、展开要求、讲解备注、参考素材等辅助控制信息只用于生成约束，不得原样显示在 PPT 页面中。",
+          "标题要求：各页标题必须具体、彼此有区分度，避免连续出现“背景、分析、建议、总结”这类重复泛标题；正文页标题尽量写成结论式、动作式或判断式短句。",
+          "页面要求：封面和目录可简洁；正文页必须明显展开大纲内容，体现定义/现状/原因/证据/影响/动作中的多个层次，每页文字量要足以支撑单独成页。",
+          "扩写要求：如果大纲要点较短，需要结合原始输入素材与内容导向补足上下文、解释和支撑信息，但不要虚构具体事实。",
+          "排版要求：避免每页只有两三条很短的 bullet；正文页应形成较完整的信息块、说明句或多层要点。",
+      ].filter(Boolean).join('\n');
 
       setIsPresentonGenerating(true);
       setIsOutlineEditorOpen(false);
       setIsPptWorkspaceOpen(true);
       setIsTemplatePreviewOpen(false);
       setStandalonePptResult(null);
+      const resolvedTemplateId = normalizeStandalonePptTemplateId(standalonePptForm.template || "general") || "general";
       try {
           const submitPayload = {
               prompt: projectPrompt,
               n_slides: slideCount,
               language: "Chinese",
-              template: standalonePptForm.template || "general",
+              template: resolvedTemplateId,
               export_as: "pptx",
               verbosity: "standard",
               provider: "cloud_async",
-              content_generation: "preserve",
               slides_markdown: slidesMarkdown,
               image_type: "none",
               web_search: false,
+              include_title_slide: false,
+              include_table_of_contents: false,
+              allow_access_to_user_info: false,
+              trigger_webhook: false,
           };
 
           const submitResult = await presentationApi.submitPresentonPptTask(submitPayload);
@@ -3849,84 +5391,23 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               progress: 36,
               message: submitResult?.message || "已提交生成任务，正在执行...",
           });
-          await persistStandaloneCreativeHistory(
+          const creativeSessionId = await persistStandaloneCreativeHistory(
               [
                   `[智能创作/PPT任务已提交] ${outlineTitle}（${slideCount}页）`,
                   `任务ID：${taskId}`,
-                  `模板：${standalonePptForm.template || "general"}`,
-                  `配图：关闭`,
+                  `模板：${resolvedTemplateId}`,
+                  `内容导向：${focusConfig.label}`,
               ].join('\n'),
               'ppt_task',
           );
-
-          const deadline = Date.now() + 15 * 60 * 1000;
-          let finalResult = null;
-          while (Date.now() < deadline) {
-              const statusResult = await presentationApi.getPresentonPptTaskStatus(taskId);
-              const status = String(statusResult?.status || "pending").toLowerCase();
-              const progressValue = Math.max(0, Math.min(100, Number(statusResult?.progress) || 0));
-              const message = String(statusResult?.message || "");
-              const isSuccessStatus = ["completed", "done", "success", "succeeded"].includes(status);
-              const isFailureStatus = ["failed", "error", "cancelled", "canceled"].includes(status);
-
-              setPresentonProgress((prev) => {
-                  const previous = Math.max(0, Math.min(100, Number(prev?.progress) || 0));
-                  let nextProgress = progressValue;
-                  if (isSuccessStatus) {
-                      nextProgress = 100;
-                  } else if (!isFailureStatus) {
-                      nextProgress = Math.max(previous, progressValue, 12);
-                  }
-                  return {
-                      taskId,
-                      status,
-                      progress: nextProgress,
-                      message,
-                  };
-              });
-
-              if (isSuccessStatus) {
-                  finalResult = statusResult;
-                  break;
-              }
-              if (isFailureStatus) {
-                  throw new Error(message || "PPT 生成失败");
-              }
-
-              await new Promise((resolve) => setTimeout(resolve, 1800));
-          }
-
-          if (!finalResult) {
-              throw new Error("PPT 生成超时，请稍后重试");
-          }
-
-          const provider = finalResult?.provider || "presenton";
-          const downloadUrl = finalResult?.download_url || "";
-          const editUrl = normalizePresentonEditUrl(finalResult?.edit_url || "");
-          setPresentonProgress({
+          await pollPresentonTaskUntilSettled({
               taskId,
-              status: "completed",
-              progress: 100,
-              message: "PPT 生成完成",
-          });
-          setStandalonePptResult({
-              provider,
+              outlineTitle,
               slideCount,
-              framework,
-              downloadUrl,
-              editUrl,
-              finishedAt: new Date().toISOString(),
+              templateId: resolvedTemplateId,
+              contentFocusLabel: focusConfig.label,
+              sessionId: creativeSessionId || currentSessionIdRef.current,
           });
-          await persistStandaloneCreativeHistory(
-              [
-                  `[智能创作/PPT生成完成] ${outlineTitle}（${slideCount}页）`,
-                  `模板：${standalonePptForm.template || "general"}`,
-                  `下载链接：${downloadUrl || "无"}`,
-                  `在线编辑：${editUrl || "无"}`,
-              ].join('\n'),
-              'ppt_result',
-          );
-          setIsPptWorkspaceOpen(true);
       } catch (error) {
           const errMsg = String(error?.message || "未知错误");
           setPresentonProgress((prev) => ({
@@ -3937,7 +5418,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           await persistStandaloneCreativeHistory(
               [
                   `[智能创作/PPT生成失败] ${outlineTitle}（${slideCount}页）`,
-                  `模板：${standalonePptForm.template || "general"}`,
+                  `模板：${resolvedTemplateId}`,
                   `错误：${errMsg}`,
               ].join('\n'),
               'ppt_result',
@@ -3949,6 +5430,31 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       } finally {
           setIsPresentonGenerating(false);
       }
+  };
+
+  const handleGeneratePresentonPpt = async () => {
+      if (isPresentonGenerating || isOutlineGenerating) return;
+      setStandalonePptForm((prev) => (prev.includeImages ? { ...prev, includeImages: false } : prev));
+      const resolved = resolveStandalonePptInput();
+      if (resolved.error) {
+          setStandalonePptResult({ error: resolved.error });
+          return;
+      }
+
+      if (resolved.inputMode === "longText") {
+          const outlinePayload = shouldRefreshStandaloneOutlineForResolvedInput(resolved)
+              ? buildStandaloneOutlineFromLongText(resolved)
+              : standalonePptOutline;
+          await submitPresentonPptFromOutline(outlinePayload);
+          return;
+      }
+
+      if (shouldRefreshStandaloneOutlineForResolvedInput(resolved)) {
+          await handleGeneratePresentonOutline();
+          return;
+      }
+
+      await submitPresentonPptFromOutline(standalonePptOutline);
   };
 
   const updateStandaloneOutlineSlide = (slideIndex, updater) => {
@@ -4151,20 +5657,20 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               targetAudiences: [WRITING_AUDIENCE_PRESET[0]],
               tone: WRITING_TONE_OPTIONS[0],
               minWords: 200,
-              referenceContent: "围绕“企业智能办公助手”场景，突出会议纪要、OCR识别、智能审单、数据决策等能力，强调可在进出口企业真实业务中落地。",
-              keywords: "进出口企业, 智能办公, 会议纪要, OCR识别, 智能审单",
+              referenceContent: "",
+              keywords: "",
               withEmoji: true,
           };
       }
       if (type === 'ppt') {
+          const defaultFocus = getStandalonePptContentFocusConfig(STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
           return {
               modelBackend: resolvedBackend,
-              analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+              contentFocus: defaultFocus.key,
               pptSlideCount: 6,
               analysisMinWords: 350,
-              analysisInput: "分析对象：进出口企业的单证处理与协同办公。\n现状问题：人工录入效率低、审单风险高、业务数据分散、跨部门协同慢。\n请结合本项目能力（会议纪要、OCR、审单、数据库、数据决策）进行分析。",
-              requireMetrics: false,
-              pptFastMode: true,
+              analysisInput: "",
+              requireMetrics: !!defaultFocus.emphasizeMetrics,
           };
       }
       return {
@@ -4173,20 +5679,21 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           consultingRole: WRITING_CONSULTING_ROLE_OPTIONS[0],
           outputFormat: WRITING_OUTPUT_FORMAT_OPTIONS[0],
           consultingMinWords: 300,
-          consultingContext: "公司准备将智能办公系统用于进出口业务全流程，需要给出可执行的落地建议。",
-          consultingConstraints: "预算有限；需分阶段实施；合规优先；兼容现有流程。",
+          consultingContext: "",
+          consultingConstraints: "",
           includeTimeline: true,
       };
   };
 
   const buildDefaultStandalonePptFormData = () => {
+      const defaultFocus = getStandalonePptContentFocusConfig(STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
       return {
           inputMode: STANDALONE_PPT_INPUT_MODES[0].key,
-          analysisFramework: WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0],
+          contentFocus: defaultFocus.key,
           pptSlideCount: 8,
           analysisInput: "",
           documentName: "",
-          requireMetrics: true,
+          requireMetrics: !!defaultFocus.emphasizeMetrics,
           includeImages: false,
           template: 'general',
       };
@@ -4197,18 +5704,26 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       try {
           const result = await presentationApi.getPresentonTemplateCatalog();
           const catalog = Array.isArray(result?.data) ? result.data : [];
-          const normalized = catalog
-              .map((item) => ({
-                  template_id: String(item?.template_id || item?.id || "").trim(),
-                  name: String(item?.name || item?.template_name || item?.template_id || "").trim(),
-                  description: String(item?.description || "").trim(),
-                  source: String(item?.source || "").trim(),
-              }))
-              .filter((item) => item.template_id);
+          const normalized = sortStandalonePptTemplateCatalog(catalog
+              .map((item) => {
+                  const templateId = normalizeStandalonePptTemplateId(item?.template_id || item?.id || "");
+                  const rawName = String(item?.name || item?.template_name || item?.template_id || "").trim();
+                  return {
+                      template_id: templateId,
+                      name: getStandalonePptTemplateLabel({ template_id: templateId, name: rawName }),
+                      description: String(item?.description || getStandalonePptTemplatePreviewMeta(templateId)?.summary || "").trim(),
+                      thumbnail_url: String(item?.thumbnail_url || "").trim(),
+                      source: String(item?.source || "").trim(),
+                  };
+              })
+              .filter((item) => item.template_id));
           const finalCatalog = normalized.length ? normalized : STANDALONE_PPT_BUILTIN_TEMPLATES;
           setStandaloneTemplateCatalog(finalCatalog);
           setStandalonePptForm((prev) => {
-              if (finalCatalog.some((item) => item.template_id === prev.template)) return prev;
+              const normalizedTemplate = normalizeStandalonePptTemplateId(prev.template);
+              if (finalCatalog.some((item) => item.template_id === normalizedTemplate)) {
+                  return normalizedTemplate === prev.template ? prev : { ...prev, template: normalizedTemplate };
+              }
               return { ...prev, template: finalCatalog[0]?.template_id || "general" };
           });
       } catch {
@@ -4223,40 +5738,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       loadStandaloneTemplateCatalog();
   }, [writingEntryMode]);
 
-  useEffect(() => {
-      if (!isTemplatePreviewOpen) {
-          if (templatePreviewPollRef.current) {
-              clearInterval(templatePreviewPollRef.current);
-              templatePreviewPollRef.current = null;
-          }
-          return undefined;
-      }
-
-      const syncSelectionFromFrame = () => {
-          const frame = templatePreviewFrameRef.current;
-          if (!frame?.contentWindow) return;
-          try {
-              const matched = parseTemplatePreviewPath(frame.contentWindow.location?.pathname || "");
-              if (!matched) return;
-              setTemplatePreviewSelection((prev) => {
-                  if (prev.routeId === matched.routeId && prev.templateId === matched.templateId) return prev;
-                  return matched;
-              });
-          } catch {
-              // If browser blocks iframe location access, user can still manually pick in dropdown.
-          }
-      };
-
-      syncSelectionFromFrame();
-      templatePreviewPollRef.current = setInterval(syncSelectionFromFrame, 700);
-      return () => {
-          if (templatePreviewPollRef.current) {
-              clearInterval(templatePreviewPollRef.current);
-              templatePreviewPollRef.current = null;
-          }
-      };
-  }, [isTemplatePreviewOpen]);
-
   const applyReportType = (nextType) => {
       if (!nextType) return;
       setReportType(nextType);
@@ -4266,7 +5747,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
       setReportAudienceInput('');
       setIsPresentonGenerating(false);
-      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+      setPresentonProgress(createIdlePresentonProgress());
       setReportStep('form');
   };
 
@@ -4294,7 +5775,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setReportFormData(buildDefaultReportFormData(activeType, backend));
       setReportAudienceInput('');
       setIsPresentonGenerating(false);
-      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+      setPresentonProgress(createIdlePresentonProgress());
   };
 
   const getActiveOcrText = () => {
@@ -4680,7 +6161,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           setStandalonePptResult(null);
                           setIsPresentonGenerating(false);
                           setIsOutlineGenerating(false);
-                          setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+                          setPresentonProgress(createIdlePresentonProgress());
                       }}
                       className="rounded-3xl border border-fuchsia-200 dark:border-fuchsia-800/50 bg-white/95 dark:bg-gray-900/80 p-6 text-left hover:shadow-lg hover:-translate-y-0.5 transition-all"
                   >
@@ -4707,8 +6188,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           pending: "排队中",
           running: "生成中",
           processing: "处理中",
-          outline_generating: "大纲生成中",
-          outline_ready: "大纲已完成",
+          outline_generating: "内容整理中",
+          outline_ready: "内容已就绪",
           completed: "已完成",
           done: "已完成",
           success: "已完成",
@@ -4725,7 +6206,44 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const textInputClass = "w-full rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-3 text-sm text-gray-800 dark:text-gray-100 outline-none focus:border-emerald-400 dark:focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100 dark:focus:ring-emerald-900/40";
       const textAreaClass = `${textInputClass} min-h-[200px] resize-none`;
       const hasOutline = Array.isArray(standalonePptOutline?.slides) && standalonePptOutline.slides.length > 0;
-      const selectedTemplate = standaloneTemplateCatalog.find((item) => item.template_id === standalonePptForm.template);
+      const selectedFocusConfig = getStandalonePptContentFocusConfig(standalonePptForm.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
+      const editorFocusConfig = getStandalonePptContentFocusConfig(
+          standalonePptOutline?.contentFocus || selectedFocusConfig.key,
+      );
+      const fallbackPreviewLines = buildOutlinePreviewLinesFromResolved({
+          inputMode,
+          slideCount: slideCountPreview,
+          contentFocus: selectedFocusConfig.key,
+          analysisInput: standalonePptForm.analysisInput,
+          typedInput: standalonePptForm.analysisInput,
+          documentName: standalonePptForm.documentName,
+      });
+      const outlineProgressLines =
+          Array.isArray(presentonProgress.previewLines) && presentonProgress.previewLines.length
+              ? presentonProgress.previewLines
+              : fallbackPreviewLines;
+      const outlineProgressCursor = Math.max(
+          1,
+          Math.min(
+              outlineProgressLines.length,
+              Number(presentonProgress.previewCursor) || Math.ceil((Math.max(12, progressValue) / 100) * outlineProgressLines.length),
+          ),
+      );
+      const visibleOutlineProgressLines = outlineProgressLines.slice(0, outlineProgressCursor);
+      const resolvedStandaloneInput = resolveStandalonePptInput();
+      const isCurrentOutlineReusable = !resolvedStandaloneInput?.error && !shouldRefreshStandaloneOutlineForResolvedInput(resolvedStandaloneInput);
+      const resolvedStandaloneTemplateId = normalizeStandalonePptTemplateId(standalonePptForm.template || "general") || "general";
+      const selectedTemplate = standaloneTemplateCatalog.find((item) => item.template_id === resolvedStandaloneTemplateId);
+      const selectedTemplateLabel = getStandalonePptTemplateLabel(selectedTemplate || resolvedStandaloneTemplateId);
+      const hasGeneratedPpt = !!(standalonePptResult?.editUrl || standalonePptResult?.downloadUrl);
+      const hasStandalonePptActions = !!(standalonePptResult?.downloadUrl || standalonePptResult?.editUrl);
+      const slideCountOptions = [6, 8, 10, 12, 15, 20].map((count) => ({ value: count, label: `${count}页` }));
+      const contentFocusOptions = STANDALONE_PPT_CONTENT_FOCUS_OPTIONS.map((item) => ({ value: item.key, label: item.label }));
+      const templateOptions = standaloneTemplateCatalog.map((item) => ({
+          value: item.template_id,
+          label: getStandalonePptTemplateLabel(item),
+      }));
+      const templatePreviewCatalog = standaloneTemplateCatalog.length ? standaloneTemplateCatalog : STANDALONE_PPT_BUILTIN_TEMPLATES;
 
       return (
           <div className="h-full w-full overflow-y-auto bg-[linear-gradient(180deg,#e8f6f2_0%,#f4f8f7_46%,#f8fbfa_100%)] dark:bg-[radial-gradient(circle_at_20%_10%,#1f2937_0%,#111827_45%,#030712_100%)] px-3 py-4 md:px-6 md:py-7">
@@ -4747,7 +6265,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               setStandalonePptResult(null);
                               setIsPresentonGenerating(false);
                               setIsOutlineGenerating(false);
-                              setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+                              setPresentonProgress(createIdlePresentonProgress());
                           }}
                           className="inline-flex items-center gap-1 rounded-xl border border-gray-300 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-white dark:hover:bg-slate-800"
                       >
@@ -4765,7 +6283,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           AI生成PPT，<span className="text-[#4fbf53]">高效交付</span>
                       </h2>
                       <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-                          先生成并编辑大纲，再确认生成 PPT 文件
+                          系统会根据输入自动整理内容结构；长文本可直接转为 PPT
                       </p>
                   </div>
 
@@ -4798,7 +6316,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           {inputMode === "topic" && (
                               <textarea
                                   className={textAreaClass}
-                                  placeholder="请输入 您想制作的PPT主题"
+                                  placeholder="请输入你想制作的 PPT 主题"
                                   value={standalonePptForm.analysisInput || ""}
                                   maxLength={10000}
                                   onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisInput: event.target.value }))}
@@ -4822,7 +6340,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       </label>
                                       <p className="mt-3 text-sm text-gray-700 dark:text-gray-200">或者直接将文档拖到这里</p>
                                       <p className="mt-2 text-xs text-gray-400 dark:text-gray-400">
-                                          建议上传10000字、10MB以内的pdf/doc/docx/txt文件
+                                          建议上传 10000 字、10MB 以内的 PDF/DOC/DOCX/TXT 文件
                                       </p>
                                       {standalonePptForm.documentName && (
                                           <p className="mt-3 text-xs font-medium text-emerald-700 dark:text-emerald-300">
@@ -4844,7 +6362,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               <div className="relative h-full">
                                   <textarea
                                       className={textAreaClass}
-                                      placeholder="输入或粘贴大纲或任意文本内容可直接生成PPT"
+                                      placeholder="输入或粘贴大纲或任意文本内容，可直接生成 PPT"
                                       value={standalonePptForm.analysisInput || ""}
                                       maxLength={10000}
                                       onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, analysisInput: event.target.value }))}
@@ -4856,43 +6374,32 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
                       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                           <div className="flex flex-wrap items-center gap-2">
-                              <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-100">
-                                  <span>篇幅</span>
-                                  <select
-                                      className="bg-transparent text-sm text-gray-700 dark:text-gray-100 outline-none"
-                                      value={standalonePptForm.pptSlideCount ?? 8}
-                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, pptSlideCount: Number(event.target.value) }))}
-                                  >
-                                      {[6, 8, 10, 12, 15, 20].map((count) => (
-                                          <option key={count} value={count}>{count}页</option>
-                                      ))}
-                                  </select>
-                              </label>
-                              <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-100">
-                                  <span>智能策略</span>
-                                  <select
-                                      className="bg-transparent text-sm text-gray-700 dark:text-gray-100 outline-none"
-                                      value={standalonePptForm.requireMetrics ? "smart" : "standard"}
-                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, requireMetrics: event.target.value === "smart" }))}
-                                  >
-                                      <option value="smart">智能提炼</option>
-                                      <option value="standard">标准结构</option>
-                                  </select>
-                              </label>
-                              <label className="inline-flex items-center gap-2 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-700 dark:text-gray-100">
-                                  <span>模板</span>
-                                  <select
-                                      className="bg-transparent text-sm text-gray-700 dark:text-gray-100 outline-none"
-                                      value={standalonePptForm.template || "general"}
-                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, template: event.target.value }))}
-                                  >
-                                      {standaloneTemplateCatalog.map((item) => (
-                                          <option key={item.template_id} value={item.template_id}>
-                                              {item.name || item.template_id}
-                                          </option>
-                                      ))}
-                                  </select>
-                              </label>
+                              <StandalonePptSelect
+                                  label="篇幅"
+                                  value={standalonePptForm.pptSlideCount ?? 8}
+                                  options={slideCountOptions}
+                                  onChange={(nextValue) => setStandalonePptForm((prev) => ({ ...prev, pptSlideCount: Number(nextValue) }))}
+                              />
+                              <StandalonePptSelect
+                                  label="内容导向"
+                                  value={selectedFocusConfig.key}
+                                  options={contentFocusOptions}
+                                  onChange={(nextValue) => {
+                                      const nextFocus = getStandalonePptContentFocusConfig(nextValue);
+                                      setStandalonePptForm((prev) => ({
+                                          ...prev,
+                                          contentFocus: nextFocus.key,
+                                          requireMetrics: !!nextFocus.emphasizeMetrics,
+                                      }));
+                                  }}
+                              />
+                              <StandalonePptSelect
+                                  label="模板"
+                                  value={resolvedStandaloneTemplateId}
+                                  options={templateOptions}
+                                  onChange={(nextValue) => setStandalonePptForm((prev) => ({ ...prev, template: normalizeStandalonePptTemplateId(nextValue) }))}
+                                  disabled={templateOptions.length === 0}
+                              />
                               <button
                                   type="button"
                                   onClick={openTemplatePreviewPicker}
@@ -4900,9 +6407,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               >
                                   模板预览选择
                               </button>
-                              <div className="inline-flex items-center gap-2 rounded-lg border border-amber-200 dark:border-amber-500/40 bg-amber-50/70 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-700 dark:text-amber-200">
-                                  配图已强制关闭
-                              </div>
                           </div>
 
                           <div className="flex flex-wrap items-center gap-2">
@@ -4916,7 +6420,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       setIsTemplatePreviewOpen(false);
                                       setTemplatePreviewSelection({ routeId: '', templateId: '' });
                                       setStandalonePptResult(null);
-                                      setPresentonProgress({ taskId: '', status: 'idle', progress: 0, message: '' });
+                                      setPresentonProgress(createIdlePresentonProgress());
                                   }}
                                   className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800"
                               >
@@ -4924,36 +6428,27 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               </button>
                               <button
                                   type="button"
-                                  onClick={handleGeneratePresentonOutline}
+                                  onClick={handleGeneratePresentonPpt}
                                   disabled={isOutlineGenerating || isPresentonGenerating}
                                   className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
                               >
-                                  {isOutlineGenerating ? <Loader2 size={15} className="animate-spin" /> : <Sparkles size={15} />}
-                                  {isOutlineGenerating ? "大纲生成中" : "生成大纲"}
+                                  {(isOutlineGenerating || isPresentonGenerating) ? <Loader2 size={15} className="animate-spin" /> : <Presentation size={15} />}
+                                  {isOutlineGenerating ? "内容整理中" : (isPresentonGenerating ? `生成中 ${Math.round(progressValue)}%` : "生成PPT")}
                               </button>
                               <button
                                   type="button"
                                   onClick={() => setIsOutlineEditorOpen(true)}
-                                  disabled={!hasOutline || isOutlineGenerating}
+                                  disabled={!hasOutline || isOutlineGenerating || !isCurrentOutlineReusable}
                                   className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2 text-sm font-semibold text-gray-700 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                               >
                                   编辑大纲
-                              </button>
-                              <button
-                                  type="button"
-                                  onClick={handleGeneratePresentonPpt}
-                                  disabled={isPresentonGenerating || isOutlineGenerating || !hasOutline}
-                                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                  {isPresentonGenerating ? <Loader2 size={15} className="animate-spin" /> : <Presentation size={15} />}
-                                  {isPresentonGenerating ? `生成中 ${Math.round(progressValue)}%` : "确认生成PPT"}
                               </button>
                           </div>
                       </div>
                       <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                           {isTemplateCatalogLoading
                               ? "模板加载中..."
-                              : `当前模板：${selectedTemplate?.name || standalonePptForm.template || "general"} · 图片生成默认关闭`}
+                              : `当前模板：${selectedTemplateLabel}`}
                       </div>
                   </div>
 
@@ -4962,7 +6457,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           <button
                               key={item}
                               type="button"
-                              onClick={() => setStandalonePptForm((prev) => ({ ...prev, inputMode: "topic", analysisInput: item }))}
+                              onClick={() => setStandalonePptForm((prev) => ({
+                                  ...prev,
+                                  inputMode: "topic",
+                                  analysisInput: getStandalonePptTopicSuggestionPrompt(item),
+                              }))}
                               className="rounded-full border border-emerald-200 dark:border-emerald-500/30 bg-white/80 dark:bg-slate-900/80 px-5 py-2 text-sm text-gray-700 dark:text-gray-200 hover:border-emerald-300 dark:hover:border-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300"
                           >
                               {item}
@@ -4979,12 +6478,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               <div className="flex flex-wrap items-center gap-2">
                                   <select
                                       className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs text-gray-700 dark:text-gray-100 outline-none"
-                                      value={standalonePptForm.template || "general"}
-                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, template: event.target.value }))}
+                                      value={resolvedStandaloneTemplateId}
+                                      onChange={(event) => setStandalonePptForm((prev) => ({ ...prev, template: normalizeStandalonePptTemplateId(event.target.value) }))}
                                   >
                                       {standaloneTemplateCatalog.map((item) => (
                                           <option key={`workspace-template-${item.template_id}`} value={item.template_id}>
-                                              {item.name || item.template_id}
+                                              {getStandalonePptTemplateLabel(item)}
                                           </option>
                                       ))}
                                   </select>
@@ -5005,6 +6504,38 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                   </button>
                               </div>
                           </div>
+                          {hasStandalonePptActions && (
+                              <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 dark:border-emerald-500/30 bg-emerald-50/80 dark:bg-emerald-900/20 px-3 py-3">
+                                  <div className="min-w-0">
+                                      <div className="text-sm font-semibold text-emerald-700 dark:text-emerald-200">PPT 生成完成</div>
+                                      <div className="mt-1 text-xs text-emerald-700/80 dark:text-emerald-200/80">
+                                          来源：{standalonePptResult?.provider || 'presenton'} · 页数：{standalonePptResult?.slideCount || slideCountPreview}
+                                      </div>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                      {standalonePptResult?.downloadUrl && (
+                                          <a
+                                              href={standalonePptResult.downloadUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+                                          >
+                                              <Download size={13} /> 下载PPT
+                                          </a>
+                                      )}
+                                      {standalonePptResult?.editUrl && (
+                                          <a
+                                              href={standalonePptResult.editUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 dark:border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-700 dark:text-emerald-200 hover:bg-emerald-50 dark:hover:bg-emerald-900/30"
+                                          >
+                                              在线编辑
+                                          </a>
+                                      )}
+                                  </div>
+                              </div>
+                          )}
                           {isProgressVisible && (
                               <div className="mb-3 rounded-xl border border-emerald-100 dark:border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-900/20 p-3">
                                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -5053,26 +6584,88 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       {standalonePptResult?.editUrl ? (
                                           <iframe
                                               src={standalonePptResult.editUrl}
-                                              title="PPT Preview"
+                                              title="PPT 在线预览"
                                               className="w-full h-full border-0"
                                           />
-                                      ) : (
-                                          <div className="h-full overflow-y-auto p-4 custom-scrollbar">
-                                              <div className="rounded-lg border border-emerald-100 dark:border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-900/20 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-200">
-                                                  {isPresentonGenerating ? "正在生成PPT..." : "确认生成后，这里会展示在线 PPT 编辑区域。"}
+                                      ) : standalonePptResult?.error ? (
+                                          <div className="flex h-full items-center justify-center p-6">
+                                              <div className="w-full max-w-md rounded-2xl border border-red-200 dark:border-red-500/30 bg-white/95 dark:bg-slate-900/90 p-6 text-center shadow-sm">
+                                                  <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-red-50 text-red-500 dark:bg-red-900/20 dark:text-red-300">
+                                                      <AlertTriangle size={24} />
+                                                  </div>
+                                                  <div className="mt-4 text-lg font-semibold text-gray-900 dark:text-white">PPT 生成失败</div>
+                                                  <div className="mt-2 text-sm leading-6 text-gray-500 dark:text-gray-400">
+                                                      {standalonePptResult.error}
+                                                  </div>
+                                                  <div className="mt-4 text-xs text-gray-400 dark:text-gray-500">
+                                                      可调整左侧大纲或切换模板后重新生成。
+                                                  </div>
                                               </div>
-                                              <div className="mt-3 space-y-3">
-                                                  {standalonePptOutline.slides.slice(0, 8).map((slide, idx) => (
-                                                      <div key={`workspace-preview-${idx}`} className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3">
-                                                          <div className="text-xs text-gray-500 dark:text-gray-400">Slide {idx + 1}</div>
-                                                          <div className="text-sm font-semibold text-gray-900 dark:text-white">{slide.title || `第 ${idx + 1} 页`}</div>
-                                                          <div className="mt-2 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-                                                              {(Array.isArray(slide.points) ? slide.points : []).slice(0, 3).map((point, pointIdx) => (
-                                                                  <div key={`workspace-preview-point-${idx}-${pointIdx}`}>- {point}</div>
-                                                              ))}
+                                          </div>
+                                      ) : !hasGeneratedPpt ? (
+                                          <div className="flex h-full items-center justify-center p-6">
+                                              <div className="w-full max-w-lg rounded-[28px] border border-emerald-100 dark:border-emerald-500/20 bg-white/95 dark:bg-slate-900/90 p-6 shadow-[0_18px_50px_rgba(16,24,40,0.12)]">
+                                                  <div className="flex items-center justify-between gap-3">
+                                                      <div>
+                                                          <div className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-600 dark:text-emerald-300">
+                                                              PPT Rendering
+                                                          </div>
+                                                          <div className="mt-2 text-xl font-semibold text-gray-900 dark:text-white">
+                                                              正在生成演示文稿
                                                           </div>
                                                       </div>
-                                                  ))}
+                                                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-300">
+                                                          <Loader2 size={22} className="animate-spin" />
+                                                      </div>
+                                                  </div>
+
+                                                  <div className="mt-4 rounded-2xl border border-emerald-100 dark:border-emerald-500/20 bg-emerald-50/80 dark:bg-emerald-900/10 px-4 py-3">
+                                                      <div className="flex items-center justify-between gap-3 text-sm">
+                                                          <span className="font-medium text-emerald-700 dark:text-emerald-200">
+                                                              {presentonProgress.message || "正在根据当前大纲排版并生成页面..."}
+                                                          </span>
+                                                          <span className="text-emerald-700/80 dark:text-emerald-200/80">
+                                                              {Math.round(progressValue)}%
+                                                          </span>
+                                                      </div>
+                                                      <div className="mt-3 h-2 overflow-hidden rounded-full bg-emerald-100 dark:bg-emerald-800/40">
+                                                          <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 transition-all duration-500" style={{ width: `${Math.max(8, progressValue)}%` }} />
+                                                      </div>
+                                                  </div>
+
+                                                  <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                                      {[0, 1, 2, 3].map((cardIdx) => (
+                                                          <div key={`ppt-loading-skeleton-${cardIdx}`} className="rounded-2xl border border-gray-200 dark:border-slate-700 bg-gray-50/90 dark:bg-slate-800/60 p-4">
+                                                              <div className="h-3 w-16 rounded-full bg-emerald-100 dark:bg-emerald-900/40 animate-pulse" />
+                                                              <div className="mt-4 h-20 rounded-xl bg-gradient-to-br from-emerald-100 via-white to-cyan-100 dark:from-slate-700 dark:via-slate-800 dark:to-slate-700 animate-pulse" />
+                                                              <div className="mt-4 space-y-2">
+                                                                  <div className="h-2.5 w-5/6 rounded-full bg-gray-200 dark:bg-slate-700 animate-pulse" />
+                                                                  <div className="h-2.5 w-2/3 rounded-full bg-gray-200 dark:bg-slate-700 animate-pulse" />
+                                                                  <div className="h-2.5 w-3/4 rounded-full bg-gray-200 dark:bg-slate-700 animate-pulse" />
+                                                              </div>
+                                                          </div>
+                                                      ))}
+                                                  </div>
+
+                                                  <div className="mt-5 flex items-center justify-between gap-3 text-xs text-gray-500 dark:text-gray-400">
+                                                      <span>模板：{selectedTemplateLabel}</span>
+                                                      <span>{selectedFocusConfig.label} · {slideCountPreview} 页</span>
+                                                  </div>
+                                              </div>
+                                          </div>
+                                      ) : (
+                                          <div className="flex h-full items-center justify-center p-6">
+                                              <div className="w-full max-w-md rounded-2xl border border-emerald-200 dark:border-emerald-500/30 bg-white/95 dark:bg-slate-900/90 p-6 text-center shadow-sm">
+                                                  <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-300">
+                                                      <Check size={24} />
+                                                  </div>
+                                                  <div className="mt-4 text-lg font-semibold text-gray-900 dark:text-white">PPT 已生成完成</div>
+                                                  <div className="mt-2 text-sm leading-6 text-gray-500 dark:text-gray-400">
+                                                      当前结果已可下载。若返回在线编辑地址，这里会自动切换为 PPT 编辑区。
+                                                  </div>
+                                                  <div className="mt-4 rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 px-4 py-3 text-xs text-gray-600 dark:text-gray-300">
+                                                      模板：{selectedTemplateLabel} · {slideCountPreview} 页 · {selectedFocusConfig.label}
+                                                  </div>
                                               </div>
                                           </div>
                                       )}
@@ -5095,18 +6688,18 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 p-4">
                           <div className="text-sm font-semibold text-gray-900 dark:text-white">生成概览</div>
                           <div className="mt-2 space-y-1 text-xs text-gray-600 dark:text-gray-300">
-                              <p>框架：{standalonePptForm.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]}</p>
+                              <p>内容导向：{selectedFocusConfig.label}</p>
                               <p>预计页数：{slideCountPreview} 页</p>
-                              <p>模板：{selectedTemplate?.name || standalonePptForm.template || "general"}</p>
+                              <p>模板：{selectedTemplateLabel}</p>
                               <p>输入模式：{STANDALONE_PPT_INPUT_MODES.find((item) => item.key === inputMode)?.label || "输入PPT主题"}</p>
-                              <p>配图：关闭（强制）</p>
+                              <p>内容提示：{selectedFocusConfig.description}</p>
                               <p>大纲状态：{hasOutline ? `已生成（${standalonePptOutline.slides.length} 页）` : "待生成"}</p>
                           </div>
                       </div>
                   </div>
                   )}
 
-                  {standalonePptResult?.downloadUrl && (
+                  {!isPptWorkspaceOpen && standalonePptResult?.downloadUrl && (
                       <div className="mx-auto mt-3 max-w-5xl rounded-xl border border-emerald-200 dark:border-emerald-500/30 bg-emerald-50/70 dark:bg-emerald-900/20 p-4">
                           <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-200">PPT 生成完成</p>
                           <p className="mt-1 text-xs text-emerald-700/80 dark:text-emerald-200/80">
@@ -5144,7 +6737,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   {isTemplatePreviewOpen && (
                       <div className="fixed inset-0 z-[75] flex items-center justify-center p-3 md:p-5">
                           <div className="absolute inset-0 bg-black/50" onClick={closeTemplatePreviewPicker} />
-                          <div className="relative w-full max-w-[1360px] h-[min(90vh,920px)] rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden flex flex-col">
+                          <div className="relative w-full max-w-[1180px] rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl overflow-hidden flex max-h-[90vh] flex-col">
                               <div className="px-5 py-3 border-b border-gray-200 dark:border-slate-700 flex items-center justify-between gap-2">
                                   <div className="text-lg font-semibold text-gray-900 dark:text-white">模板预览与选择</div>
                                   <button
@@ -5155,38 +6748,43 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       <X size={18} />
                                   </button>
                               </div>
-                              <div className="px-5 py-2 border-b border-gray-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500 dark:text-gray-400">
-                                  <div>在模板预览页进入某个模板详情后，点击下方“使用当前模板”即可应用。</div>
-                                  <a
-                                      href={`${PRESENTON_PROXY_PREFIX}/template-preview`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="inline-flex items-center gap-1 rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800"
-                                  >
-                                      新窗口打开
-                                  </a>
+                              <div className="px-5 py-3 border-b border-gray-200 dark:border-slate-700 text-sm text-gray-500 dark:text-gray-400">
+                                  直接选择适合当前 PPT 的模板风格。这里展示的是系统内可稳定使用的模板，不再依赖外部预览页。
                               </div>
-                              <div className="flex-1 min-h-0 bg-gray-100 dark:bg-slate-950">
-                                  <iframe
-                                      ref={templatePreviewFrameRef}
-                                      title="Template Preview"
-                                      src={`${PRESENTON_PROXY_PREFIX}/template-preview`}
-                                      className="w-full h-full border-0"
-                                  />
+                              <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-slate-950/70 p-5">
+                                  {isTemplateCatalogLoading ? (
+                                      <div className="flex min-h-[320px] items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-white/70 text-sm text-gray-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-gray-400">
+                                          正在加载模板目录...
+                                      </div>
+                                  ) : (
+                                      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                                          {templatePreviewCatalog.map((item) => (
+                                              <StandaloneTemplatePreviewCard
+                                                  key={item.template_id}
+                                                  template={item}
+                                                  selected={
+                                                      normalizeStandalonePptTemplateId(templatePreviewSelection?.templateId || "")
+                                                      === normalizeStandalonePptTemplateId(item.template_id || "")
+                                                  }
+                                                  onSelect={(templateId) => {
+                                                      const value = normalizeStandalonePptTemplateId(templateId || "");
+                                                      setTemplatePreviewSelection({ routeId: value, templateId: value });
+                                                  }}
+                                              />
+                                          ))}
+                                      </div>
+                                  )}
                               </div>
-                              <div className="px-5 py-3 border-t border-gray-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-2">
-                                  <div className="flex items-center gap-2 min-w-[260px]">
-                                      <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">模板ID</span>
+                              <div className="px-5 py-4 border-t border-gray-200 dark:border-slate-700 flex flex-wrap items-end justify-between gap-3">
+                                  <div className="flex min-w-[280px] flex-1 items-center gap-2">
+                                      <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">模板编号</span>
                                       <input
                                           className="w-full rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm text-gray-800 dark:text-gray-100 outline-none"
-                                          placeholder="可手动输入模板ID"
+                                          placeholder="也可手动输入模板编号"
                                           value={templatePreviewSelection?.templateId || ""}
                                           onChange={(event) => {
-                                              const value = String(event.target.value || "").trim();
-                                              setTemplatePreviewSelection((prev) => ({
-                                                  routeId: prev?.routeId || value,
-                                                  templateId: value,
-                                              }));
+                                              const value = normalizeStandalonePptTemplateId(event.target.value || "");
+                                              setTemplatePreviewSelection({ routeId: value, templateId: value });
                                           }}
                                       />
                                   </div>
@@ -5204,7 +6802,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                           disabled={!templatePreviewSelection?.templateId}
                                           className="rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 text-sm font-semibold disabled:opacity-60"
                                       >
-                                          使用当前模板
+                                          应用所选模板
                                       </button>
                                   </div>
                               </div>
@@ -5218,22 +6816,38 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           <div className="relative w-full max-w-3xl rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl">
                               <div className="p-5">
                                   <div className="text-3xl font-semibold text-gray-900 dark:text-white">
-                                      AI正在生成大纲...{Math.max(12, Math.round(progressValue))}%
+                                                  AI正在整理内容结构...{Math.max(12, Math.round(progressValue))}%
                                   </div>
                                   <div className="mt-2 text-sm text-gray-500 dark:text-gray-400">
                                       大纲内容生成时间约30秒-1分钟，内容可在生成完毕后自由编辑
                                   </div>
                                   <div className="mt-4 rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-950 max-h-[420px] overflow-y-auto p-4 space-y-2 custom-scrollbar">
-                                      {(String(standalonePptForm.analysisInput || "正在根据你的输入组织大纲结构..."))
-                                          .split('\n')
-                                          .map((line) => line.trim())
-                                          .filter(Boolean)
-                                          .slice(0, 18)
-                                          .map((line, idx) => (
-                                              <div key={`outline-progress-preview-${idx}`} className="text-sm text-gray-700 dark:text-gray-200">
-                                                  {idx + 1}. {line}
+                                      {visibleOutlineProgressLines.map((line, idx) => {
+                                          const trimmed = String(line || '').trim();
+                                          const isSectionLine = /^\d+\.\s/.test(trimmed);
+                                          const isMetaLine = /^(标题|副标题|输入模式)：/.test(trimmed);
+                                          const isBulletLine = /^\s*-\s*/.test(trimmed);
+                                          return (
+                                              <div
+                                                  key={`outline-progress-preview-${idx}`}
+                                                  className={[
+                                                      "whitespace-pre-wrap text-sm leading-7",
+                                                      isMetaLine
+                                                          ? "font-semibold text-gray-900 dark:text-white"
+                                                          : isSectionLine
+                                                              ? "font-medium text-gray-800 dark:text-gray-100"
+                                                              : isBulletLine
+                                                                  ? "text-gray-600 dark:text-gray-300 pl-2"
+                                                                  : "text-gray-700 dark:text-gray-200",
+                                                  ].join(' ')}
+                                              >
+                                                  {trimmed}
+                                                  {idx === visibleOutlineProgressLines.length - 1 && progressStatus === 'outline_generating' && (
+                                                      <span className="ml-1 inline-block h-4 w-1 rounded bg-emerald-400 align-middle animate-pulse" />
+                                                  )}
                                               </div>
-                                          ))}
+                                          );
+                                      })}
                                   </div>
                               </div>
                           </div>
@@ -5333,37 +6947,34 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       </div>
 
                                       <div className="rounded-xl border border-gray-200 dark:border-slate-700 bg-gray-50/80 dark:bg-slate-800/60 p-3 overflow-hidden flex flex-col">
-                                          <div className="flex items-center justify-between gap-2 mb-2">
-                                              <div className="text-3xl font-semibold text-gray-900 dark:text-white">智能优化建议</div>
-                                              <button
-                                                  type="button"
-                                                  onClick={handleGeneratePresentonOutline}
-                                                  disabled={isOutlineGenerating || isPresentonGenerating}
-                                                  className="rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm px-4 py-2 disabled:opacity-60"
-                                              >
-                                                  重新获取建议
-                                              </button>
-                                          </div>
+                                          <div className="mb-2 text-3xl font-semibold text-gray-900 dark:text-white">修改建议</div>
                                           <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 pr-1">
                                               {standalonePptOutline.slides.map((slide, idx) => (
                                                   <div key={`outline-suggestion-${idx}`} className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3">
-                                                      <div className="text-lg font-medium text-gray-900 dark:text-white">{slide.title || `第 ${idx + 1} 页`}</div>
-                                                      <div className="mt-2 space-y-1 text-sm text-gray-600 dark:text-gray-300">
-                                                          {(Array.isArray(slide.points) ? slide.points : []).slice(0, 2).map((point, pointIdx) => (
-                                                              <div key={`outline-suggestion-point-${idx}-${pointIdx}`}>{point}</div>
-                                                          ))}
+                                                      <div className="flex items-start justify-between gap-3">
+                                                          <div>
+                                                              <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300">第 {idx + 1} 页</div>
+                                                              <div className="mt-1 text-lg font-medium text-gray-900 dark:text-white">{slide.title || `第 ${idx + 1} 页`}</div>
+                                                          </div>
+                                                          <div className="rounded-full border border-gray-200 dark:border-slate-700 px-2 py-1 text-[11px] text-gray-500 dark:text-gray-400">
+                                                              {editorFocusConfig.label}
+                                                          </div>
                                                       </div>
-                                                      <div className="mt-2 flex justify-end">
-                                                          <button
-                                                              type="button"
-                                                              onClick={() => updateStandaloneOutlineSlide(idx, (prevSlide) => ({
-                                                                  ...prevSlide,
-                                                                  points: [...(Array.isArray(prevSlide.points) ? prevSlide.points : []), "补充：加入可量化指标与阶段目标。"],
-                                                              }))}
-                                                              className="rounded-lg border border-emerald-300 text-emerald-600 dark:text-emerald-300 px-3 py-1.5 text-sm hover:bg-emerald-50 dark:hover:bg-emerald-900/30"
-                                                          >
-                                                              采用建议
-                                                          </button>
+                                                      <div className="mt-3 space-y-2">
+                                                          {buildStandaloneOutlineRevisionSuggestions(slide, idx, standalonePptOutline.slides, editorFocusConfig).map((suggestion) => (
+                                                              <div key={`outline-suggestion-${idx}-${suggestion.code}`} className="rounded-lg border border-gray-200 dark:border-slate-700 bg-gray-50 dark:bg-slate-800/60 px-3 py-2">
+                                                                  <div className="text-sm text-gray-700 dark:text-gray-200">{suggestion.text}</div>
+                                                                  <div className="mt-2 flex justify-end">
+                                                                      <button
+                                                                          type="button"
+                                                                          onClick={() => applyStandaloneOutlineSuggestion(idx, suggestion.code)}
+                                                                          className="rounded-lg border border-emerald-300 text-emerald-600 dark:text-emerald-300 px-3 py-1.5 text-sm hover:bg-emerald-50 dark:hover:bg-emerald-900/30"
+                                                                      >
+                                                                          采用建议
+                                                                      </button>
+                                                                  </div>
+                                                              </div>
+                                                          ))}
                                                       </div>
                                                   </div>
                                               ))}
@@ -5373,14 +6984,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               </div>
 
                               <div className="px-5 py-4 border-t border-gray-200 dark:border-slate-700 flex items-center justify-end gap-2">
-                                  <button
-                                      type="button"
-                                      onClick={handleGeneratePresentonOutline}
-                                      disabled={isOutlineGenerating || isPresentonGenerating}
-                                      className="rounded-lg border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-slate-800 disabled:opacity-60"
-                                  >
-                                      换个大纲
-                                  </button>
                                   <button
                                       type="button"
                                       onClick={handleGeneratePresentonPpt}
@@ -5403,14 +7006,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const backend = reportFormData.modelBackend || llmBackend;
       const tabs = [
           { key: 'report', label: '创意内容生成', desc: '营销文案、功能发布', icon: FileText, activeClass: 'bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-900/30 dark:text-blue-200 dark:border-blue-500/50' },
-          { key: 'ppt', label: '市场/行业分析', desc: '结构化分析与数据建议', icon: Layout, activeClass: 'bg-indigo-50 text-indigo-700 border-indigo-300 dark:bg-indigo-900/30 dark:text-indigo-200 dark:border-indigo-500/50' },
+          { key: 'ppt', label: 'PPT内容策划', desc: '按演示结构生成内容', icon: Layout, activeClass: 'bg-indigo-50 text-indigo-700 border-indigo-300 dark:bg-indigo-900/30 dark:text-indigo-200 dark:border-indigo-500/50' },
           { key: 'email', label: '建议/咨询', desc: '面向团队的落地方案', icon: Mail, activeClass: 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-900/30 dark:text-emerald-200 dark:border-emerald-500/50' },
       ];
       const activeMeta = tabs.find((item) => item.key === activeType) || tabs[0];
       const labelClass = 'text-sm font-medium text-gray-700 dark:text-gray-200';
       const inputClass = 'w-full rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2.5 text-sm text-gray-800 dark:text-gray-100 outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-500/10';
       const textareaClass = `${inputClass} min-h-[110px] resize-y`;
+      const writingSuggestions = WRITING_FIELD_SUGGESTIONS[activeType] || {};
       const audiences = Array.isArray(reportFormData.targetAudiences) ? reportFormData.targetAudiences : [];
+      const selectedPptFocus = getStandalonePptContentFocusConfig(reportFormData.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
 
       const updateField = (field, value) => {
           setReportFormData((prev) => ({ ...prev, [field]: value }));
@@ -5426,10 +7031,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             ]
           : activeType === 'ppt'
               ? [
-                  ['分析框架', reportFormData.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]],
+                  ['内容导向', selectedPptFocus.label],
                   ['最少字数', `${Math.max(200, Number(reportFormData.analysisMinWords) || 350)} 字`],
                   ['信息输入', reportFormData.analysisInput ? `已填写 ${String(reportFormData.analysisInput).length} 字` : '未填写'],
-                  ['数据指标', reportFormData.requireMetrics ? '要求丰富指标' : '普通分析'],
+                  ['内容提示', selectedPptFocus.description],
                 ]
               : [
                   ['咨询类型', reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]],
@@ -5561,8 +7166,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       <label className="space-y-1.5"><span className={labelClass}>语气或风格是</span><select className={inputClass} value={reportFormData.tone || WRITING_TONE_OPTIONS[0]} onChange={(event) => updateField('tone', event.target.value)}>{WRITING_TONE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
                                       <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={100} max={5000} className={inputClass} value={reportFormData.minWords ?? 200} onChange={(event) => updateField('minWords', event.target.value)} /></label>
                                   </div>
-                                  <label className="space-y-1.5 block"><span className={labelClass}>参考这些内容</span><textarea className={textareaClass} maxLength={1200} value={reportFormData.referenceContent || ''} onChange={(event) => updateField('referenceContent', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.referenceContent || '').length} / 1200</span></label>
-                                  <label className="space-y-1.5 block"><span className={labelClass}>包含这些关键词</span><textarea className={textareaClass} maxLength={300} value={reportFormData.keywords || ''} onChange={(event) => updateField('keywords', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.keywords || '').length} / 300</span></label>
+                                  <label className="space-y-1.5 block">
+                                      <span className={labelClass}>参考这些内容</span>
+                                      <textarea className={textareaClass} maxLength={1200} placeholder={writingSuggestions.referenceContent || '选填。可输入你希望模型重点参考的业务背景、卖点、素材。'} value={reportFormData.referenceContent || ''} onChange={(event) => updateField('referenceContent', event.target.value)} />
+                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.referenceContent || '').length} / 1200</span>
+                                  </label>
+                                  <label className="space-y-1.5 block">
+                                      <span className={labelClass}>包含这些关键词</span>
+                                      <textarea className={textareaClass} maxLength={300} placeholder={writingSuggestions.keywords || '选填。多个关键词可用逗号分隔。'} value={reportFormData.keywords || ''} onChange={(event) => updateField('keywords', event.target.value)} />
+                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.keywords || '').length} / 300</span>
+                                  </label>
                                   <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.withEmoji} onChange={(event) => updateField('withEmoji', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />带一点emoji</label>
                               </>
                           )}
@@ -5570,10 +7183,21 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           {activeType === 'ppt' && (
                               <>
                                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                      <label className="space-y-1.5"><span className={labelClass}>分析框架</span><select className={inputClass} value={reportFormData.analysisFramework || WRITING_ANALYSIS_FRAMEWORK_OPTIONS[0]} onChange={(event) => updateField('analysisFramework', event.target.value)}>{WRITING_ANALYSIS_FRAMEWORK_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>内容导向</span><select className={inputClass} value={selectedPptFocus.key} onChange={(event) => {
+                                          const nextFocus = getStandalonePptContentFocusConfig(event.target.value);
+                                          setReportFormData((prev) => ({
+                                              ...prev,
+                                              contentFocus: nextFocus.key,
+                                              requireMetrics: !!nextFocus.emphasizeMetrics,
+                                          }));
+                                      }}>{STANDALONE_PPT_CONTENT_FOCUS_OPTIONS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
                                       <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={200} max={5000} className={inputClass} value={reportFormData.analysisMinWords ?? 350} onChange={(event) => updateField('analysisMinWords', event.target.value)} /></label>
                                   </div>
-                                  <label className="space-y-1.5 block"><span className={labelClass}>相关信息输入</span><textarea className={textareaClass} maxLength={2000} value={reportFormData.analysisInput || ''} onChange={(event) => updateField('analysisInput', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.analysisInput || '').length} / 2000</span></label>
+                                  <label className="space-y-1.5 block">
+                                      <span className={labelClass}>相关信息输入</span>
+                                      <textarea className={textareaClass} maxLength={2000} placeholder={writingSuggestions.analysisInput || '选填。输入汇报主题、业务背景、现状问题、目标和希望重点展开的方向。'} value={reportFormData.analysisInput || ''} onChange={(event) => updateField('analysisInput', event.target.value)} />
+                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.analysisInput || '').length} / 2000</span>
+                                  </label>
                                   <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.requireMetrics} onChange={(event) => updateField('requireMetrics', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />要求结合丰富的数据指标</label>
                               </>
                           )}
@@ -5588,8 +7212,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                       <label className="space-y-1.5"><span className={labelClass}>输出形式</span><select className={inputClass} value={reportFormData.outputFormat || WRITING_OUTPUT_FORMAT_OPTIONS[0]} onChange={(event) => updateField('outputFormat', event.target.value)}>{WRITING_OUTPUT_FORMAT_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
                                       <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={200} max={5000} className={inputClass} value={reportFormData.consultingMinWords ?? 300} onChange={(event) => updateField('consultingMinWords', event.target.value)} /></label>
                                   </div>
-                                  <label className="space-y-1.5 block"><span className={labelClass}>业务背景描述</span><textarea className={textareaClass} maxLength={1600} value={reportFormData.consultingContext || ''} onChange={(event) => updateField('consultingContext', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.consultingContext || '').length} / 1600</span></label>
-                                  <label className="space-y-1.5 block"><span className={labelClass}>约束条件/限制</span><textarea className={textareaClass} maxLength={1000} value={reportFormData.consultingConstraints || ''} onChange={(event) => updateField('consultingConstraints', event.target.value)} /><span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.consultingConstraints || '').length} / 1000</span></label>
+                                  <label className="space-y-1.5 block">
+                                      <span className={labelClass}>业务背景描述</span>
+                                      <textarea className={textareaClass} maxLength={1600} placeholder={writingSuggestions.consultingContext || '选填。输入当前业务场景、目标问题和希望达成的效果。'} value={reportFormData.consultingContext || ''} onChange={(event) => updateField('consultingContext', event.target.value)} />
+                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.consultingContext || '').length} / 1600</span>
+                                  </label>
+                                  <label className="space-y-1.5 block">
+                                      <span className={labelClass}>约束条件/限制</span>
+                                      <textarea className={textareaClass} maxLength={1000} placeholder={writingSuggestions.consultingConstraints || '选填。输入预算、时间、合规、系统兼容等限制条件。'} value={reportFormData.consultingConstraints || ''} onChange={(event) => updateField('consultingConstraints', event.target.value)} />
+                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.consultingConstraints || '').length} / 1000</span>
+                                  </label>
                                   <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.includeTimeline} onChange={(event) => updateField('includeTimeline', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />需要分阶段时间表</label>
                               </>
                           )}
@@ -5677,7 +7309,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
        <h2 className="home-hero-title text-2xl text-gray-800 dark:text-white mb-8 text-center px-4">
            {isMeetingMode ? "上传录音，一键总结" : (isAuditMode ? "智能审单 & 风险合规检测" : (isOCRMode ? "图片/PDF 转文字 & 智能分析" : "今天有什么计划？"))}
        </h2>
-       <Suggestions onSuggestionClick={handleSuggestionClick} />
+       <Suspense fallback={<div className="text-sm text-gray-400 dark:text-gray-500">加载建议中...</div>}>
+         <Suggestions onSuggestionClick={handleSuggestionClick} />
+       </Suspense>
      </div>
   );
 
@@ -6417,38 +8051,42 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           </div>
         </div>
       )}
-      <MobileSidebar
-        isOpen={isMobileSidebarOpen}
-        onClose={() => setIsMobileSidebarOpen(false)}
-        userProfile={userProfile}
-        sessionList={sessionList}
-        currentSessionId={currentSessionId}
-        onSessionClick={handleSessionClick}
-        onNewChat={handleNewChat}
-        onLogout={onLogout}
-        onShowAppearance={handleOpenSettingsModal}
-        currentMode={currentMode}
-        onModeChange={onModeChange}
-        isLoading={isProfileLoading || isSessionsLoading}
-        selectedModel={selectedModel}
-      />
+      <Suspense fallback={null}>
+        <MobileSidebar
+          isOpen={isMobileSidebarOpen}
+          onClose={() => setIsMobileSidebarOpen(false)}
+          userProfile={userProfile}
+          sessionList={sessionList}
+          currentSessionId={currentSessionId}
+          onSessionClick={handleSessionClick}
+          onNewChat={handleNewChat}
+          onLogout={onLogout}
+          onShowAppearance={handleOpenSettingsModal}
+          currentMode={currentMode}
+          onModeChange={onModeChange}
+          isLoading={isProfileLoading || isSessionsLoading}
+          selectedModel={selectedModel}
+        />
+      </Suspense>
 
-      <Sidebar
-        isOpen={isSidebarOpen}
-        onClose={() => setIsSidebarOpen(false)}
-        onNewChat={handleNewChat}
-        sessionList={sessionList}
-        currentSessionId={currentSessionId}
-        onSessionClick={handleSessionClick}
-        userProfile={userProfile}
-        onLogout={onLogout}
-        onShowAppearance={handleOpenSettingsModal}
-        currentMode={currentMode}
-        onModeChange={onModeChange}
-        isLoadingSessions={isSessionsLoading}
-        isLoadingProfile={isProfileLoading}
-        selectedModel={selectedModel}
-      />
+      <Suspense fallback={<div className="hidden md:block w-[280px] shrink-0 border-r border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-950" />}>
+        <Sidebar
+          isOpen={isSidebarOpen}
+          onClose={() => setIsSidebarOpen(false)}
+          onNewChat={handleNewChat}
+          sessionList={sessionList}
+          currentSessionId={currentSessionId}
+          onSessionClick={handleSessionClick}
+          userProfile={userProfile}
+          onLogout={onLogout}
+          onShowAppearance={handleOpenSettingsModal}
+          currentMode={currentMode}
+          onModeChange={onModeChange}
+          isLoadingSessions={isSessionsLoading}
+          isLoadingProfile={isProfileLoading}
+          selectedModel={selectedModel}
+        />
+      </Suspense>
 
       <div className="dashboard-main-surface flex-1 flex flex-col h-full relative bg-white dark:bg-gray-950 min-w-0 transition-colors">
         {/* Mo 移动标头 */}

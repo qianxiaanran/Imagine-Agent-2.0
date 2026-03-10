@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import Header, HTTPException
 
 from supabase_client import get_admin_supabase, require_supabase
+from runtime_storage import (
+    SMS_TOKEN_CACHE_FILE as RUNTIME_SMS_TOKEN_CACHE_FILE,
+    ensure_runtime_layout,
+    migrate_legacy_runtime_files,
+)
 
 
 ROLE_ADMIN = "admin"
@@ -24,7 +29,9 @@ ROLE_ALIASES = {
 ADMIN_ROLES = {ROLE_ADMIN}
 AUDIT_ROLES = {ROLE_ADMIN, ROLE_AUDITOR}
 KB_ROLES = {ROLE_ADMIN, ROLE_KB_ADMIN}
-SMS_TOKEN_CACHE_FILE = os.path.join(os.path.dirname(__file__), ".sms_token_cache.json")
+ensure_runtime_layout()
+migrate_legacy_runtime_files()
+SMS_TOKEN_CACHE_FILE = str(RUNTIME_SMS_TOKEN_CACHE_FILE)
 
 
 def _bearer_token(authorization: Optional[str]) -> Optional[str]:

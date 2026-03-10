@@ -18,7 +18,7 @@ from admin_utils import (
     safe_upsert_profile,
 )
 from supabase_client import get_admin_supabase, require_supabase, engine
-from audit_pipeline import get_job_snapshot, cancel_audit_job, retry_audit_job
+from audit_pipeline import get_job_snapshot, cancel_audit_job, retry_audit_job, list_local_audit_jobs
 from documents_processing import get_embeddings
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
@@ -76,6 +76,236 @@ def _load_rules_file(doc_type: str) -> str:
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Rule file not found")
     return file_path
+
+
+AUDIT_DOC_TYPE_LABELS = {
+    "contract": "合同",
+    "invoice": "发票",
+    "payment": "付款单",
+    "expense": "报销单",
+    "packing_list": "装箱单",
+    "bill_of_lading": "提单",
+    "air_waybill": "空运运单",
+    "import_declaration": "进口报关单",
+    "export_declaration": "出口报关单",
+    "certificate_of_origin": "原产地证",
+    "trade_case": "贸易单据包",
+    "auto": "自动识别",
+}
+
+
+def _audit_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _audit_float(value: Any) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count_finding_levels(findings: List[Dict[str, Any]]) -> Dict[str, int]:
+    stats = {"high": 0, "medium": 0, "low": 0}
+    for item in findings or []:
+        if not isinstance(item, dict):
+            continue
+        severity = _audit_text(item.get("severity")).lower()
+        if severity in stats:
+            stats[severity] += 1
+    stats["total"] = sum(stats.values())
+    return stats
+
+
+def _count_erp_checks(checks: List[Dict[str, Any]]) -> Dict[str, int]:
+    total = 0
+    passed = 0
+    for item in checks or []:
+        if not isinstance(item, dict):
+            continue
+        total += 1
+        if item.get("passed") is True:
+            passed += 1
+    return {
+        "total": total,
+        "passed": passed,
+        "failed": max(total - passed, 0),
+    }
+
+
+def _derive_audit_record_title(job: Dict[str, Any], result: Dict[str, Any], fields: Dict[str, Any]) -> str:
+    explicit_title = _audit_text(fields.get("contract_title") or fields.get("project_name") or fields.get("subject"))
+    if explicit_title:
+        return explicit_title
+    doc_no = _audit_text(fields.get("contract_no") or fields.get("invoice_no") or fields.get("application_no"))
+    if doc_no:
+        return doc_no
+    file_name = _audit_text(job.get("file_name"))
+    if file_name:
+        return os.path.splitext(file_name)[0]
+    subtype_label = _audit_text(result.get("recognized_doc_subtype_label"))
+    if subtype_label:
+        return subtype_label
+    doc_type = _audit_text(job.get("doc_type")).lower()
+    return f"{AUDIT_DOC_TYPE_LABELS.get(doc_type, doc_type or '审单')}记录"
+
+
+def _build_audit_record_payload(job: Dict[str, Any], result: Dict[str, Any], review: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    result = result if isinstance(result, dict) else {}
+    review = review if isinstance(review, dict) else None
+    fields = result.get("extracted_fields") if isinstance(result.get("extracted_fields"), dict) else {}
+    erp_context = result.get("erp_context") if isinstance(result.get("erp_context"), dict) else {}
+    case_summary = result.get("case_summary") if isinstance(result.get("case_summary"), dict) else {}
+    findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+    erp_checks = result.get("erp_checks") if isinstance(result.get("erp_checks"), list) else []
+    title = _derive_audit_record_title(job, result, fields)
+    company_name = _audit_text(fields.get("vendor") or fields.get("payee") or erp_context.get("expected_vendor"))
+    counterparty_name = _audit_text(
+        fields.get("buyer")
+        or fields.get("customer")
+        or fields.get("payer")
+        or fields.get("drawer")
+    )
+    document_number = _audit_text(
+        fields.get("contract_no")
+        or fields.get("invoice_no")
+        or fields.get("application_no")
+        or fields.get("tax_no")
+    )
+    document_date = _audit_text(
+        fields.get("contract_date")
+        or fields.get("invoice_date")
+        or fields.get("payment_date")
+        or fields.get("expense_date")
+        or fields.get("sign_date")
+        or fields.get("issue_date")
+    )
+    amount = _audit_float(fields.get("total_amount"))
+    finding_stats = _count_finding_levels(findings)
+    check_stats = _count_erp_checks(erp_checks)
+    first_finding = findings[0] if findings and isinstance(findings[0], dict) else {}
+    risk_level = _audit_text(result.get("risk_level")).lower() or "low"
+    workflow_state = _audit_text(result.get("workflow_state") or job.get("workflow_state") or job.get("status"))
+    return {
+        "job_id": job.get("job_id"),
+        "user_id": job.get("user_id"),
+        "file_name": _audit_text(job.get("file_name")),
+        "doc_type": job.get("doc_type"),
+        "doc_type_label": AUDIT_DOC_TYPE_LABELS.get(_audit_text(job.get("doc_type")).lower(), _audit_text(job.get("doc_type")) or "未知类型"),
+        "status": job.get("status"),
+        "progress": job.get("progress"),
+        "created_at": job.get("created_at"),
+        "risk_level": risk_level,
+        "summary": _audit_text(result.get("summary")),
+        "review": review,
+        "review_status": _audit_text(review.get("status")) if review else "",
+        "review_updated_at": _audit_text(review.get("updated_at")) if review else "",
+        "reviewer_id": _audit_text(review.get("reviewer_id")) if review else "",
+        "document_title": title,
+        "document_number": document_number,
+        "document_date": document_date,
+        "company_name": company_name,
+        "counterparty_name": counterparty_name,
+        "amount": amount,
+        "currency": _audit_text(fields.get("currency") or "CNY"),
+        "audit_score": result.get("audit_score"),
+        "headline": _audit_text(first_finding.get("message") or result.get("summary") or title),
+        "next_action": _audit_text(result.get("next_action")),
+        "workflow_state": workflow_state,
+        "case_id": _audit_text(case_summary.get("case_id")),
+        "case_document_count": len(case_summary.get("documents") or []),
+        "finding_stats": finding_stats,
+        "erp_check_stats": check_stats,
+    }
+
+
+def _audit_record_matches_query(record: Dict[str, Any], query: str) -> bool:
+    keyword = _audit_text(query).lower()
+    if not keyword:
+        return True
+    haystack = " ".join(
+        [
+            _audit_text(record.get("job_id")),
+            _audit_text(record.get("user_id")),
+            _audit_text(record.get("file_name")),
+            _audit_text(record.get("document_title")),
+            _audit_text(record.get("document_number")),
+            _audit_text(record.get("company_name")),
+            _audit_text(record.get("counterparty_name")),
+            _audit_text(record.get("summary")),
+            _audit_text(record.get("headline")),
+            _audit_text(record.get("reviewer_id")),
+        ]
+    ).lower()
+    return keyword in haystack
+
+
+def _list_merged_audit_jobs(
+    *,
+    limit: int,
+    offset: int,
+    user_id: Optional[str] = None,
+    doc_type: Optional[str] = None,
+    status: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    jobs_by_id: Dict[str, Dict[str, Any]] = {}
+    sb = require_supabase()
+    try:
+        db_query = sb.table("audit_jobs").select("*").order("created_at", desc=True).range(0, max(limit + offset + 200, 500) - 1)
+        if user_id:
+            db_query = db_query.eq("user_id", user_id)
+        if doc_type:
+            db_query = db_query.eq("doc_type", doc_type)
+        if status:
+            db_query = db_query.eq("status", status)
+        db_rows = db_query.execute().data or []
+    except Exception as e:
+        print(f"[Admin Audit] Load audit_jobs failed: {e}")
+        db_rows = []
+
+    for row in db_rows:
+        job_id = _audit_text(row.get("job_id"))
+        if not job_id:
+            continue
+        jobs_by_id[job_id] = dict(row)
+
+    local_rows = list_local_audit_jobs(limit=max(limit + offset + 200, 500), offset=0)
+    for row in local_rows:
+        job_id = _audit_text(row.get("job_id"))
+        if not job_id:
+            continue
+        if user_id and _audit_text(row.get("user_id")) != _audit_text(user_id):
+            continue
+        if doc_type and _audit_text(row.get("doc_type")).lower() != _audit_text(doc_type).lower():
+            continue
+        if status and _audit_text(row.get("status")).lower() != _audit_text(status).lower():
+            continue
+        existing = jobs_by_id.get(job_id)
+        if existing:
+            merged = dict(row)
+            merged.update(existing)
+            for key in ("file_name", "workflow_state", "case_id", "result", "local_path"):
+                if not merged.get(key) and row.get(key):
+                    merged[key] = row.get(key)
+            jobs_by_id[job_id] = merged
+        else:
+            jobs_by_id[job_id] = dict(row)
+
+    jobs = list(jobs_by_id.values())
+    jobs.sort(
+        key=lambda item: (
+            _audit_text(item.get("created_at") or item.get("updated_at")),
+            _audit_text(item.get("job_id")),
+        ),
+        reverse=True,
+    )
+    if offset:
+        jobs = jobs[offset:]
+    return jobs[:limit]
 
 
 @router.get("/users")
@@ -438,52 +668,63 @@ def list_audit_records(
     doc_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=200),
+    query: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
     ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN, ROLE_AUDITOR])),
 ):
-    sb = require_supabase()
-    query = sb.table("audit_jobs").select("*").order("created_at", desc=True).range(offset, offset + limit - 1)
-    if user_id:
-        query = query.eq("user_id", user_id)
-    if doc_type:
-        query = query.eq("doc_type", doc_type)
-    if status:
-        query = query.eq("status", status)
-    res = query.execute()
-    jobs = res.data or []
-    job_ids = [j["job_id"] for j in jobs]
+    search = query
+    jobs = _list_merged_audit_jobs(
+        limit=limit,
+        offset=offset,
+        user_id=user_id,
+        doc_type=doc_type,
+        status=status,
+    )
+    job_ids = [_audit_text(j.get("job_id")) for j in jobs if _audit_text(j.get("job_id"))]
 
     results_map = {}
     review_map = {}
     if job_ids:
-        r_res = sb.table("audit_results").select("job_id,result_json").in_("job_id", job_ids).execute()
-        for row in r_res.data or []:
-            results_map[row["job_id"]] = row.get("result_json")
+        sb = require_supabase()
+        try:
+            r_res = sb.table("audit_results").select("job_id,result_json").in_("job_id", job_ids).execute()
+            for row in r_res.data or []:
+                results_map[row["job_id"]] = row.get("result_json")
+        except Exception as e:
+            print(f"[Admin Audit] Load audit_results failed: {e}")
 
-        review_res = sb.table("audit_reviews").select("*").in_("job_id", job_ids).execute()
-        for row in review_res.data or []:
-            review_map[row["job_id"]] = row
+        try:
+            review_res = sb.table("audit_reviews").select("*").in_("job_id", job_ids).execute()
+            for row in review_res.data or []:
+                review_map[row["job_id"]] = row
+        except Exception as e:
+            print(f"[Admin Audit] Load audit_reviews failed: {e}")
 
     out = []
     for job in jobs:
-        result = results_map.get(job["job_id"], {})
-        review = review_map.get(job["job_id"])
-        risk = (result or {}).get("risk_level")
-        if risk_level and risk != risk_level:
+        job_id = _audit_text(job.get("job_id"))
+        result = results_map.get(job_id)
+        if not isinstance(result, dict):
+            result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        review = review_map.get(job_id)
+        risk = _audit_text((result or {}).get("risk_level")).lower()
+        if risk_level and risk != _audit_text(risk_level).lower():
             continue
-        out.append({
-            "job_id": job["job_id"],
-            "user_id": job.get("user_id"),
-            "doc_type": job.get("doc_type"),
-            "status": job.get("status"),
-            "progress": job.get("progress"),
-            "created_at": job.get("created_at"),
-            "risk_level": risk,
-            "summary": (result or {}).get("summary"),
-            "review": review,
-        })
-    return {"success": True, "data": out}
+        row = _build_audit_record_payload(job, result, review)
+        if not _audit_record_matches_query(row, search or ""):
+            continue
+        out.append(row)
+    return {
+        "success": True,
+        "data": out,
+        "meta": {
+            "count": len(out),
+            "offset": offset,
+            "limit": limit,
+            "has_more": len(jobs) >= limit,
+        },
+    }
 
 
 @router.get("/audit/records/{job_id}")
@@ -554,9 +795,8 @@ def list_jobs(
 ):
     if job_type != "audit":
         return {"success": True, "data": []}
-    sb = require_supabase()
-    res = sb.table("audit_jobs").select("*").order("created_at", desc=True).range(offset, offset + limit - 1).execute()
-    return {"success": True, "data": res.data or []}
+    jobs = _list_merged_audit_jobs(limit=limit, offset=offset)
+    return {"success": True, "data": jobs}
 
 
 @router.post("/jobs/{job_id}/cancel")

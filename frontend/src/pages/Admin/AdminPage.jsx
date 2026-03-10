@@ -3,10 +3,11 @@ import { ArrowLeft, FileUp, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import adminApi from "../../api/admin";
 import userApi from "../../api/user";
 import presentationApi from "../../api/presentation";
+import AuditAdminWorkspace from "./AuditAdminWorkspace";
 
 const tabs = [
   { key: "users", label: "用户与权限" },
-  { key: "audit", label: "审单记录" },
+  { key: "audit", label: "审单后台" },
   { key: "rules", label: "规则库" },
   { key: "kb", label: "知识库治理" },
   { key: "templates", label: "PPT模板导入" },
@@ -96,7 +97,7 @@ const AdminPage = () => {
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950" style={{ minHeight: 'var(--app-height, 100vh)' }}>
       <header className="sticky top-0 z-20 bg-white/90 dark:bg-gray-900/90 backdrop-blur border-b border-gray-200 dark:border-gray-700">
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-[1500px] mx-auto px-6 py-4 flex items-center justify-between">
           <div>
             <div className="text-xs text-gray-500 dark:text-gray-400">Admin Console</div>
             <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">企业管理后台</div>
@@ -110,7 +111,7 @@ const AdminPage = () => {
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto px-6 py-6">
+      <div className="max-w-[1500px] mx-auto px-6 py-6">
         <div className="flex flex-wrap gap-2 mb-6">
           {tabs.map((tab) => (
             <button
@@ -118,7 +119,7 @@ const AdminPage = () => {
               onClick={() => setActiveTab(tab.key)}
               className={`px-4 py-2 rounded-full text-sm font-medium border ${
                 activeTab === tab.key
-                  ? "bg-black text-white border-black"
+                  ? "bg-black text-white border-black dark:bg-blue-600 dark:border-blue-500"
                   : "bg-white dark:bg-slate-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-slate-700 hover:border-gray-400 dark:hover:border-slate-500"
               }`}
             >
@@ -128,7 +129,7 @@ const AdminPage = () => {
         </div>
 
         {activeTab === "users" && <UsersTab currentUserId={profile?.id} />}
-        {activeTab === "audit" && <AuditTab />}
+        {activeTab === "audit" && <AuditAdminWorkspace />}
         {activeTab === "rules" && <RulesTab />}
         {activeTab === "kb" && <KbTab />}
         {activeTab === "templates" && <TemplatesTab />}
@@ -350,100 +351,6 @@ const UsersTab = ({ currentUserId }) => {
                 <tr>
                   <td className="py-6 text-center text-sm text-gray-400" colSpan={5}>
                     暂无用户
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const AuditTab = () => {
-  const [records, setRecords] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState("");
-  const [risk, setRisk] = useState("");
-
-  const loadRecords = async () => {
-    setLoading(true);
-    try {
-      const res = await adminApi.listAuditRecords({ status, risk_level: risk });
-      setRecords(res.data || []);
-    } catch {
-      setRecords([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadRecords();
-  }, []);
-
-  const review = async (jobId, reviewStatus) => {
-    await adminApi.reviewAudit({ job_id: jobId, status: reviewStatus });
-    loadRecords();
-  };
-
-  return (
-    <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-700 rounded-2xl shadow-sm">
-      <div className="p-4 border-b border-gray-100 dark:border-slate-700 flex items-center justify-between">
-        <div className="text-sm font-medium text-gray-800 dark:text-gray-100">审单记录</div>
-        <div className="flex items-center gap-2">
-          <select className="border border-gray-200 dark:border-gray-700 rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200" value={risk} onChange={(e) => setRisk(e.target.value)}>
-            <option value="">风险等级</option>
-            <option value="high">high</option>
-            <option value="medium">medium</option>
-            <option value="low">low</option>
-          </select>
-          <select className="border border-gray-200 dark:border-gray-700 rounded-md px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200" value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="">状态</option>
-            <option value="done">done</option>
-            <option value="failed">failed</option>
-            <option value="running">running</option>
-          </select>
-          <button className="px-3 py-2 rounded-lg border border-gray-200 dark:border-slate-700 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-800" onClick={loadRecords}>
-            筛选
-          </button>
-        </div>
-      </div>
-      <div className="p-4 overflow-x-auto">
-        {loading ? (
-          <AdminTableSkeleton columns={6} rows={6} />
-        ) : (
-          <table className="min-w-full text-sm text-gray-700 dark:text-gray-200">
-            <thead>
-              <tr className="text-left text-gray-500 dark:text-gray-400">
-                <th className="py-2">任务ID</th>
-                <th className="py-2">用户</th>
-                <th className="py-2">类型</th>
-                <th className="py-2">风险</th>
-                <th className="py-2">摘要</th>
-                <th className="py-2">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {records.map((r) => (
-                <tr key={r.job_id} className="border-t border-gray-100 dark:border-gray-800">
-                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{r.job_id}</td>
-                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{r.user_id}</td>
-                  <td className="py-2">{r.doc_type}</td>
-                  <td className="py-2">{r.risk_level || "-"}</td>
-                  <td className="py-2 text-xs text-gray-500 dark:text-gray-400">{r.summary || "-"}</td>
-                  <td className="py-2 space-x-2">
-                    <button className="text-xs text-green-600 dark:text-green-400" onClick={() => review(r.job_id, "approved")}>通过</button>
-                    <button className="text-xs text-red-600 dark:text-red-400" onClick={() => review(r.job_id, "rejected")}>驳回</button>
-                    <button className="text-xs text-amber-600 dark:text-amber-400" onClick={() => review(r.job_id, "need_more")}>补材料</button>
-                  </td>
-                </tr>
-              ))}
-              {records.length === 0 && (
-                <tr>
-                  <td className="py-6 text-center text-sm text-gray-400" colSpan={6}>
-                    暂无记录
                   </td>
                 </tr>
               )}

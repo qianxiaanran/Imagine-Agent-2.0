@@ -6,6 +6,8 @@ import os
 import re
 import threading
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -19,8 +21,15 @@ from pydantic import BaseModel, Field
 
 from admin_utils import ROLE_ADMIN, require_role
 from deepseek_llm import ask_llm
+from runtime_storage import (
+    PRESENTATION_TEMPLATE_REGISTRY_FILE,
+    ensure_runtime_layout,
+    migrate_legacy_runtime_files,
+)
 
 router = APIRouter(prefix="/api/presentation", tags=["Presentation"])
+ensure_runtime_layout()
+migrate_legacy_runtime_files()
 
 DEFAULT_PRESENTON_BASE_URL = os.getenv("PRESENTON_BASE_URL", "http://127.0.0.1:5000").strip()
 DEFAULT_PRESENTON_API_KEY = os.getenv("PRESENTON_API_KEY", "").strip()
@@ -29,6 +38,11 @@ LOCAL_GENERATE_PATH = os.getenv("PRESENTON_LOCAL_PATH", "/api/v1/ppt/presentatio
 CLOUD_SYNC_PATH = os.getenv("PRESENTON_SYNC_PATH", "/api/v1/ppt/presentation/generate/sync").strip()
 CLOUD_ASYNC_PATH = os.getenv("PRESENTON_ASYNC_PATH", "/api/v1/ppt/presentation/generate/async").strip()
 STATUS_PATH_TEMPLATE = os.getenv("PRESENTON_STATUS_PATH_TEMPLATE", "/api/v1/ppt/presentation/status/{task_id}").strip()
+TEMPLATE_GROUP_PATH = os.getenv("PRESENTON_TEMPLATE_GROUP_PATH", "/api/template?group={template_id}").strip() or "/api/template?group={template_id}"
+CREATE_PRESENTATION_PATH = os.getenv("PRESENTON_CREATE_PRESENTATION_PATH", "/api/v1/ppt/presentation/create").strip() or "/api/v1/ppt/presentation/create"
+PREPARE_PRESENTATION_PATH = os.getenv("PRESENTON_PREPARE_PRESENTATION_PATH", "/api/v1/ppt/presentation/prepare").strip() or "/api/v1/ppt/presentation/prepare"
+STREAM_PRESENTATION_PATH_TEMPLATE = os.getenv("PRESENTON_STREAM_PRESENTATION_PATH_TEMPLATE", "/api/v1/ppt/presentation/stream/{presentation_id}").strip() or "/api/v1/ppt/presentation/stream/{presentation_id}"
+EXPORT_PRESENTATION_PATH = os.getenv("PRESENTON_EXPORT_PRESENTATION_PATH", "/api/v1/ppt/presentation/export").strip() or "/api/v1/ppt/presentation/export"
 TEMPLATE_LIST_PATHS = [
     os.getenv("PRESENTON_TEMPLATE_LIST_PATH", "/api/v1/ppt/template/all").strip() or "/api/v1/ppt/template/all",
     os.getenv("PRESENTON_TEMPLATE_LIST_PATH_V3", "/api/v3/standard-template").strip() or "/api/v3/standard-template",
@@ -39,13 +53,13 @@ TEMPLATE_DETAIL_PATHS = [
     os.getenv("PRESENTON_TEMPLATE_DETAIL_PATH", "/api/v1/ppt/template/{template_id}").strip() or "/api/v1/ppt/template/{template_id}",
     os.getenv("PRESENTON_TEMPLATE_DETAIL_PATH_V3", "/api/v3/standard-template/{template_id}").strip() or "/api/v3/standard-template/{template_id}",
 ]
-TEMPLATE_REGISTRY_FILE = Path(
-    os.getenv("PRESENTON_TEMPLATE_REGISTRY_FILE", str(Path(__file__).resolve().parent / "data" / "presentation_templates.json"))
-)
+TEMPLATE_REGISTRY_FILE = PRESENTATION_TEMPLATE_REGISTRY_FILE
 
 REQUEST_TIMEOUT_SEC = float(os.getenv("PRESENTON_REQUEST_TIMEOUT_SEC", "180"))
 POLL_TIMEOUT_SEC = float(os.getenv("PRESENTON_POLL_TIMEOUT_SEC", "900"))
 POLL_INTERVAL_SEC = float(os.getenv("PRESENTON_POLL_INTERVAL_SEC", "2"))
+OUTLINE_LLM_TIMEOUT_SEC = float(os.getenv("PRESENTON_OUTLINE_LLM_TIMEOUT_SEC", "45"))
+OUTLINE_LLM_MAX_WORKERS = max(1, int(os.getenv("PRESENTON_OUTLINE_LLM_MAX_WORKERS", "4")))
 INVALID_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 PRESENTON_PROXY_PREFIX = "/api/presentation/presenton/proxy"
 PRESENTON_USER_CONFIG_PATH = os.getenv("PRESENTON_USER_CONFIG_PATH", "/api/user-config").strip() or "/api/user-config"
@@ -53,6 +67,12 @@ PPT_RUNTIME_MODEL = os.getenv("PRESENTON_PPT_RUNTIME_MODEL", "qwen3:1.7b").strip
 PPT_RESTORE_MODEL = os.getenv("PRESENTON_PPT_RESTORE_MODEL", "qwen2.5-coder:latest").strip() or "qwen2.5-coder:latest"
 PPT_IMAGE_PROVIDER_DISABLED = os.getenv("PRESENTON_PPT_IMAGE_PROVIDER_DISABLED", "none").strip() or "none"
 PPT_IMAGE_PROVIDER_RESTORE = os.getenv("PRESENTON_PPT_IMAGE_PROVIDER_RESTORE", "").strip()
+PPT_KEEP_FAST_RUNTIME = os.getenv("PRESENTON_PPT_KEEP_FAST_RUNTIME", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 PPT_FORCE_IMAGE_PROVIDER_OVERRIDE = os.getenv("PRESENTON_PPT_FORCE_IMAGE_PROVIDER_OVERRIDE", "0").strip().lower() in {
     "1",
     "true",
@@ -80,7 +100,18 @@ PPT_ENFORCE_SINGLE_OLLAMA_MODEL = os.getenv("PRESENTON_ENFORCE_SINGLE_OLLAMA_MOD
     "on",
 }
 PPT_TASK_STALE_SEC = float(os.getenv("PRESENTON_PPT_TASK_STALE_SEC", "7200"))
+ORDERED_TEMPLATE_COOLDOWN_SEC = float(os.getenv("PRESENTON_ORDERED_TEMPLATE_COOLDOWN_SEC", "1800"))
 TERMINAL_TASK_STATUSES = {"completed", "done", "success", "succeeded", "failed", "error", "cancelled", "canceled"}
+ORDERED_UNSAFE_TEMPLATE_PREFIXES = tuple(
+    item.strip().lower()
+    for item in str(os.getenv("PRESENTON_ORDERED_UNSAFE_TEMPLATE_PREFIXES", "neo-")).split(",")
+    if item.strip()
+)
+ORDERED_UNSAFE_TEMPLATES = {
+    item.strip().lower()
+    for item in str(os.getenv("PRESENTON_ORDERED_UNSAFE_TEMPLATES", "")).split(",")
+    if item.strip()
+}
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -91,25 +122,106 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
-PROXY_REWRITE_CONTENT_TYPES = ("text/html", "javascript", "text/css", "application/json")
+PROXY_CACHE_REQUEST_HEADERS = {
+    "if-match",
+    "if-none-match",
+    "if-modified-since",
+    "if-unmodified-since",
+    "if-range",
+}
+PROXY_CACHE_RESPONSE_HEADERS = {
+    "etag",
+    "last-modified",
+    "expires",
+}
+PROXY_REWRITE_CONTENT_TYPES = ("text/html", "text/css")
 LOCAL_HOST_CANDIDATES = {"127.0.0.1", "localhost", "0.0.0.0", "host.docker.internal"}
 ROOT_RELATIVE_REF_RE = re.compile(
     rf"([\"'])/(?!/|{re.escape(PRESENTON_PROXY_PREFIX.lstrip('/'))})(?=[A-Za-z0-9._~%?-])([^\"']*)"
+)
+CSS_ROOT_RELATIVE_URL_RE = re.compile(
+    rf"url\((?P<quote>[\"']?)/(?!/|{re.escape(PRESENTON_PROXY_PREFIX.lstrip('/'))})(?P<path>[^)\"']*)(?P=quote)\)"
 )
 
 _PRESENTON_SESSION = requests.Session()
 _PRESENTON_SESSION.mount("http://", HTTPAdapter(pool_connections=32, pool_maxsize=128, max_retries=0))
 _PRESENTON_SESSION.mount("https://", HTTPAdapter(pool_connections=32, pool_maxsize=128, max_retries=0))
+_OUTLINE_LLM_EXECUTOR = ThreadPoolExecutor(max_workers=OUTLINE_LLM_MAX_WORKERS, thread_name_prefix="ppt-outline")
 _MODEL_RUNTIME_LOCK = threading.Lock()
 _ACTIVE_PPT_TASKS: Dict[str, float] = {}
+_ORDERED_PPT_TASK_LOCK = threading.Lock()
+_ORDERED_PPT_TASKS: Dict[str, Dict[str, Any]] = {}
+_ORDERED_TEMPLATE_COOLDOWN_LOCK = threading.Lock()
+_ORDERED_TEMPLATE_COOLDOWNS: Dict[str, Dict[str, Any]] = {}
 _TEMPLATE_REGISTRY_LOCK = threading.Lock()
+_TEMPLATE_GROUP_CACHE_LOCK = threading.Lock()
+_TEMPLATE_GROUP_CACHE: Dict[str, Dict[str, Any]] = {}
 _LAST_IMAGE_PROVIDER: Optional[str] = None
 logger = logging.getLogger(__name__)
 
+LEGACY_TEMPLATE_ALIASES: Dict[str, str] = {
+    "corporate": "standard",
+    "minimal": "modern",
+}
 BUILTIN_TEMPLATE_CATALOG: List[Dict[str, Any]] = [
-    {"template_id": "general", "name": "general", "description": "通用商务模板", "source": "builtin"},
-    {"template_id": "corporate", "name": "corporate", "description": "企业汇报模板", "source": "builtin"},
-    {"template_id": "minimal", "name": "minimal", "description": "简洁极简模板", "source": "builtin"},
+    {"template_id": "neo-general", "name": "Neo 通用", "description": "新版通用风格，适合综合汇报、日常演示与常规业务表达。", "source": "builtin"},
+    {"template_id": "neo-standard", "name": "Neo 标准", "description": "新版标准风格，结构更规整，适合正式汇报与章节型内容。", "source": "builtin"},
+    {"template_id": "neo-modern", "name": "Neo 现代", "description": "新版现代风格，视觉更鲜明，适合方案展示与重点表达。", "source": "builtin"},
+    {"template_id": "neo-swift", "name": "Neo 迅捷", "description": "新版迅捷风格，节奏更明快，适合路演展示与信息快读。", "source": "builtin"},
+    {"template_id": "general", "name": "经典通用", "description": "经典通用模板，适合常规商务汇报与多场景演示。", "source": "builtin"},
+    {"template_id": "modern", "name": "经典现代", "description": "经典现代模板，适合产品介绍、品牌展示与视觉化表达。", "source": "builtin"},
+    {"template_id": "standard", "name": "经典标准", "description": "经典标准模板，适合制度宣讲、项目汇报与正式文稿。", "source": "builtin"},
+    {"template_id": "swift", "name": "经典迅捷", "description": "经典迅捷模板，适合数据概览、快节奏汇报与重点传达。", "source": "builtin"},
+]
+BUILTIN_TEMPLATE_CATALOG_LOOKUP: Dict[str, Dict[str, Any]] = {
+    str(item.get("template_id") or "").strip(): dict(item) for item in BUILTIN_TEMPLATE_CATALOG
+}
+BUILTIN_TEMPLATE_CATALOG_ORDER: Dict[str, int] = {
+    str(item.get("template_id") or "").strip(): index for index, item in enumerate(BUILTIN_TEMPLATE_CATALOG)
+}
+PRESENTON_UI_TRANSLATIONS: List[Tuple[str, str]] = [
+    ("Loading custom templates...", "正在加载自定义模板..."),
+    ("Custom templates you create will appear here.", "你创建的自定义模板会显示在这里。"),
+    ("Create new template", "创建新模板"),
+    ("No custom templates yet.", "暂无自定义模板。"),
+    ("My Custom Templates", "我的自定义模板"),
+    ("Inbuilt Templates", "内置模板"),
+    ("All Templates", "全部模板"),
+    ("Create Template", "创建模板"),
+    ("No preview", "暂无预览"),
+    ("Custom Template", "自定义模板"),
+    ("User-created template", "用户创建的模板"),
+    ("Templates", "模板"),
+    ("Dashboard", "工作台"),
+    ("Settings", "设置"),
+]
+PRESENTON_TEMPLATE_PREVIEW_TEXT_MAP: Dict[str, str] = {
+    "Create Template": "创建模板",
+    "Templates": "模板",
+    "Dashboard": "工作台",
+    "Settings": "设置",
+    "All Templates": "全部模板",
+    "Inbuilt Templates": "内置模板",
+    "My Custom Templates": "我的自定义模板",
+    "Create new template": "创建新模板",
+    "Loading custom templates...": "正在加载自定义模板...",
+    "No custom templates yet.": "暂无自定义模板。",
+    "Custom templates you create will appear here.": "你创建的自定义模板会显示在这里。",
+    "No preview": "暂无预览",
+    "Custom Template": "自定义模板",
+    "User-created template": "用户创建的模板",
+    "Neo General": "Neo 通用",
+    "Neo Standard": "Neo 标准",
+    "Neo Modern": "Neo 现代",
+    "Neo Swift": "Neo 迅捷",
+    "New general purpose layouts for common presentation elements": "适用于常见演示元素的通用版式模板",
+    "New standard purpose layouts for common presentation elements": "适用于常见演示元素的标准版式模板",
+    "New modern purpose layouts for common presentation elements": "适用于常见演示元素的现代版式模板",
+    "New swift purpose layouts for common presentation elements": "适用于常见演示元素的迅捷版式模板",
+}
+PRESENTON_TEMPLATE_PREVIEW_REGEX_RULES: List[Tuple[str, str]] = [
+    (r"(\d+)\s+layouts across\s+(\d+)\s+templates", r"$1 个版式，覆盖 $2 个模板"),
+    (r"^Slide\s+(\d+)$", r"第 $1 页"),
 ]
 
 
@@ -127,13 +239,19 @@ class PresentonGenerateRequest(BaseModel):
     web_search: Optional[bool] = None
     slides_markdown: Optional[List[str]] = None
     slides_layout: Optional[List[str]] = None
+    include_table_of_contents: Optional[bool] = None
+    include_title_slide: Optional[bool] = None
+    allow_access_to_user_info: Optional[bool] = None
+    trigger_webhook: Optional[bool] = None
+    files: Optional[List[str]] = None
     provider: Literal["auto", "local", "cloud_sync", "cloud_async"] = "auto"
     base_url: Optional[str] = None
 
 
 class PresentonOutlineRequest(BaseModel):
     input_mode: Literal["topic", "document", "longText"] = "topic"
-    analysis_framework: str = Field(default="4P框架", max_length=64)
+    content_focus: str = Field(default="work_report", max_length=64)
+    analysis_framework: Optional[str] = Field(default=None, max_length=64)
     analysis_input: str = Field(default="", max_length=14000)
     document_name: Optional[str] = Field(default=None, max_length=256)
     n_slides: int = Field(default=8, ge=3, le=40)
@@ -149,6 +267,60 @@ class PresentonTemplateImportRequest(BaseModel):
     description: Optional[str] = Field(default=None, max_length=300)
 
 
+OUTLINE_CONTENT_FOCUS_CONFIG: Dict[str, Dict[str, Any]] = {
+    "work_report": {
+        "label": "工作汇报",
+        "sections": ["封面", "汇报摘要", "目录", "背景与目标", "阶段进展", "核心成果", "问题与挑战", "原因复盘", "改进动作", "下一步计划", "资源诉求", "总结"],
+        "prompt_lines": [
+            "内容导向：工作汇报，适合周报、月报、项目总结、阶段复盘类 PPT。",
+            "结构重点：围绕目标背景、阶段进展、关键成果、存在问题、复盘原因和下一步计划展开。",
+            "表达方式：结论前置，结果清晰，适合管理层和团队同步。",
+            "页面组织：优先使用结论式标题，每页围绕一个核心信息展开，再补充事实、数据和行动要点。",
+        ],
+    },
+    "proposal": {
+        "label": "方案提案",
+        "sections": ["封面", "提案摘要", "目录", "现状痛点", "目标与原则", "方案总览", "关键模块", "实施路径", "资源与分工", "收益评估", "风险保障", "结论"],
+        "prompt_lines": [
+            "内容导向：方案提案，适合立项汇报、解决方案、项目建议书类 PPT。",
+            "结构重点：讲清现状痛点、目标原则、方案设计、实施路径、资源需求、收益与风险。",
+            "表达方式：强调可执行性和决策价值，让听众能快速判断是否推进。",
+            "页面组织：优先使用问题-方案-收益的表达顺序，让每页都能服务于决策判断。",
+        ],
+    },
+    "analysis": {
+        "label": "分析解读",
+        "sections": ["封面", "核心结论", "目录", "研究背景", "现状与趋势", "关键数据", "原因拆解", "对比分析", "洞察发现", "策略建议", "风险提示", "总结"],
+        "prompt_lines": [
+            "内容导向：分析解读，适合行业研究、专题分析、经营复盘类 PPT。",
+            "结构重点：基于事实和数据得出洞察，再形成结论、判断与建议。",
+            "表达方式：强调逻辑链和证据链，避免只有结论没有支撑。",
+            "页面组织：优先使用结论-证据-影响的表达顺序，让听众能快速跟上分析逻辑。",
+        ],
+    },
+    "training": {
+        "label": "培训讲解",
+        "sections": ["封面", "培训目标", "目录", "概念导入", "知识拆解", "方法步骤", "案例演示", "常见问题", "注意事项", "实操建议", "练习复盘", "总结"],
+        "prompt_lines": [
+            "内容导向：培训讲解，适合课程分享、制度宣讲、方法培训类 PPT。",
+            "结构重点：概念解释、知识拆解、步骤演示、案例说明、注意事项和练习复盘。",
+            "表达方式：更注重可理解性和可学习性，内容要循序渐进。",
+            "页面组织：优先使用概念-步骤-示例-提醒的表达顺序，帮助听众边看边学。",
+        ],
+    },
+    "product_pitch": {
+        "label": "产品路演",
+        "sections": ["封面", "一句话价值", "目录", "用户场景", "痛点机会", "产品方案", "核心亮点", "竞争优势", "商业价值", "客户案例", "实施计划", "结语"],
+        "prompt_lines": [
+            "内容导向：产品路演，适合产品介绍、业务宣讲、商业展示类 PPT。",
+            "结构重点：说明场景与痛点、产品价值、核心亮点、竞争优势、商业价值和落地计划。",
+            "表达方式：强调价值主张和说服力，让听众快速理解卖点。",
+            "页面组织：优先使用场景-价值-亮点-证明的表达顺序，让页面更有路演说服力。",
+        ],
+    },
+}
+
+
 def _normalize_base_url(base_url: Optional[str]) -> str:
     raw = (base_url or DEFAULT_PRESENTON_BASE_URL or "").strip()
     if not raw:
@@ -161,6 +333,97 @@ def _build_headers() -> Dict[str, str]:
     if DEFAULT_PRESENTON_API_KEY:
         headers["Authorization"] = f"Bearer {DEFAULT_PRESENTON_API_KEY}"
     return headers
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _template_retry_candidates(raw_template: Any) -> List[str]:
+    value = str(raw_template or "").strip()
+    if not value:
+        return ["general"]
+    candidates: List[str] = [value]
+    lowered = value.lower()
+    alias_target = LEGACY_TEMPLATE_ALIASES.get(lowered)
+    if alias_target:
+        candidates.append(alias_target)
+    if lowered in {"auto", "default"}:
+        candidates.append("general")
+    if lowered.startswith("custom-") and len(value) > len("custom-"):
+        candidates.append(value[len("custom-"):])
+    if lowered.startswith("neo-") and len(value) > len("neo-"):
+        candidates.append(value[len("neo-"):])
+    unique: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = item.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    return unique or ["general"]
+
+
+def _supports_ordered_pipeline_template(raw_template: Any, prefer_no_image: bool = False) -> bool:
+    template_id = str(raw_template or "").strip().lower()
+    if not template_id:
+        return True
+    if template_id.startswith("custom-"):
+        return False
+    if template_id in ORDERED_UNSAFE_TEMPLATES:
+        return False
+    if prefer_no_image and template_id.startswith("neo-"):
+        return True
+    return not any(template_id.startswith(prefix) for prefix in ORDERED_UNSAFE_TEMPLATE_PREFIXES)
+
+
+def _ordered_pipeline_skip_reason(req: PresentonGenerateRequest) -> Optional[str]:
+    if not isinstance(req.slides_markdown, list) or not req.slides_markdown:
+        return "missing_slide_markdown"
+    prefer_no_image = str(req.image_type or "none").strip().lower() == "none"
+    if not _supports_ordered_pipeline_template(req.template, prefer_no_image=prefer_no_image):
+        return "compatibility_policy"
+    cooldown = _get_ordered_template_cooldown(req.template, prefer_no_image)
+    if cooldown:
+        reason = str(cooldown.get("reason") or "recent_failure").strip() or "recent_failure"
+        return f"recent_failure:{reason}"
+    return None
+
+
+def _upsert_ordered_task(task_id: str, **changes: Any) -> Dict[str, Any]:
+    now_iso = _utc_now_iso()
+    with _ORDERED_PPT_TASK_LOCK:
+        current = dict(_ORDERED_PPT_TASKS.get(task_id) or {})
+        if not current:
+            current = {
+                "success": True,
+                "provider": "ordered_async",
+                "task_id": task_id,
+                "status": "pending",
+                "progress": 0,
+                "message": "",
+                "error": None,
+                "download_url": None,
+                "edit_url": None,
+                "download_url_raw": None,
+                "edit_url_raw": None,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            }
+        if "message" in changes:
+            changes["message"] = _translate_progress_message(changes.get("message"))
+        current.update(changes)
+        current["message"] = _translate_progress_message(current.get("message"))
+        current["updated_at"] = now_iso
+        _ORDERED_PPT_TASKS[task_id] = current
+        return dict(current)
+
+
+def _get_ordered_task(task_id: str) -> Optional[Dict[str, Any]]:
+    with _ORDERED_PPT_TASK_LOCK:
+        current = _ORDERED_PPT_TASKS.get(task_id)
+        return dict(current) if current else None
 
 
 def _normalize_model_name(model_name: Optional[str]) -> str:
@@ -358,6 +621,16 @@ def _activate_ppt_runtime(base_url: str) -> None:
             _handle_runtime_switch_error("Failed to read Presenton user config before runtime activation", exc)
 
     target_image_provider = PPT_IMAGE_PROVIDER_DISABLED if PPT_FORCE_IMAGE_PROVIDER_OVERRIDE else None
+    current_config = _read_presenton_user_config(base_url)
+    current_model = str(current_config.get("OLLAMA_MODEL") or "").strip()
+    current_provider = str(current_config.get("IMAGE_PROVIDER") or "").strip()
+    provider_matches = (
+        target_image_provider is None
+        or current_provider == str(target_image_provider).strip()
+    )
+    if _is_same_model(current_model, PPT_RUNTIME_MODEL) and provider_matches:
+        _enforce_single_ollama_model_if_needed(PPT_RUNTIME_MODEL, "runtime activation")
+        return
     try:
         _set_presenton_ollama_model(base_url, PPT_RUNTIME_MODEL, image_provider=target_image_provider)
     except Exception as exc:
@@ -367,6 +640,10 @@ def _activate_ppt_runtime(base_url: str) -> None:
 
 
 def _restore_default_runtime(base_url: str) -> None:
+    if PPT_KEEP_FAST_RUNTIME:
+        logger.info("Skip restoring default Presenton runtime; keeping fast model resident: %s", PPT_RUNTIME_MODEL)
+        _enforce_single_ollama_model_if_needed(PPT_RUNTIME_MODEL, "runtime keepalive")
+        return
     restore_provider = None
     if PPT_FORCE_IMAGE_PROVIDER_OVERRIDE:
         restore_provider = _LAST_IMAGE_PROVIDER or PPT_IMAGE_PROVIDER_RESTORE
@@ -383,6 +660,68 @@ def _purge_stale_tasks_locked(now_ts: Optional[float] = None) -> None:
     stale_ids = [task_id for task_id, ts in _ACTIVE_PPT_TASKS.items() if (now - ts) > PPT_TASK_STALE_SEC]
     for task_id in stale_ids:
         _ACTIVE_PPT_TASKS.pop(task_id, None)
+
+
+def _purge_stale_ordered_tasks(now_ts: Optional[float] = None) -> None:
+    now = now_ts if now_ts is not None else time.time()
+    with _ORDERED_PPT_TASK_LOCK:
+        stale_ids: List[str] = []
+        for task_id, payload in _ORDERED_PPT_TASKS.items():
+            updated_at = str(payload.get("updated_at") or payload.get("created_at") or "").strip()
+            try:
+                updated_ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                updated_ts = now
+            if (now - updated_ts) > PPT_TASK_STALE_SEC:
+                stale_ids.append(task_id)
+        for task_id in stale_ids:
+            _ORDERED_PPT_TASKS.pop(task_id, None)
+
+
+def _ordered_template_cooldown_key(raw_template: Any, prefer_no_image: bool) -> str:
+    template_id = str(raw_template or "").strip().lower() or "general"
+    return f"{template_id}::no_image={1 if prefer_no_image else 0}"
+
+
+def _purge_stale_ordered_template_cooldowns(now_ts: Optional[float] = None) -> None:
+    now = now_ts if now_ts is not None else time.time()
+    with _ORDERED_TEMPLATE_COOLDOWN_LOCK:
+        stale_keys = [
+            key
+            for key, payload in _ORDERED_TEMPLATE_COOLDOWNS.items()
+            if now >= float(payload.get("expires_at") or 0)
+        ]
+        for key in stale_keys:
+            _ORDERED_TEMPLATE_COOLDOWNS.pop(key, None)
+
+
+def _get_ordered_template_cooldown(raw_template: Any, prefer_no_image: bool) -> Optional[Dict[str, Any]]:
+    _purge_stale_ordered_template_cooldowns()
+    key = _ordered_template_cooldown_key(raw_template, prefer_no_image)
+    with _ORDERED_TEMPLATE_COOLDOWN_LOCK:
+        payload = _ORDERED_TEMPLATE_COOLDOWNS.get(key)
+        return dict(payload) if payload else None
+
+
+def _mark_ordered_template_cooldown(raw_template: Any, prefer_no_image: bool, reason: str) -> None:
+    clean_reason = str(reason or "").strip()
+    if ORDERED_TEMPLATE_COOLDOWN_SEC <= 0:
+        return
+    key = _ordered_template_cooldown_key(raw_template, prefer_no_image)
+    expires_at = time.time() + ORDERED_TEMPLATE_COOLDOWN_SEC
+    with _ORDERED_TEMPLATE_COOLDOWN_LOCK:
+        _ORDERED_TEMPLATE_COOLDOWNS[key] = {
+            "template": str(raw_template or "").strip() or "general",
+            "prefer_no_image": prefer_no_image,
+            "reason": clean_reason,
+            "expires_at": expires_at,
+        }
+
+
+def _clear_ordered_template_cooldown(raw_template: Any, prefer_no_image: bool) -> None:
+    key = _ordered_template_cooldown_key(raw_template, prefer_no_image)
+    with _ORDERED_TEMPLATE_COOLDOWN_LOCK:
+        _ORDERED_TEMPLATE_COOLDOWNS.pop(key, None)
 
 
 def _join_url(base_url: str, path_or_url: Optional[str]) -> Optional[str]:
@@ -491,17 +830,58 @@ def _estimate_progress(status: str, message: str) -> int:
     message_l = str(message or "").lower()
     if status_l in {"completed", "done", "success", "succeeded"}:
         return 100
-    if "outline" in message_l:
+    if "outline" in message_l or "大纲" in message_l:
         return 20
-    if "layout" in message_l:
+    if "layout" in message_l or "版式" in message_l:
         return 40
-    if "generating slide" in message_l or "generating slides" in message_l:
+    if "generating slide" in message_l or "generating slides" in message_l or "正在生成页面" in message_l or "整理最终页面" in message_l:
         return 68
-    if "fetching asset" in message_l:
+    if "fetching asset" in message_l or "素材" in message_l:
         return 88
-    if "saving" in message_l or "export" in message_l:
+    if "saving" in message_l or "export" in message_l or "导出" in message_l or "保存" in message_l:
         return 95
     return 10 if status_l == "pending" else 0
+
+
+def _translate_progress_message(message: str) -> str:
+    raw = str(message or "").strip()
+    if not raw:
+        return ""
+
+    direct_map = {
+        "Creating presentation task": "正在创建演示任务",
+        "Loading template layout": "正在加载模板版式",
+        "Preparing ordered slide layout": "正在整理页级版式结构",
+        "Selecting layout for each slide": "正在为每一页选择版式",
+        "Selecting layout for slide": "正在为当前页面选择版式",
+        "Generating slides": "正在生成页面",
+        "Finalizing slides": "正在整理最终页面",
+        "Exporting PPT": "正在导出 PPT",
+        "Fetching assets": "正在加载页面素材",
+        "Fetching asset": "正在加载页面素材",
+        "Saving presentation": "正在保存演示文稿",
+        "Task submitted": "任务已提交",
+        "Presentation generation completed": "PPT 生成完成",
+    }
+    if raw in direct_map:
+        return direct_map[raw]
+
+    translated = raw
+    regex_rules: List[Tuple[re.Pattern[str], str]] = [
+        (re.compile(r"^Generating slides\s+(\d+)\s*/\s*(\d+)$", re.IGNORECASE), r"正在生成页面 \1/\2"),
+        (re.compile(r"^Finalizing slides\s+(\d+)\s*/\s*(\d+)$", re.IGNORECASE), r"正在整理最终页面 \1/\2"),
+        (re.compile(r"^Selecting layout for each slide(?:\s*\((\d+)\s*/\s*(\d+)\))?$", re.IGNORECASE), r"正在为每一页选择版式"),
+        (re.compile(r"^Selecting layout for slide\s+(\d+)\s*/\s*(\d+)$", re.IGNORECASE), r"正在为页面 \1/\2 选择版式"),
+        (re.compile(r"^Fetching assets?\s+(\d+)\s*/\s*(\d+)$", re.IGNORECASE), r"正在加载页面素材 \1/\2"),
+        (re.compile(r"^Saving(?:\s+presentation)?$", re.IGNORECASE), r"正在保存演示文稿"),
+        (re.compile(r"^Exporting(?:\s+to)?\s+pptx?$", re.IGNORECASE), r"正在导出 PPT"),
+    ]
+    for pattern, replacement in regex_rules:
+        if pattern.search(translated):
+            translated = pattern.sub(replacement, translated)
+            break
+
+    return translated
 
 
 def _coerce_progress_value(value: Any) -> Optional[int]:
@@ -566,7 +946,7 @@ def _extract_status_value(payload: Dict[str, Any]) -> str:
 def _extract_status_message(payload: Dict[str, Any]) -> str:
     message = str(payload.get("message") or payload.get("detail") or payload.get("error_message") or "").strip()
     if message:
-        return message
+        return _translate_progress_message(message)
     error_payload = payload.get("error")
     if isinstance(error_payload, dict):
         nested_error = str(
@@ -576,17 +956,18 @@ def _extract_status_message(payload: Dict[str, Any]) -> str:
             or ""
         ).strip()
         if nested_error:
-            return nested_error
+            return _translate_progress_message(nested_error)
     data = payload.get("data")
     if isinstance(data, dict):
         nested_message = str(data.get("message") or data.get("detail") or "").strip()
         if nested_message:
-            return nested_message
+            return _translate_progress_message(nested_message)
     return ""
 
 
-def _rewrite_presenton_text_payload(content: str, base_url: str) -> str:
-    # Rewrite both absolute local URLs and root-relative refs so all assets/APIs stay in backend proxy.
+def _rewrite_presenton_text_payload(content: str, base_url: str, content_type: str = "") -> str:
+    # Rewrite HTML/CSS asset references so all resources stay in backend proxy.
+    lowered_content_type = str(content_type or "").lower()
     parsed_base = urlparse(base_url)
     host_candidates = set(LOCAL_HOST_CANDIDATES)
     if parsed_base.hostname:
@@ -600,18 +981,456 @@ def _rewrite_presenton_text_payload(content: str, base_url: str) -> str:
         lambda match: f"{PRESENTON_PROXY_PREFIX}{match.group('path') or '/'}",
         content,
     )
-    rewritten = ROOT_RELATIVE_REF_RE.sub(
-        lambda match: f"{match.group(1)}{PRESENTON_PROXY_PREFIX}/{match.group(2)}",
-        rewritten,
-    )
+    if "text/html" in lowered_content_type:
+        rewritten = ROOT_RELATIVE_REF_RE.sub(
+            lambda match: f"{match.group(1)}{PRESENTON_PROXY_PREFIX}/{match.group(2)}",
+            rewritten,
+        )
+        for source_text, target_text in PRESENTON_UI_TRANSLATIONS:
+            if source_text in rewritten:
+                rewritten = rewritten.replace(source_text, target_text)
+    elif "text/css" in lowered_content_type:
+        rewritten = ROOT_RELATIVE_REF_RE.sub(
+            lambda match: f"{match.group(1)}{PRESENTON_PROXY_PREFIX}/{match.group(2)}",
+            rewritten,
+        )
+        rewritten = CSS_ROOT_RELATIVE_URL_RE.sub(
+            lambda match: f"url({match.group('quote')}{PRESENTON_PROXY_PREFIX}/{match.group('path')}{match.group('quote')})",
+            rewritten,
+        )
     return rewritten
+
+
+def _inject_presenton_proxy_bootstrap_script(html: str) -> str:
+    if not html or "__presentonProxyBootstrap" in html:
+        return html
+
+    proxy_local_hosts = json.dumps(sorted(LOCAL_HOST_CANDIDATES), ensure_ascii=False)
+    script = f"""
+<script>
+(function() {{
+  if (window.__presentonProxyBootstrap) return;
+  window.__presentonProxyBootstrap = true;
+  const proxyPrefix = {json.dumps(PRESENTON_PROXY_PREFIX)};
+  const proxyLocalHosts = new Set({proxy_local_hosts});
+  const passthroughSchemes = /^(data:|blob:|javascript:|mailto:|tel:)/i;
+
+  function rewriteUrl(rawValue) {{
+    if (rawValue === null || rawValue === undefined || rawValue === '') return rawValue;
+    const original = String(rawValue);
+    if (passthroughSchemes.test(original)) return original;
+
+    try {{
+      const absolute = new URL(original, window.location.origin);
+      const host = String(absolute.hostname || '').toLowerCase();
+      const isSameOrigin = absolute.origin === window.location.origin;
+      const isProxyLocalHost = proxyLocalHosts.has(host);
+      if (!isSameOrigin && !isProxyLocalHost) return original;
+      if (absolute.pathname.startsWith(proxyPrefix)) {{
+        return original.startsWith('http://') || original.startsWith('https://')
+          ? absolute.toString()
+          : `${{absolute.pathname}}${{absolute.search}}${{absolute.hash}}`;
+      }}
+      if (!absolute.pathname.startsWith('/')) return original;
+      absolute.pathname = absolute.pathname === '/' ? proxyPrefix : `${{proxyPrefix}}${{absolute.pathname}}`;
+      return original.startsWith('http://') || original.startsWith('https://')
+        ? absolute.toString()
+        : `${{absolute.pathname}}${{absolute.search}}${{absolute.hash}}`;
+    }} catch (_error) {{
+      return original;
+    }}
+  }}
+
+  function rewriteSrcset(rawValue) {{
+    if (!rawValue || typeof rawValue !== 'string') return rawValue;
+    return rawValue
+      .split(',')
+      .map((entry) => {{
+        const trimmed = entry.trim();
+        if (!trimmed) return trimmed;
+        const match = trimmed.match(/^(\\S+)(\\s+.+)?$/);
+        if (!match) return trimmed;
+        const rewrittenUrl = rewriteUrl(match[1]);
+        return `${{rewrittenUrl}}${{match[2] || ''}}`;
+      }})
+      .join(', ');
+  }}
+
+  function rewriteStyleValue(rawValue) {{
+    if (!rawValue || typeof rawValue !== 'string') return rawValue;
+    return rawValue.replace(/url\\((['"]?)(.*?)\\1\\)/gi, function(_full, quote, assetUrl) {{
+      const rewrittenUrl = rewriteUrl(assetUrl);
+      const nextQuote = quote || '';
+      return `url(${{nextQuote}}${{rewrittenUrl}}${{nextQuote}})`;
+    }});
+  }}
+
+  function rewriteElementUrls(root) {{
+    const elements = [];
+    if (root && root.nodeType === Node.ELEMENT_NODE) {{
+      elements.push(root);
+    }}
+    if (root && root.querySelectorAll) {{
+      root.querySelectorAll('[src], [srcset], [href], [poster], [action], [formaction], [style]').forEach((node) => {{
+        elements.push(node);
+      }});
+    }}
+    elements.forEach((element) => {{
+      if (!element || !element.getAttribute || !element.setAttribute) return;
+      ['src', 'href', 'poster', 'action', 'formaction'].forEach((attrName) => {{
+        const rawValue = element.getAttribute(attrName);
+        if (!rawValue) return;
+        const rewrittenValue = rewriteUrl(rawValue);
+        if (rewrittenValue && rewrittenValue !== rawValue) {{
+          element.setAttribute(attrName, rewrittenValue);
+        }}
+      }});
+      const rawSrcset = element.getAttribute('srcset');
+      if (rawSrcset) {{
+        const rewrittenSrcset = rewriteSrcset(rawSrcset);
+        if (rewrittenSrcset && rewrittenSrcset !== rawSrcset) {{
+          element.setAttribute('srcset', rewrittenSrcset);
+        }}
+      }}
+      const rawStyle = element.getAttribute('style');
+      if (rawStyle) {{
+        const rewrittenStyle = rewriteStyleValue(rawStyle);
+        if (rewrittenStyle && rewrittenStyle !== rawStyle) {{
+          element.setAttribute('style', rewrittenStyle);
+        }}
+      }}
+    }});
+  }}
+
+  const originalFetch = window.fetch ? window.fetch.bind(window) : null;
+  if (originalFetch) {{
+    window.fetch = function(input, init) {{
+      if (typeof input === 'string' || input instanceof URL) {{
+        return originalFetch(rewriteUrl(input), init);
+      }}
+      if (window.Request && input instanceof Request) {{
+        const rewritten = rewriteUrl(input.url);
+        if (rewritten !== input.url) {{
+          return originalFetch(new Request(rewritten, input), init);
+        }}
+      }}
+      return originalFetch(input, init);
+    }};
+  }}
+
+  if (window.XMLHttpRequest && window.XMLHttpRequest.prototype) {{
+    const originalOpen = window.XMLHttpRequest.prototype.open;
+    window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {{
+      return originalOpen.call(this, method, rewriteUrl(url), ...rest);
+    }};
+  }}
+
+  if (window.history && window.history.pushState) {{
+    const originalPushState = window.history.pushState.bind(window.history);
+    window.history.pushState = function(state, title, url) {{
+      return originalPushState(state, title, url == null ? url : rewriteUrl(url));
+    }};
+  }}
+
+  if (window.history && window.history.replaceState) {{
+    const originalReplaceState = window.history.replaceState.bind(window.history);
+    window.history.replaceState = function(state, title, url) {{
+      return originalReplaceState(state, title, url == null ? url : rewriteUrl(url));
+    }};
+  }}
+
+  try {{
+    const locationProto = Object.getPrototypeOf(window.location);
+    if (locationProto && typeof locationProto.assign === 'function') {{
+      const originalAssign = locationProto.assign.bind(window.location);
+      locationProto.assign = function(url) {{
+        return originalAssign(rewriteUrl(url));
+      }};
+    }}
+    if (locationProto && typeof locationProto.replace === 'function') {{
+      const originalReplace = locationProto.replace.bind(window.location);
+      locationProto.replace = function(url) {{
+        return originalReplace(rewriteUrl(url));
+      }};
+    }}
+  }} catch (_error) {{
+    // Some browsers lock Location.prototype; history/fetch interception is still enough.
+  }}
+
+  if (window.open) {{
+    const originalOpenWindow = window.open.bind(window);
+    window.open = function(url, ...rest) {{
+      return originalOpenWindow(url == null ? url : rewriteUrl(url), ...rest);
+    }};
+  }}
+
+  function isEditBannerText(text) {{
+    if (!text || typeof text !== 'string') return false;
+    const normalized = text.replace(/\\s+/g, ' ').trim().toLowerCase();
+    return (
+      normalized.includes('want to edit? use your computer to edit.') ||
+      normalized.includes('use your computer to edit.') ||
+      (normalized.includes('want to edit') && normalized.includes('computer to edit'))
+    );
+  }}
+
+  function getOwnText(node) {{
+    if (!node || !node.childNodes) return '';
+    return Array.from(node.childNodes)
+      .filter((child) => child && child.nodeType === Node.TEXT_NODE)
+      .map((child) => child.nodeValue || '')
+      .join(' ')
+      .replace(/\\s+/g, ' ')
+      .trim();
+  }}
+
+  function findBannerContainer(node) {{
+    let current = node;
+    for (let depth = 0; depth < 4 && current && current !== document.body && current !== document.documentElement; depth += 1) {{
+      const rect = typeof current.getBoundingClientRect === 'function'
+        ? current.getBoundingClientRect()
+        : {{ top: 9999, height: 0 }};
+      const style = window.getComputedStyle(current);
+      const topRegion = rect.top <= 180;
+      const smallEnough = rect.height > 0 && rect.height <= 120;
+      const ownText = getOwnText(current);
+      if ((isEditBannerText(ownText) || isEditBannerText(current.textContent || '')) && topRegion && smallEnough) {{
+        return current;
+      }}
+      if ((style.position === 'sticky' || style.position === 'fixed') && topRegion && rect.height <= 140) {{
+        return current;
+      }}
+      current = current.parentElement;
+    }}
+    return null;
+  }}
+
+  function hideEditBanner(root) {{
+    const scope = root && root.querySelectorAll ? root : document;
+    const candidates = scope.querySelectorAll
+      ? scope.querySelectorAll('div, section, aside, header, p, span')
+      : [];
+    candidates.forEach((node) => {{
+      const ownText = getOwnText(node);
+      if (!ownText || ownText.length > 120 || !isEditBannerText(ownText)) return;
+      const banner = findBannerContainer(node) || node;
+      const rect = typeof banner.getBoundingClientRect === 'function'
+        ? banner.getBoundingClientRect()
+        : {{ top: 9999, height: 0 }};
+      if (
+        banner === document.body ||
+        banner === document.documentElement ||
+        rect.height <= 0 ||
+        rect.height > 140 ||
+        rect.top > 220
+      ) {{
+        return;
+      }}
+      banner.style.setProperty('display', 'none', 'important');
+      banner.style.setProperty('height', '0', 'important');
+      banner.style.setProperty('min-height', '0', 'important');
+      banner.style.setProperty('overflow', 'hidden', 'important');
+      banner.setAttribute('data-presenton-hidden-banner', 'true');
+    }});
+  }}
+
+  function startEditBannerObserver() {{
+    if (!window.MutationObserver || window.__presentonEditBannerObserverStarted) return;
+    window.__presentonEditBannerObserverStarted = true;
+    const observer = new MutationObserver((mutations) => {{
+      mutations.forEach((mutation) => {{
+        mutation.addedNodes.forEach((node) => {{
+          if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+          rewriteElementUrls(node);
+          hideEditBanner(node);
+        }});
+        if (mutation.type === 'attributes' && mutation.target && mutation.target.nodeType === Node.ELEMENT_NODE) {{
+          rewriteElementUrls(mutation.target);
+        }}
+        if (mutation.type === 'characterData' && mutation.target && mutation.target.parentElement) {{
+          hideEditBanner(mutation.target.parentElement);
+        }}
+      }});
+    }});
+    observer.observe(document.documentElement, {{
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['src', 'srcset', 'href', 'poster', 'action', 'formaction', 'style']
+    }});
+  }}
+
+  function runEditBannerCleanup() {{
+    rewriteElementUrls(document);
+    hideEditBanner(document);
+    startEditBannerObserver();
+  }}
+
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', runEditBannerCleanup, {{ once: true }});
+  }} else {{
+    runEditBannerCleanup();
+  }}
+
+  let cleanupAttempts = 0;
+  const cleanupTimer = window.setInterval(() => {{
+    runEditBannerCleanup();
+    cleanupAttempts += 1;
+    if (cleanupAttempts >= 40) {{
+      window.clearInterval(cleanupTimer);
+    }}
+  }}, 400);
+}})();
+</script>
+""".strip()
+
+    lower_html = html.lower()
+    first_script_index = lower_html.find("<script")
+    if first_script_index >= 0:
+        return f"{html[:first_script_index]}{script}{html[first_script_index:]}"
+    head_index = lower_html.rfind("</head>")
+    if head_index >= 0:
+        return f"{html[:head_index]}{script}{html[head_index:]}"
+    return f"{script}{html}"
+
+
+def _inject_template_preview_i18n_script(html: str) -> str:
+    if not html or "__presentonTemplatePreviewI18n" in html:
+        return html
+
+    direct_map = json.dumps(PRESENTON_TEMPLATE_PREVIEW_TEXT_MAP, ensure_ascii=False)
+    regex_rules = json.dumps(PRESENTON_TEMPLATE_PREVIEW_REGEX_RULES, ensure_ascii=False)
+    script = f"""
+<script>
+(function() {{
+  if (window.__presentonTemplatePreviewI18n) return;
+  window.__presentonTemplatePreviewI18n = true;
+  const directMap = {direct_map};
+  const regexRules = {regex_rules}.map(([pattern, replacement]) => [new RegExp(pattern, 'g'), replacement]);
+  const excludedTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT']);
+  let running = false;
+
+  function translateText(value) {{
+    if (!value || typeof value !== 'string') return value;
+    let next = value;
+    for (const [sourceText, targetText] of Object.entries(directMap)) {{
+      if (next.includes(sourceText)) {{
+        next = next.split(sourceText).join(targetText);
+      }}
+    }}
+    for (const [pattern, replacement] of regexRules) {{
+      next = next.replace(pattern, replacement);
+    }}
+    return next;
+  }}
+
+  function translateAttribute(element, attrName) {{
+    if (!element || !element.getAttribute) return;
+    const rawValue = element.getAttribute(attrName);
+    if (!rawValue) return;
+    const translated = translateText(rawValue);
+    if (translated !== rawValue) {{
+      element.setAttribute(attrName, translated);
+    }}
+  }}
+
+  function translateNodeTree(root) {{
+    if (!root || running) return;
+    running = true;
+    try {{
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let current;
+      while ((current = walker.nextNode())) {{
+        const parent = current.parentElement;
+        if (!parent || excludedTags.has(parent.tagName)) continue;
+        const rawValue = current.nodeValue;
+        const translated = translateText(rawValue);
+        if (translated !== rawValue) {{
+          current.nodeValue = translated;
+        }}
+      }}
+
+      const elements = root.querySelectorAll
+        ? root.querySelectorAll('[title], [aria-label], input[placeholder], textarea[placeholder], img[alt], iframe[title]')
+        : [];
+      elements.forEach((element) => {{
+        translateAttribute(element, 'title');
+        translateAttribute(element, 'aria-label');
+        translateAttribute(element, 'placeholder');
+        translateAttribute(element, 'alt');
+      }});
+
+      if (document.title) {{
+        document.title = translateText(document.title);
+      }}
+    }} finally {{
+      running = false;
+    }}
+  }}
+
+  function runTranslate(target) {{
+    translateNodeTree(target || document.body || document.documentElement);
+  }}
+
+  const startObserver = () => {{
+    const observer = new MutationObserver((mutations) => {{
+      if (running) return;
+      for (const mutation of mutations) {{
+        if (mutation.type === 'characterData') {{
+          translateNodeTree(mutation.target.parentElement || document.body || document.documentElement);
+          continue;
+        }}
+        mutation.addedNodes.forEach((node) => {{
+          if (node && node.nodeType === Node.TEXT_NODE) {{
+            translateNodeTree(node.parentElement || document.body || document.documentElement);
+          }} else if (node && node.nodeType === Node.ELEMENT_NODE) {{
+            translateNodeTree(node);
+          }}
+        }});
+      }}
+    }});
+    observer.observe(document.documentElement, {{
+      subtree: true,
+      childList: true,
+      characterData: true
+    }});
+  }};
+
+  if (document.readyState === 'loading') {{
+    document.addEventListener('DOMContentLoaded', () => {{
+      runTranslate();
+      startObserver();
+    }}, {{ once: true }});
+  }} else {{
+    runTranslate();
+    startObserver();
+  }}
+
+  let attempts = 0;
+  const timer = setInterval(() => {{
+    runTranslate();
+    attempts += 1;
+    if (attempts >= 30) {{
+      clearInterval(timer);
+    }}
+  }}, 400);
+}})();
+</script>
+""".strip()
+
+    lower_html = html.lower()
+    body_index = lower_html.rfind("</body>")
+    if body_index >= 0:
+        return f"{html[:body_index]}{script}{html[body_index:]}"
+    return f"{html}{script}"
 
 
 def _build_proxy_upstream_headers(request: Request) -> Dict[str, str]:
     headers: Dict[str, str] = {}
     for key, value in request.headers.items():
         lowered = key.lower()
-        if lowered in HOP_BY_HOP_HEADERS or lowered in {"host", "content-length"}:
+        if lowered in HOP_BY_HOP_HEADERS or lowered in PROXY_CACHE_REQUEST_HEADERS or lowered in {"host", "content-length"}:
             continue
         headers[key] = value
     if DEFAULT_PRESENTON_API_KEY and "authorization" not in {k.lower() for k in headers}:
@@ -625,7 +1444,7 @@ def _filter_proxy_response_headers(headers: Dict[str, str], base_url: str) -> Di
         lowered = key.lower()
         if lowered in HOP_BY_HOP_HEADERS:
             continue
-        if lowered in {"content-security-policy", "content-length", "content-encoding"}:
+        if lowered in PROXY_CACHE_RESPONSE_HEADERS or lowered in {"content-security-policy", "content-length", "content-encoding"}:
             continue
         if lowered == "location":
             proxied_location = _build_presenton_proxy_url(value, base_url)
@@ -665,6 +1484,391 @@ def _request_json(
     return data
 
 
+def _request_stream(
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    timeout: float = REQUEST_TIMEOUT_SEC,
+):
+    try:
+        response = _PRESENTON_SESSION.request(
+            method=method,
+            url=url,
+            headers=headers,
+            stream=True,
+            timeout=(10, timeout),
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Presenton stream request failed: {exc}") from exc
+
+    if response.status_code >= 400:
+        raw_text = ""
+        try:
+            raw_text = response.text or ""
+        except Exception:
+            raw_text = ""
+        try:
+            data = response.json() if raw_text else {}
+        except Exception:
+            data = {"raw_text": raw_text[:2000]}
+        detail = (
+            data.get("message")
+            or data.get("error")
+            or data.get("detail")
+            or data.get("raw_text")
+            or f"Presenton API error ({response.status_code})"
+        )
+        response.close()
+        raise HTTPException(status_code=502, detail=str(detail))
+    return response
+
+
+def _extract_slide_title_from_markdown(slide_markdown: str) -> str:
+    lines = [str(line or "").strip() for line in str(slide_markdown or "").splitlines()]
+    for raw_line in lines:
+        line = raw_line.lstrip("#").strip()
+        if not line:
+            continue
+        if line.startswith(("-", "*", ">")):
+            continue
+        if re.match(r"^\d+[\.\) 、]", line):
+            continue
+        return line[:120]
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line:
+            return line[:120]
+    return "演示文稿"
+
+
+def _derive_presentation_title(req: PresentonGenerateRequest) -> str:
+    if isinstance(req.slides_markdown, list) and req.slides_markdown:
+        title = _extract_slide_title_from_markdown(req.slides_markdown[0])
+        if title:
+            return title
+    prompt = str(req.prompt or "").strip()
+    if not prompt:
+        return "演示文稿"
+    first_line = prompt.splitlines()[0].strip()
+    return first_line[:120] if first_line else "演示文稿"
+
+
+def _extract_slide_titles(req: PresentonGenerateRequest) -> List[str]:
+    if not isinstance(req.slides_markdown, list):
+        return []
+    titles: List[str] = []
+    for slide in req.slides_markdown:
+        title = _extract_slide_title_from_markdown(str(slide or ""))
+        if title:
+            titles.append(title[:120])
+    return titles[:40]
+
+
+def _build_ordered_runtime_prompt(req: PresentonGenerateRequest) -> str:
+    slide_titles = _extract_slide_titles(req)
+    deck_title = _derive_presentation_title(req)
+    slide_count = len(slide_titles) or int(req.n_slides or 8)
+    lines = [
+        f"请根据已确认的页级大纲生成一份 {slide_count} 页中文 PPT。",
+        f"演示主题：{deck_title}",
+        "标题要求：封面页可使用演示主题；从第 2 页开始，必须使用对应页级大纲中的标题作为页面主标题，不得把演示主题重复写成每一页的大标题。",
+        "内容要求：每一页只展开当前页级大纲，不要把 language、内容导向、页面角色、展开要求、讲解备注、参考素材等控制文字直接显示到页面中。",
+        "表达要求：如果页级大纲已经提供了明确页标题，必须保留该标题的核心含义，不要统一改写成“XX汇报”“XX报告”“背景分析”“工作总结”这类泛化标题。",
+    ]
+    if slide_titles:
+        lines.append("页标题清单：")
+        lines.extend([f"{idx + 1}. {title}" for idx, title in enumerate(slide_titles)])
+    return "\n".join(lines)
+
+
+def _copy_presenton_request(req: PresentonGenerateRequest, **updates: Any) -> PresentonGenerateRequest:
+    if hasattr(req, "model_copy"):
+        return req.model_copy(update=updates)  # type: ignore[attr-defined]
+    return req.copy(update=updates)  # type: ignore[attr-defined]
+
+
+def _extract_layout_schema_properties(layout: Dict[str, Any]) -> Dict[str, Any]:
+    schema = layout.get("json_schema")
+    if not isinstance(schema, dict):
+        return {}
+    props = schema.get("properties")
+    return props if isinstance(props, dict) else {}
+
+
+def _schema_contains_image_slot(fragment: Any) -> bool:
+    if isinstance(fragment, dict):
+        fragment_type = str(fragment.get("type") or "").strip().lower()
+        properties = fragment.get("properties")
+        if isinstance(properties, dict):
+            for key, value in properties.items():
+                lowered_key = str(key or "").strip().lower()
+                if any(token in lowered_key for token in ("image", "photo", "picture", "illustration", "backgroundimage", "mapimage", "__image_url__", "__image_prompt__")):
+                    return True
+                if _schema_contains_image_slot(value):
+                    return True
+
+        required = fragment.get("required")
+        if isinstance(required, list):
+            for item in required:
+                lowered_required = str(item or "").strip().lower()
+                if any(token in lowered_required for token in ("image", "photo", "picture", "illustration", "backgroundimage", "mapimage", "__image_url__", "__image_prompt__")):
+                    return True
+
+        for key in ("items", "additionalProperties"):
+            if _schema_contains_image_slot(fragment.get(key)):
+                return True
+
+        for key in ("anyOf", "allOf", "oneOf", "prefixItems"):
+            value = fragment.get(key)
+            if isinstance(value, list) and any(_schema_contains_image_slot(item) for item in value):
+                return True
+
+        if fragment_type == "object" and isinstance(properties, dict) and "__image_url__" in properties:
+            return True
+
+    elif isinstance(fragment, list):
+        return any(_schema_contains_image_slot(item) for item in fragment)
+
+    return False
+
+
+def _layout_requires_image(layout: Dict[str, Any]) -> bool:
+    id_text = " ".join(
+        [
+            str(layout.get("id") or ""),
+            str(layout.get("name") or ""),
+            str(layout.get("description") or ""),
+        ]
+    ).lower()
+    if any(token in id_text for token in ("image", "photo", "picture", "illustration", "backgroundimage", "mapimage")):
+        return True
+    for key in _extract_layout_schema_properties(layout).keys():
+        lowered = str(key or "").strip().lower()
+        if any(token in lowered for token in ("image", "photo", "picture", "backgroundimage", "mapimage")):
+            return True
+    if _schema_contains_image_slot(layout.get("json_schema")):
+        return True
+    return False
+
+
+def _score_layout_candidate(
+    layout: Dict[str, Any],
+    slide_markdown: str,
+    slide_index: int,
+    total_slides: int,
+    used_counts: Dict[str, int],
+    previous_layout_id: Optional[str],
+    prefer_no_image: bool,
+) -> int:
+    layout_id = str(layout.get("id") or "").strip()
+    meta_text = " ".join(
+        [
+            layout_id,
+            str(layout.get("name") or ""),
+            str(layout.get("description") or ""),
+            " ".join(_extract_layout_schema_properties(layout).keys()),
+        ]
+    ).lower()
+    slide_text = str(slide_markdown or "").lower()
+    title_text = _extract_slide_title_from_markdown(slide_markdown).lower()
+    bullet_lines = [
+        line for line in str(slide_markdown or "").splitlines()
+        if str(line or "").strip().startswith(("-", "*")) or re.match(r"^\s*\d+[\.\) 、]", str(line or ""))
+    ]
+    bullet_count = len(bullet_lines)
+    wants_cover = slide_index == 0 or any(token in title_text for token in ("封面", "标题", "开场", "cover", "title"))
+    wants_toc = any(token in slide_text for token in ("目录", "议程", "大纲", "agenda", "contents", "toc"))
+    wants_metrics = any(
+        token in slide_text
+        for token in ("数据", "指标", "趋势", "统计", "对比", "增长", "营收", "预算", "图表", "chart", "metric", "table", "kpi")
+    )
+    wants_process = any(
+        token in slide_text
+        for token in ("流程", "步骤", "路径", "计划", "阶段", "里程碑", "执行", "推进", "roadmap", "process", "timeline")
+    )
+    wants_summary = slide_index == (total_slides - 1) or any(
+        token in slide_text for token in ("总结", "结论", "建议", "下一步", "summary", "conclusion", "takeaway")
+    )
+    wants_quote = any(token in slide_text for token in ("洞察", "观点", "金句", "引用", "quote", "insight"))
+
+    score = 0
+    if prefer_no_image and not _layout_requires_image(layout):
+        score += 6
+    if prefer_no_image and _layout_requires_image(layout):
+        score -= 10
+    if wants_cover and any(token in meta_text for token in ("intro", "title", "cover", "pitchdeck")):
+        score += 15
+    if wants_toc and any(token in meta_text for token in ("table-of-contents", "contents", "agenda", "sections", "list")):
+        score += 18
+    if wants_metrics and any(token in meta_text for token in ("chart", "metric", "table", "stats", "data")):
+        score += 12
+    if wants_process and any(token in meta_text for token in ("process", "timeline", "roadmap", "stage", "path", "steps")):
+        score += 10
+    if wants_summary and any(token in meta_text for token in ("summary", "quote", "takeaway", "metric", "insight")):
+        score += 10
+    if wants_quote and any(token in meta_text for token in ("quote", "insight", "highlight")):
+        score += 9
+    if bullet_count >= 4 and any(token in meta_text for token in ("bullet", "grid", "card", "list")):
+        score += 7
+    if bullet_count >= 2 and any(token in meta_text for token in ("bullet", "list", "description")):
+        score += 4
+    if any(token in meta_text for token in ("description", "grid", "bullet", "metric", "chart")):
+        score += 1
+
+    used = int(used_counts.get(layout_id, 0) or 0)
+    score -= used * 4
+    if previous_layout_id and previous_layout_id == layout_id:
+        score -= 8
+    return score
+
+
+def _build_ordered_layout_payload(req: PresentonGenerateRequest, layout_payload: Dict[str, Any]) -> Dict[str, Any]:
+    slides_markdown = req.slides_markdown if isinstance(req.slides_markdown, list) else []
+    if not slides_markdown:
+        raise HTTPException(status_code=400, detail="slides_markdown is required for ordered layout generation")
+
+    source_layouts = layout_payload.get("slides")
+    if not isinstance(source_layouts, list) or not source_layouts:
+        raise HTTPException(status_code=502, detail="Presenton template layout is empty")
+
+    prefer_no_image = str(req.image_type or "none").strip().lower() == "none"
+    image_safe_layouts = [item for item in source_layouts if isinstance(item, dict) and not _layout_requires_image(item)]
+    all_layouts = [item for item in source_layouts if isinstance(item, dict)]
+    used_counts: Dict[str, int] = {}
+    selected_layouts: List[Dict[str, Any]] = []
+    previous_layout_id: Optional[str] = None
+
+    for index, slide_markdown in enumerate(slides_markdown):
+        pool = image_safe_layouts or all_layouts
+        chosen = max(
+            pool,
+            key=lambda item: _score_layout_candidate(
+                item, slide_markdown, index, len(slides_markdown), used_counts, previous_layout_id, prefer_no_image
+            ),
+        )
+
+        layout_id = str(chosen.get("id") or "").strip()
+        if not layout_id:
+            continue
+        selected_layouts.append(
+            {
+                "id": layout_id,
+                "name": chosen.get("name"),
+                "description": chosen.get("description"),
+                "json_schema": chosen.get("json_schema") or {},
+            }
+        )
+        used_counts[layout_id] = used_counts.get(layout_id, 0) + 1
+        previous_layout_id = layout_id
+
+    if len(selected_layouts) != len(slides_markdown):
+        raise HTTPException(status_code=502, detail="Failed to resolve ordered slide layouts from selected template")
+
+    return {
+        "name": str(layout_payload.get("name") or req.template or "general"),
+        "ordered": True,
+        "slides": selected_layouts,
+    }
+
+
+def _fetch_presenton_template_group(base_url: str, headers: Dict[str, str], template_id: str) -> Dict[str, Any]:
+    errors: List[str] = []
+    for candidate in _template_retry_candidates(template_id):
+        cache_key = f"{base_url}::{candidate}"
+        with _TEMPLATE_GROUP_CACHE_LOCK:
+            cached = _TEMPLATE_GROUP_CACHE.get(cache_key)
+            if cached:
+                return dict(cached)
+        resolved = TEMPLATE_GROUP_PATH.replace("{template_id}", requests.utils.quote(candidate, safe=""))
+        url = f"{base_url}{resolved}"
+        try:
+            data = _request_json("GET", url, headers, payload=None, timeout=max(REQUEST_TIMEOUT_SEC, 20))
+            if isinstance(data, dict) and isinstance(data.get("slides"), list):
+                with _TEMPLATE_GROUP_CACHE_LOCK:
+                    _TEMPLATE_GROUP_CACHE[cache_key] = dict(data)
+                return data
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+            continue
+    detail = errors[-1] if errors else "Template group layout not found"
+    raise HTTPException(status_code=404, detail=detail)
+
+
+def _parse_stream_event_payload(payload_text: str) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(payload_text)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _stream_prepared_presentation(
+    task_id: str,
+    base_url: str,
+    headers: Dict[str, str],
+    presentation_id: str,
+    total_slides: int,
+) -> Dict[str, Any]:
+    stream_path = STREAM_PRESENTATION_PATH_TEMPLATE.replace("{presentation_id}", presentation_id)
+    stream_url = f"{base_url}{stream_path}"
+    stream_headers = dict(headers)
+    stream_headers.pop("Content-Type", None)
+    stream_headers["Accept"] = "text/event-stream"
+
+    response = _request_stream("GET", stream_url, stream_headers, timeout=max(POLL_TIMEOUT_SEC, REQUEST_TIMEOUT_SEC))
+    generated_slides = 0
+    completed_payload: Dict[str, Any] = {}
+    data_lines: List[str] = []
+
+    with response:
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if raw_line is None:
+                continue
+            line = str(raw_line).rstrip("\r")
+            if not line:
+                payload_text = "\n".join(data_lines).strip()
+                data_lines = []
+                if not payload_text:
+                    continue
+                event_payload = _parse_stream_event_payload(payload_text)
+                if not event_payload:
+                    continue
+                if event_payload.get("detail") or event_payload.get("error"):
+                    detail = event_payload.get("detail") or event_payload.get("error")
+                    raise HTTPException(status_code=502, detail=str(detail))
+
+                payload_type = str(event_payload.get("type") or "").strip().lower()
+                if payload_type == "chunk":
+                    chunk = event_payload.get("chunk")
+                    if isinstance(chunk, str):
+                        chunk_text = chunk.strip()
+                        if chunk_text.startswith("{") and '"layout"' in chunk_text:
+                            try:
+                                slide_payload = json.loads(chunk_text)
+                            except Exception:
+                                slide_payload = {}
+                            try:
+                                slide_index = int(slide_payload.get("index"))
+                                generated_slides = max(generated_slides, slide_index + 1)
+                            except Exception:
+                                generated_slides += 1
+                            progress = min(90, 45 + int((generated_slides / max(1, total_slides)) * 42))
+                            message = f"正在生成页面 {generated_slides}/{total_slides}"
+                            if generated_slides >= total_slides:
+                                message = f"正在整理最终页面 {generated_slides}/{total_slides}"
+                            _upsert_ordered_task(task_id, status="pending", progress=progress, message=message)
+                elif payload_type == "complete" and str(event_payload.get("key") or "") == "presentation":
+                    value = event_payload.get("value")
+                    if isinstance(value, dict):
+                        completed_payload = value
+                continue
+
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+
+    return completed_payload
+
+
 def _extract_markdown_json(raw_text: str) -> Dict[str, Any]:
     text = str(raw_text or "").strip()
     if not text:
@@ -691,37 +1895,162 @@ def _extract_markdown_json(raw_text: str) -> Dict[str, Any]:
     return {}
 
 
+def _invoke_outline_llm(prompt: str, model_backend: str) -> Tuple[str, Optional[str]]:
+    timeout_sec = max(0.0, OUTLINE_LLM_TIMEOUT_SEC)
+    if timeout_sec <= 0:
+        return str(ask_llm(prompt, model_type=model_backend) or ""), None
+
+    future = _OUTLINE_LLM_EXECUTOR.submit(ask_llm, prompt, model_backend)
+    try:
+        return str(future.result(timeout=timeout_sec) or ""), None
+    except FuturesTimeoutError:
+        future.cancel()
+        logger.warning(
+            "PPT outline generation timed out after %.1fs, backend=%s",
+            timeout_sec,
+            model_backend,
+        )
+        return "", "timeout"
+    except Exception:
+        future.cancel()
+        logger.exception("PPT outline generation failed unexpectedly, backend=%s", model_backend)
+        return "", "error"
+
+
 def _sanitize_outline_title(title: Optional[str], fallback: str) -> str:
     value = str(title or "").strip()
     return value[:120] if value else fallback
 
 
+def _build_fallback_slide_points(topic: str, slide_title: str) -> List[str]:
+    topic_label = _sanitize_outline_title(topic, "当前主题")
+    slide_label = _sanitize_outline_title(slide_title, "本页")
+    if "封面" in slide_label:
+        return [
+            f"明确演示主题“{topic_label}”的核心方向。",
+            "交代汇报对象、汇报场景或使用场合。",
+            "概括本次汇报希望回答的关键问题。",
+            "点出整体价值主张或预期成果。",
+        ]
+    if "目录" in slide_label or "摘要" in slide_label:
+        return [
+            "概览全文章节结构与阅读顺序。",
+            "突出 3-4 个最重要的分析模块。",
+            "说明每个模块将解决什么问题。",
+            "帮助听众快速建立整体认知框架。",
+        ]
+    if "背景" in slide_label or "现状" in slide_label:
+        return [
+            f"说明“{topic_label}”的背景、现状或发展阶段。",
+            "补充关键事实、业务场景或外部环境信息。",
+            "指出当前最突出的矛盾、痛点或变化趋势。",
+            "说明这些背景为什么值得进一步分析。",
+        ]
+    if "问题" in slide_label or "挑战" in slide_label:
+        return [
+            "拆解当前面临的主要问题或瓶颈。",
+            "分析问题形成的关键成因与影响范围。",
+            "区分短期现象与长期结构性问题。",
+            "明确后续方案设计需要优先解决的焦点。",
+        ]
+    if "方案" in slide_label or "策略" in slide_label:
+        return [
+            "提出核心方案或策略主张。",
+            "拆分关键模块、执行动作或能力建设项。",
+            "说明方案如何回应前述问题与目标。",
+            "交代预期收益、边界条件与实施重点。",
+        ]
+    if "实施" in slide_label or "路径" in slide_label or "执行" in slide_label:
+        return [
+            "给出阶段化推进路径与关键里程碑。",
+            "明确责任分工、资源要求或协同机制。",
+            "说明每一阶段的交付物和验收口径。",
+            "补充时间节奏、依赖条件与推进建议。",
+        ]
+    if "指标" in slide_label or "预算" in slide_label or "收益" in slide_label:
+        return [
+            "列出衡量成效的关键指标或预算维度。",
+            "说明指标口径、目标值或区间判断。",
+            "关联效率、成本、质量、风险等结果项。",
+            "补充可持续跟踪和复盘的观察方式。",
+        ]
+    if "风险" in slide_label or "保障" in slide_label:
+        return [
+            "识别实施过程中的主要风险点。",
+            "分析风险成因、触发条件与影响程度。",
+            "提出针对性的预防措施与应急方案。",
+            "说明保障机制、监控频率与责任安排。",
+        ]
+    if "总结" in slide_label or "行动" in slide_label:
+        return [
+            "回收全文的核心判断与关键结论。",
+            "提炼最值得优先落地的行动项。",
+            "明确下一步推进顺序与决策建议。",
+            "提示需要继续补充的数据、资源或条件。",
+        ]
+    return [
+        f"说明“{slide_label}”与“{topic_label}”的关系和本页核心结论。",
+        "补充关键事实、现状、案例或数据依据。",
+        "拆解主要影响因素、分析逻辑或结构要点。",
+        "给出对应建议、行动方向或预期结果。",
+    ]
+
+
+def _build_fallback_slide_notes(topic: str, slide_title: str) -> str:
+    topic_label = _sanitize_outline_title(topic, "当前主题")
+    slide_label = _sanitize_outline_title(slide_title, "本页")
+    return (
+        f"围绕“{topic_label}”展开“{slide_label}”的详细说明，"
+        "可补充定义解释、案例、数据指标、图表建议或落地动作，避免空泛表述。"
+    )
+
+
+def _resolve_outline_content_focus(req: PresentonOutlineRequest) -> Dict[str, Any]:
+    raw_focus = str(getattr(req, "content_focus", "") or "").strip().lower()
+    if raw_focus in OUTLINE_CONTENT_FOCUS_CONFIG:
+        return OUTLINE_CONTENT_FOCUS_CONFIG[raw_focus]
+
+    for key, item in OUTLINE_CONTENT_FOCUS_CONFIG.items():
+        label = str(item.get("label") or "").strip().lower()
+        if raw_focus and raw_focus == label:
+            return OUTLINE_CONTENT_FOCUS_CONFIG[key]
+
+    raw_framework = str(getattr(req, "analysis_framework", "") or "").strip().lower()
+    legacy_frameworks = {"4p框架", "swot", "pest", "波特五力", "stp"}
+    if raw_framework in legacy_frameworks:
+        return OUTLINE_CONTENT_FOCUS_CONFIG["analysis"]
+
+    return OUTLINE_CONTENT_FOCUS_CONFIG["work_report"]
+
+
+def _build_outline_subtitle(req: PresentonOutlineRequest, focus_config: Dict[str, Any]) -> str:
+    focus_label = str(focus_config.get("label") or "工作汇报").strip() or "工作汇报"
+    language = str(req.language or "").strip().lower()
+    if not language or language in {"chinese", "中文", "简体中文", "simplified chinese", "zh-cn", "zh_cn"}:
+        return focus_label
+    return f"{focus_label} · {str(req.language or '').strip()}"
+
+
 def _fallback_outline(req: PresentonOutlineRequest, input_text: str) -> Dict[str, Any]:
     topic = _sanitize_outline_title(input_text.splitlines()[0] if input_text else "", "业务汇报")
     slide_count = max(3, min(40, int(req.n_slides or 8)))
-    section_titles = [
-        "封面", "目录", "背景与目标", "现状与问题", "方案设计",
-        "实施路径", "关键指标", "风险与对策", "总结与行动项",
-    ]
+    focus_config = _resolve_outline_content_focus(req)
+    section_titles = list(focus_config.get("sections") or [])
     slides: List[Dict[str, Any]] = []
     for idx in range(slide_count):
         title = section_titles[idx] if idx < len(section_titles) else f"补充页 {idx + 1}"
-        points = [
-            f"围绕“{topic}”提炼本页核心结论。",
-            "给出 2-3 条关键事实或数据依据。",
-            "明确本页行动建议与预期结果。",
-        ]
+        points = _build_fallback_slide_points(topic, title)
         slides.append(
             {
                 "index": idx + 1,
                 "title": title,
                 "points": points,
-                "notes": "可根据业务真实数据继续补充。",
+                "notes": _build_fallback_slide_notes(topic, title),
             }
         )
     return {
         "title": f"{topic}汇报",
-        "subtitle": f"{req.analysis_framework} · {req.language}",
+        "subtitle": _build_outline_subtitle(req, focus_config),
         "slides": slides,
     }
 
@@ -733,6 +2062,10 @@ def _normalize_outline_payload(payload: Dict[str, Any], fallback: Dict[str, Any]
     slides_raw = payload.get("slides")
     if not isinstance(slides_raw, list) or not slides_raw:
         return fallback
+
+    fallback_slides = fallback.get("slides") if isinstance(fallback, dict) else []
+    if not isinstance(fallback_slides, list):
+        fallback_slides = []
 
     normalized_slides: List[Dict[str, Any]] = []
     for idx, item in enumerate(slides_raw, start=1):
@@ -751,18 +2084,38 @@ def _normalize_outline_payload(payload: Dict[str, Any], fallback: Dict[str, Any]
         elif isinstance(points_raw, str):
             points = [line.strip("- \t") for line in points_raw.splitlines() if line.strip()]
 
+        fallback_slide = fallback_slides[idx - 1] if (idx - 1) < len(fallback_slides) else {}
+        fallback_points_raw = fallback_slide.get("points") if isinstance(fallback_slide, dict) else []
+        if isinstance(fallback_points_raw, list):
+            fallback_points = [str(point).strip() for point in fallback_points_raw if str(point).strip()]
+        elif isinstance(fallback_points_raw, str):
+            fallback_points = [line.strip("- \t") for line in fallback_points_raw.splitlines() if line.strip()]
+        else:
+            fallback_points = []
+
         if not points:
-            points = [
+            points = fallback_points or [
                 "补充本页核心观点。",
                 "补充关键支撑信息。",
+                "补充分析逻辑或事实依据。",
+                "补充行动建议与结果预期。",
             ]
+        elif len(points) < 4:
+            for extra in fallback_points:
+                if extra not in points:
+                    points.append(extra)
+                if len(points) >= 4:
+                    break
+
+        if not notes and isinstance(fallback_slide, dict):
+            notes = str(fallback_slide.get("notes") or "").strip()
 
         normalized_slides.append(
             {
                 "index": idx,
                 "title": title[:120],
-                "points": points[:8],
-                "notes": notes[:800],
+                "points": points[:10],
+                "notes": notes[:1200],
             }
         )
 
@@ -774,22 +2127,37 @@ def _normalize_outline_payload(payload: Dict[str, Any], fallback: Dict[str, Any]
 
 
 def _build_outline_prompt(req: PresentonOutlineRequest, input_text: str) -> str:
+    focus_config = _resolve_outline_content_focus(req)
     metrics_req = "是" if req.require_metrics else "否"
-    image_req = "开启" if req.include_images else "关闭"
-    return (
-        "你是一名资深 PPT 策划顾问。"
-        "\n请严格输出 JSON，不要输出除 JSON 外的任何内容。"
-        "\nJSON 结构："
-        '\n{"title":"", "subtitle":"", "slides":[{"title":"","points":[""],"notes":""}]}\n'
-        f"\n目标页数：{req.n_slides} 页"
-        f"\n语言：{req.language}"
-        f"\n分析框架：{req.analysis_framework}"
-        f"\n输入模式：{req.input_mode}"
-        f"\n是否强调指标：{metrics_req}"
-        f"\n图片建议：{image_req}"
-        "\n每页要求：标题 + 3-6 条可执行要点 + 一条讲解备注。"
-        "\n目录结构建议涵盖：封面、目录、背景、问题、方案、执行、风险、总结。"
-        f"\n业务输入：\n{input_text}"
+    mode_guidance = {
+        "topic": "输入为主题，请围绕该主题补全完整汇报逻辑，不要套用任何默认项目案例。",
+        "document": "输入来自文档，请优先提炼文档中的术语、结构与事实，不要替换成与文档无关的其他项目背景。",
+        "longText": "输入为长文本，请完整吸收原文信息后再重组为适合演示的章节结构，不要只做简略摘要。",
+    }.get(req.input_mode, "请围绕业务输入组织完整、具体的大纲。")
+    return "\n".join(
+        [
+            "你是一名资深 PPT 策划顾问。",
+            "请严格输出 JSON，不要输出除 JSON 外的任何内容。",
+            "JSON 结构：",
+            '{"title":"", "subtitle":"", "slides":[{"title":"","points":[""],"notes":""}]}',
+            f"目标页数：{req.n_slides} 页",
+            f"语言：{req.language}",
+            f"内容导向：{focus_config.get('label')}",
+            f"输入模式：{req.input_mode}",
+            f"是否强调指标：{metrics_req}",
+            mode_guidance,
+            *[str(line).strip() for line in focus_config.get("prompt_lines") or [] if str(line).strip()],
+            "内容边界：除非业务输入明确提到，否则不要默认引入 Enterprise Intelligent Office Agent、进出口企业协同办公、会议纪要、OCR、审单、数据库、数据决策等特定项目背景。",
+            "输出要求：每页必须包含标题、4-6 条具体要点、1 条讲解备注。",
+            "标题要求：优先写成结论式、动作式或概括式短句，适合直接作为 PPT 页标题展示。",
+            "要点要求：每条要点尽量具体，包含定义、现状、原因、影响、对策、指标、案例、结论中的一种或多种，不要只写空泛短句。",
+            "备注要求：可补充该页适合展开的数据、案例、图表建议、发言顺序或解释口径。",
+            "演示节奏：整体尽量遵循开场说明、分析展开、方案建议、结尾收束的推进顺序，让目录和页间逻辑更连贯。",
+            f"结构建议：优先围绕这些章节组织内容：{'、'.join(str(item) for item in focus_config.get('sections') or [])}。可根据用户主题微调，但不要偏离该内容导向。",
+            "如果输入信息较少，也要先补全一版可编辑的完整汇报骨架，避免每页内容过短。",
+            "业务输入：",
+            input_text,
+        ]
     )
 
 
@@ -833,6 +2201,23 @@ def _normalize_template_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": str(item.get("created_at") or "").strip(),
         "updated_at": str(item.get("updated_at") or "").strip(),
     }
+
+
+def _apply_builtin_template_catalog_defaults(item: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_item = _normalize_template_item(item) if item and not item.get("template_id") else dict(item or {})
+    template_id = str(normalized_item.get("template_id") or "").strip()
+    if not template_id:
+        return normalized_item
+    builtin_defaults = BUILTIN_TEMPLATE_CATALOG_LOOKUP.get(template_id)
+    if not builtin_defaults:
+        return normalized_item
+    normalized_item["name"] = str(builtin_defaults.get("name") or normalized_item.get("name") or template_id).strip()[:120]
+    normalized_item["description"] = str(
+        builtin_defaults.get("description") or normalized_item.get("description") or ""
+    ).strip()[:300]
+    if not str(normalized_item.get("source") or "").strip():
+        normalized_item["source"] = str(builtin_defaults.get("source") or "builtin")
+    return normalized_item
 
 
 def _extract_template_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -956,13 +2341,7 @@ def _build_generation_payload(req: PresentonGenerateRequest) -> Dict[str, Any]:
     if resolved_image_type in {"", "off", "false", "disabled", "0", "no"}:
         resolved_image_type = "none"
 
-    no_image_constraint = (
-        "硬性约束：默认关闭并禁止配图。不要生成或请求任何图片/插画/照片，"
-        "不要触发图片素材检索，页面内容仅使用文字、图表和形状布局。"
-    )
     prompt_text = str(req.prompt or "").strip()
-    if resolved_image_type == "none":
-        prompt_text = f"{prompt_text}\n{no_image_constraint}".strip()
 
     payload: Dict[str, Any] = {
         "prompt": prompt_text,
@@ -990,10 +2369,20 @@ def _build_generation_payload(req: PresentonGenerateRequest) -> Dict[str, Any]:
         payload["markdown_emphasis"] = req.markdown_emphasis
     if req.web_search is not None and resolved_image_type != "none":
         payload["web_search"] = bool(req.web_search)
+    if req.include_table_of_contents is not None:
+        payload["include_table_of_contents"] = bool(req.include_table_of_contents)
+    if req.include_title_slide is not None:
+        payload["include_title_slide"] = bool(req.include_title_slide)
+    if req.allow_access_to_user_info is not None:
+        payload["allow_access_to_user_info"] = bool(req.allow_access_to_user_info)
+    if req.trigger_webhook is not None:
+        payload["trigger_webhook"] = bool(req.trigger_webhook)
     if isinstance(req.slides_markdown, list) and req.slides_markdown:
         payload["slides_markdown"] = req.slides_markdown
     if isinstance(req.slides_layout, list) and req.slides_layout:
         payload["slides_layout"] = req.slides_layout
+    if isinstance(req.files, list) and req.files:
+        payload["files"] = [str(item).strip() for item in req.files if str(item).strip()]
     return payload
 
 
@@ -1004,28 +2393,6 @@ def _request_generation_with_no_image_fallback(
     payload: Dict[str, Any],
     timeout: float = REQUEST_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
-    def _template_retry_candidates(raw_template: Any) -> List[str]:
-        value = str(raw_template or "").strip()
-        if not value:
-            return ["general"]
-        candidates: List[str] = [value]
-        lowered = value.lower()
-        if lowered in {"auto", "default"}:
-            candidates.append("general")
-        if lowered.startswith("custom-") and len(value) > len("custom-"):
-            candidates.append(value[len("custom-"):])
-        if lowered.startswith("neo-") and len(value) > len("neo-"):
-            candidates.append(value[len("neo-"):])
-        unique: List[str] = []
-        seen: set[str] = set()
-        for item in candidates:
-            key = item.strip()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            unique.append(key)
-        return unique or ["general"]
-
     template_candidates = _template_retry_candidates(payload.get("template"))
     collected_errors: List[str] = []
 
@@ -1166,11 +2533,244 @@ def _generate_cloud_async(base_url: str, headers: Dict[str, str], req: Presenton
     }
 
 
+def _submit_cloud_async_task(base_url: str, headers: Dict[str, str], req: PresentonGenerateRequest) -> Dict[str, Any]:
+    submit_url = f"{base_url}{CLOUD_ASYNC_PATH}"
+    submit_data = _request_generation_with_no_image_fallback(
+        "POST",
+        submit_url,
+        headers,
+        _build_generation_payload(req),
+    )
+    task_id = _extract_task_id(submit_data)
+    if not task_id:
+        raise HTTPException(status_code=502, detail="Presenton did not return task id")
+
+    with _MODEL_RUNTIME_LOCK:
+        _purge_stale_tasks_locked()
+        _ACTIVE_PPT_TASKS[task_id] = time.time()
+
+    return {
+        "success": True,
+        "provider": "cloud_async",
+        "status": "pending",
+        "task_id": task_id,
+        "message": submit_data.get("message") or "任务已提交",
+        "raw": submit_data,
+    }
+
+
+def _can_use_ordered_pipeline(req: PresentonGenerateRequest) -> bool:
+    return _ordered_pipeline_skip_reason(req) is None
+
+
+def _estimate_delegated_progress(progress_value: Optional[int], status_value: str, message: str) -> int:
+    if status_value in {"completed", "done", "success", "succeeded"}:
+        return 100
+    upstream_progress = progress_value if progress_value is not None else _estimate_progress(status_value, message)
+    upstream_progress = max(0, min(100, int(upstream_progress)))
+    if status_value in {"failed", "error", "cancelled", "canceled"}:
+        return max(88, upstream_progress)
+    message_l = str(message or "").lower()
+    if progress_value is None:
+        if "稳定生成链路" in message or "handoff" in message_l:
+            return 70
+        if "选择版式" in message or "layout" in message_l:
+            return 76
+        if "生成页面" in message or "generating slide" in message_l or "generating slides" in message_l:
+            return 82
+        if "导出" in message or "export" in message_l:
+            return 90
+        return 66 if status_value == "pending" else 62
+    return min(94, max(68, 58 + round(upstream_progress * 0.32)))
+
+
+def _handoff_ordered_task_to_cloud_async(
+    task_id: str,
+    base_url: str,
+    headers: Dict[str, str],
+    req: PresentonGenerateRequest,
+    reason: str,
+) -> Dict[str, Any]:
+    prefer_no_image = str(req.image_type or "none").strip().lower() == "none"
+    _mark_ordered_template_cooldown(req.template, prefer_no_image, reason)
+    handoff_req = _copy_presenton_request(req, prompt=_build_ordered_runtime_prompt(req))
+    submit_data = _submit_cloud_async_task(base_url, headers, handoff_req)
+    upstream_task_id = str(submit_data.get("task_id") or "").strip()
+    handoff_message = "当前模板兼容处理失败，已切换到稳定生成链路继续生成，预计耗时会更长"
+    if reason:
+        logger.warning("Ordered task %s handed off to cloud async due to: %s", task_id, reason)
+    _upsert_ordered_task(
+        task_id,
+        success=True,
+        provider="ordered_async_fallback",
+        status="pending",
+        progress=68,
+        message=handoff_message,
+        error=None,
+        delegated_task_id=upstream_task_id,
+        delegated_provider="cloud_async",
+        base_url=base_url,
+        raw={
+            "handoff_reason": reason,
+            "upstream_submit": submit_data.get("raw"),
+        },
+    )
+    return submit_data
+
+
+def _run_ordered_presenton_task(task_id: str, base_url: str, req: PresentonGenerateRequest) -> None:
+    headers = _build_headers()
+    try:
+        slide_count = len(req.slides_markdown or [])
+        ordered_runtime_prompt = _build_ordered_runtime_prompt(req)
+        _upsert_ordered_task(task_id, status="pending", progress=8, message="正在创建演示任务")
+        create_payload: Dict[str, Any] = {
+            "content": ordered_runtime_prompt,
+            "n_slides": slide_count or req.n_slides,
+            "language": str(req.language or "Chinese"),
+            "tone": str(req.tone or "professional"),
+            "verbosity": str(req.verbosity or "standard"),
+            "instructions": ordered_runtime_prompt,
+            "include_table_of_contents": bool(req.include_table_of_contents),
+            "include_title_slide": bool(req.include_title_slide),
+            "web_search": False if str(req.image_type or "none").strip().lower() == "none" else bool(req.web_search),
+        }
+        if isinstance(req.files, list) and req.files:
+            create_payload["file_paths"] = [str(item).strip() for item in req.files if str(item).strip()]
+
+        create_result = _request_json("POST", f"{base_url}{CREATE_PRESENTATION_PATH}", headers, create_payload)
+        presentation_id = str(create_result.get("id") or "").strip()
+        if not presentation_id:
+            raise HTTPException(status_code=502, detail="Presenton create did not return presentation id")
+
+        _upsert_ordered_task(
+            task_id,
+            status="pending",
+            progress=18,
+            message="正在加载模板版式",
+            presentation_id=presentation_id,
+        )
+        template_layout = _fetch_presenton_template_group(base_url, headers, str(req.template or "general"))
+
+        _upsert_ordered_task(task_id, status="pending", progress=28, message="正在整理页级版式结构")
+        ordered_layout = _build_ordered_layout_payload(req, template_layout)
+        prepare_payload = {
+            "presentation_id": presentation_id,
+            "outlines": [{"content": str(slide or "").strip()} for slide in (req.slides_markdown or [])],
+            "layout": ordered_layout,
+            "title": _derive_presentation_title(req),
+        }
+        _request_json(
+            "POST",
+            f"{base_url}{PREPARE_PRESENTATION_PATH}",
+            headers,
+            prepare_payload,
+            timeout=max(POLL_TIMEOUT_SEC, REQUEST_TIMEOUT_SEC),
+        )
+
+        _upsert_ordered_task(task_id, status="pending", progress=42, message=f"正在生成页面 0/{slide_count}")
+        _stream_prepared_presentation(task_id, base_url, headers, presentation_id, slide_count)
+
+        _upsert_ordered_task(task_id, status="pending", progress=94, message="正在导出 PPT")
+        export_result = _request_json(
+            "POST",
+            f"{base_url}{EXPORT_PRESENTATION_PATH}",
+            headers,
+            {
+                "id": presentation_id,
+                "export_as": str(req.export_as or "pptx"),
+            },
+            timeout=max(POLL_TIMEOUT_SEC, REQUEST_TIMEOUT_SEC),
+        )
+        download_url, edit_url = _extract_urls(export_result, base_url)
+        decorated = _decorate_result_urls(
+            {
+                "success": True,
+                "provider": "ordered_async",
+                "task_id": task_id,
+                "download_url": download_url,
+                "edit_url": edit_url,
+                "raw": export_result,
+            },
+            base_url,
+        )
+        _clear_ordered_template_cooldown(
+            req.template,
+            str(req.image_type or "none").strip().lower() == "none",
+        )
+        _upsert_ordered_task(
+            task_id,
+            status="completed",
+            progress=100,
+            message="PPT 生成完成",
+            download_url=decorated.get("download_url"),
+            edit_url=decorated.get("edit_url"),
+            download_url_raw=decorated.get("download_url_raw"),
+            edit_url_raw=decorated.get("edit_url_raw"),
+            raw=export_result,
+        )
+    except Exception as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        try:
+            _handoff_ordered_task_to_cloud_async(task_id, base_url, headers, req, str(detail))
+            return
+        except Exception as fallback_exc:
+            fallback_detail = fallback_exc.detail if isinstance(fallback_exc, HTTPException) else str(fallback_exc)
+            detail = f"{detail}; fallback submit failed: {fallback_detail}"
+        _upsert_ordered_task(
+            task_id,
+            success=False,
+            status="failed",
+            message=str(detail),
+            error=str(detail),
+        )
+    finally:
+        with _MODEL_RUNTIME_LOCK:
+            _purge_stale_tasks_locked()
+            _ACTIVE_PPT_TASKS.pop(task_id, None)
+            if not _ACTIVE_PPT_TASKS:
+                try:
+                    _restore_default_runtime(base_url)
+                except HTTPException as restore_exc:
+                    logger.warning("Failed to restore default runtime after ordered task completion: %s", restore_exc.detail)
+
+
+def _submit_ordered_presenton_task(base_url: str, req: PresentonGenerateRequest) -> Dict[str, Any]:
+    task_id = f"ordered-{uuid.uuid4().hex}"
+    _upsert_ordered_task(
+        task_id,
+        status="pending",
+        progress=4,
+        message="已提交本地加速生成任务",
+        base_url=base_url,
+    )
+    with _MODEL_RUNTIME_LOCK:
+        _purge_stale_tasks_locked()
+        _activate_ppt_runtime(base_url)
+        _ACTIVE_PPT_TASKS[task_id] = time.time()
+
+    worker = threading.Thread(
+        target=_run_ordered_presenton_task,
+        args=(task_id, base_url, req),
+        daemon=True,
+        name=f"presenton-ordered-{task_id[:12]}",
+    )
+    worker.start()
+    return {
+        "success": True,
+        "provider": "ordered_async",
+        "status": "pending",
+        "task_id": task_id,
+        "message": "任务已提交，正在按已选模板直接生成",
+    }
+
+
 @router.post("/presenton/outline/generate")
 def generate_presenton_outline(req: PresentonOutlineRequest):
     slide_count = max(3, min(40, int(req.n_slides or 8)))
     raw_input = str(req.analysis_input or "").strip()
     doc_name = str(req.document_name or "").strip()
+    focus_config = _resolve_outline_content_focus(req)
 
     if req.input_mode == "topic" and not raw_input:
         raise HTTPException(status_code=400, detail="请先输入 PPT 主题")
@@ -1185,23 +2785,33 @@ def generate_presenton_outline(req: PresentonOutlineRequest):
     if raw_input:
         input_parts.append(raw_input)
     if not input_parts:
-        input_parts.append("请围绕进出口企业协同办公主题生成完整汇报大纲。")
+        input_parts.append("请根据当前主题生成完整且可编辑的汇报大纲。")
     input_text = "\n".join(input_parts)
 
     fallback_outline = _fallback_outline(req, input_text)
     prompt = _build_outline_prompt(req, input_text)
-    llm_raw = ask_llm(prompt, model_type=req.model_backend)
+    llm_raw, llm_issue = _invoke_outline_llm(prompt, req.model_backend)
     parsed = _extract_markdown_json(llm_raw)
     outline = _normalize_outline_payload(parsed, fallback_outline)
+    fallback_reason: Optional[str] = llm_issue
+    if not fallback_reason and not parsed:
+        fallback_reason = "invalid_model_output" if llm_raw else "empty_model_output"
+    if not fallback_reason and outline == fallback_outline:
+        fallback_reason = "model_output_unusable"
 
     return {
         "success": True,
         "outline": {
             "title": outline["title"],
-            "subtitle": outline.get("subtitle") or f"{req.analysis_framework} · {req.language}",
+            "subtitle": outline.get("subtitle") or _build_outline_subtitle(req, focus_config),
             "slides": outline["slides"][:slide_count],
             "language": req.language,
-            "analysis_framework": req.analysis_framework,
+            "content_focus": next((key for key, item in OUTLINE_CONTENT_FOCUS_CONFIG.items() if item is focus_config), req.content_focus),
+            "analysis_framework": str(focus_config.get("label") or ""),
+        },
+        "meta": {
+            "used_fallback": bool(fallback_reason),
+            "fallback_reason": fallback_reason,
         },
         "raw_model_output": llm_raw[:6000] if llm_raw else "",
     }
@@ -1233,8 +2843,17 @@ def get_presenton_template_catalog(base_url: Optional[str] = None):
                 "imported": bool(item.get("imported") or prev.get("imported") or False),
             }
 
-    data = list(merged.values())
-    data.sort(key=lambda item: (0 if item.get("imported") else 1, str(item.get("name") or "").lower()))
+    data = [_apply_builtin_template_catalog_defaults(item) for item in merged.values()]
+
+    def _catalog_sort_key(item: Dict[str, Any]) -> Tuple[int, int, str]:
+        template_id = str(item.get("template_id") or "").strip()
+        if template_id in BUILTIN_TEMPLATE_CATALOG_ORDER:
+            return (0, BUILTIN_TEMPLATE_CATALOG_ORDER[template_id], "")
+        if bool(item.get("imported")):
+            return (1, 0, str(item.get("name") or "").lower())
+        return (2, 0, str(item.get("name") or "").lower())
+
+    data.sort(key=_catalog_sort_key)
     return {"success": True, "data": data}
 
 
@@ -1360,35 +2979,34 @@ def generate_presenton_ppt(req: PresentonGenerateRequest):
 def submit_presenton_ppt_task(req: PresentonGenerateRequest):
     base_url = _normalize_base_url(req.base_url)
     headers = _build_headers()
-    submit_url = f"{base_url}{CLOUD_ASYNC_PATH}"
+    _purge_stale_ordered_tasks()
+    _purge_stale_ordered_template_cooldowns()
+    skip_reason = _ordered_pipeline_skip_reason(req)
+
+    if skip_reason is None:
+        try:
+            return _submit_ordered_presenton_task(base_url, req)
+        except HTTPException as exc:
+            logger.warning("Ordered Presenton pipeline unavailable, fallback to upstream async: %s", exc.detail)
+        except Exception as exc:
+            logger.warning("Ordered Presenton pipeline failed before submit, fallback to upstream async: %s", exc)
+    elif isinstance(req.slides_markdown, list) and req.slides_markdown:
+        logger.info("Ordered pipeline skipped for template=%s due to %s", req.template, skip_reason)
 
     try:
         with _MODEL_RUNTIME_LOCK:
             _purge_stale_tasks_locked()
             _activate_ppt_runtime(base_url)
 
-        submit_data = _request_generation_with_no_image_fallback(
-            "POST",
-            submit_url,
-            headers,
-            _build_generation_payload(req),
-        )
-        task_id = _extract_task_id(submit_data)
-        if not task_id:
-            raise HTTPException(status_code=502, detail="Presenton did not return task id")
-
-        with _MODEL_RUNTIME_LOCK:
-            _purge_stale_tasks_locked()
-            _ACTIVE_PPT_TASKS[task_id] = time.time()
-
-        return {
-            "success": True,
-            "provider": "cloud_async",
-            "status": "pending",
-            "task_id": task_id,
-            "message": submit_data.get("message") or "任务已提交",
-            "raw": submit_data,
-        }
+        result = _submit_cloud_async_task(base_url, headers, req)
+        if skip_reason and skip_reason.startswith("recent_failure:"):
+            result["message"] = "当前模板近期在快速生成链路上不稳定，已直接使用稳定生成链路"
+            raw_payload = dict(result.get("raw") or {})
+            raw_payload["ordered_skip_reason"] = skip_reason
+            result["raw"] = raw_payload
+        elif skip_reason == "compatibility_policy":
+            result["message"] = "当前模板使用稳定生成链路"
+        return result
     except Exception:
         with _MODEL_RUNTIME_LOCK:
             _purge_stale_tasks_locked()
@@ -1402,11 +3020,106 @@ def submit_presenton_ppt_task(req: PresentonGenerateRequest):
 
 @router.get("/presenton/generate/status/{task_id}")
 def get_presenton_ppt_task_status(task_id: str, base_url: Optional[str] = None):
+    _purge_stale_ordered_tasks()
+    local_task = _get_ordered_task(task_id)
+    if local_task:
+        delegated_task_id = str(local_task.get("delegated_task_id") or "").strip()
+        if delegated_task_id:
+            resolved_base_url = str(local_task.get("base_url") or base_url or "").strip()
+            if not resolved_base_url:
+                resolved_base_url = _normalize_base_url(base_url)
+            headers = _build_headers()
+            status_data = _fetch_cloud_status(resolved_base_url, headers, delegated_task_id)
+            status_value = _extract_status_value(status_data)
+            upstream_message = _extract_status_message(status_data)
+            local_message = _translate_progress_message(str(local_task.get("message") or ""))
+            display_message = _translate_progress_message(upstream_message or local_message)
+            if (
+                str(local_task.get("provider") or "") == "ordered_async_fallback"
+                and status_value not in TERMINAL_TASK_STATUSES
+            ):
+                if upstream_message:
+                    display_message = f"{_translate_progress_message(upstream_message)}（已切换兼容生成链路）"
+                else:
+                    display_message = local_message or "已切换兼容生成链路，正在继续生成"
+            download_url, edit_url = _extract_urls(status_data, resolved_base_url)
+            proxied_download = _build_download_proxy_url(download_url)
+            proxied_edit = _build_presenton_proxy_url(edit_url, resolved_base_url)
+            explicit_progress = _extract_progress_from_payload(status_data)
+            delegated_progress = _estimate_delegated_progress(explicit_progress, status_value, display_message)
+            success_value = status_value not in {"failed", "error", "cancelled", "canceled"}
+
+            _upsert_ordered_task(
+                task_id,
+                success=success_value,
+                status=status_value,
+                progress=delegated_progress,
+                message=display_message,
+                download_url=proxied_download or download_url,
+                download_url_raw=download_url,
+                edit_url=proxied_edit or edit_url,
+                edit_url_raw=edit_url,
+                error=status_data.get("error") if not success_value else None,
+                raw=status_data,
+            )
+
+            with _MODEL_RUNTIME_LOCK:
+                _purge_stale_tasks_locked()
+                if status_value in TERMINAL_TASK_STATUSES:
+                    _ACTIVE_PPT_TASKS.pop(task_id, None)
+                    _ACTIVE_PPT_TASKS.pop(delegated_task_id, None)
+                    if not _ACTIVE_PPT_TASKS:
+                        try:
+                            _restore_default_runtime(resolved_base_url)
+                        except HTTPException as exc:
+                            logger.warning("Failed to restore default runtime on delegated task completion: %s", exc.detail)
+                else:
+                    _ACTIVE_PPT_TASKS[task_id] = time.time()
+                    _ACTIVE_PPT_TASKS[delegated_task_id] = time.time()
+
+            return {
+                "success": success_value,
+                "provider": str(local_task.get("provider") or "ordered_async_fallback"),
+                "task_id": task_id,
+                "upstream_task_id": delegated_task_id,
+                "status": status_value,
+                "message": display_message,
+                "progress": delegated_progress,
+                "download_url": proxied_download or download_url,
+                "download_url_raw": download_url,
+                "edit_url": proxied_edit or edit_url,
+                "edit_url_raw": edit_url,
+                "error": status_data.get("error"),
+                "raw": status_data,
+            }
+
+        status_value = str(local_task.get("status") or "pending").lower()
+        with _MODEL_RUNTIME_LOCK:
+            _purge_stale_tasks_locked()
+            if status_value in TERMINAL_TASK_STATUSES:
+                _ACTIVE_PPT_TASKS.pop(task_id, None)
+            else:
+                _ACTIVE_PPT_TASKS[task_id] = time.time()
+        return {
+            "success": bool(local_task.get("success", True)),
+            "provider": str(local_task.get("provider") or "ordered_async"),
+            "task_id": task_id,
+            "status": status_value,
+            "message": _translate_progress_message(str(local_task.get("message") or "")),
+            "progress": _coerce_progress_value(local_task.get("progress")) or _estimate_progress(status_value, _translate_progress_message(str(local_task.get("message") or ""))),
+            "download_url": local_task.get("download_url"),
+            "download_url_raw": local_task.get("download_url_raw"),
+            "edit_url": local_task.get("edit_url"),
+            "edit_url_raw": local_task.get("edit_url_raw"),
+            "error": local_task.get("error"),
+            "raw": local_task.get("raw"),
+        }
+
     resolved_base_url = _normalize_base_url(base_url)
     headers = _build_headers()
     status_data = _fetch_cloud_status(resolved_base_url, headers, task_id)
     status_value = _extract_status_value(status_data)
-    message = _extract_status_message(status_data)
+    message = _translate_progress_message(_extract_status_message(status_data))
     download_url, edit_url = _extract_urls(status_data, resolved_base_url)
     proxied_download = _build_download_proxy_url(download_url)
     proxied_edit = _build_presenton_proxy_url(edit_url, resolved_base_url)
@@ -1523,10 +3236,18 @@ async def proxy_presenton_path(
             text = content.decode("utf-8")
         except UnicodeDecodeError:
             text = content.decode("latin-1", errors="ignore")
-        rewritten = _rewrite_presenton_text_payload(text, resolved_base_url)
+        rewritten = _rewrite_presenton_text_payload(text, resolved_base_url, content_type)
+        if "text/html" in content_type.lower():
+            rewritten = _inject_presenton_proxy_bootstrap_script(rewritten)
+            if "/template-preview" in normalized_path.lower():
+                rewritten = _inject_template_preview_i18n_script(rewritten)
         content = rewritten.encode("utf-8")
         if content_type:
             base_mime = content_type.split(";")[0].strip()
             upstream_headers["Content-Type"] = f"{base_mime}; charset=utf-8"
+
+    if "/template-preview" in normalized_path.lower() or "/_next/" in normalized_path.lower():
+        upstream_headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        upstream_headers["Pragma"] = "no-cache"
 
     return Response(content=content, status_code=upstream.status_code, headers=upstream_headers)

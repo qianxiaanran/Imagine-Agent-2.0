@@ -1,9 +1,13 @@
 ﻿from sqlalchemy import text
 
+from datetime import datetime
+
 from supabase_client import engine, supabase
 
 
 _HISTORY_ID_FIXED = False
+_SESSION_LIST_INDEXES_FIXED = False
+_SESSION_LIST_LIMIT = 500
 
 
 def _ensure_history_id_autoincrement():
@@ -47,6 +51,104 @@ def _count_history_rows(user_id):
         return int(res.count or 0)
     except Exception:
         return 0
+
+
+def _ensure_session_list_indexes():
+    global _SESSION_LIST_INDEXES_FIXED
+    if _SESSION_LIST_INDEXES_FIXED:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_history_user_session_created_at "
+                    "ON public.history (user_id, session_id, created_at DESC)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_history_user_created_at "
+                    "ON public.history (user_id, created_at DESC)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_session_titles_user_session "
+                    "ON public.session_titles (user_id, session_id)"
+                )
+            )
+        _SESSION_LIST_INDEXES_FIXED = True
+    except Exception as e:
+        print(f"[History] ensure session list indexes failed: {e}")
+
+
+def _normalize_session_date(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    try:
+        return value.isoformat()
+    except Exception:
+        return str(value)
+
+
+def _derive_session_title(role, content):
+    raw_content = str(content or "").replace("\n", " ").strip()
+    if not raw_content:
+        return "新聊天"
+    prefix = "[记录] " if str(role or "").strip().lower() == "context" else ""
+    return f"{prefix}{raw_content[:30]}..."
+
+
+def _fetch_latest_session_rows(user_id):
+    _ensure_session_list_indexes()
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    SELECT
+                        latest.session_id,
+                        latest.content AS latest_content,
+                        latest.created_at,
+                        latest.role AS latest_role,
+                        seed.content AS seed_content,
+                        seed.role AS seed_role
+                    FROM (
+                        SELECT DISTINCT ON (h.session_id)
+                            h.session_id,
+                            h.content,
+                            h.created_at,
+                            h.role
+                        FROM public.history AS h
+                        WHERE h.user_id = :user_id
+                          AND h.role IN ('user', 'assistant', 'context')
+                        ORDER BY h.session_id, h.created_at DESC
+                    ) AS latest
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            h2.content,
+                            h2.role
+                        FROM public.history AS h2
+                        WHERE h2.user_id = :user_id
+                          AND h2.session_id = latest.session_id
+                          AND h2.role IN ('user', 'context')
+                        ORDER BY h2.created_at ASC
+                        LIMIT 1
+                    ) AS seed ON TRUE
+                    ORDER BY latest.created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"user_id": str(user_id), "limit": _SESSION_LIST_LIMIT},
+            )
+            return [dict(row) for row in result.mappings().all()]
+    except Exception as e:
+        print(f"[History] fetch latest sessions failed: {e}")
+        return []
 
 
 def _relink_legacy_history_by_email(user_id):
@@ -179,12 +281,9 @@ def get_history_limited(user_id, session_id, limit=20):
 def get_user_sessions(user_id):
     """
     Retrieve recent sessions for the user.
-    优化点：
-    1. 增加健壮性，确保即使消息记录很多，会话也不会消失。
-    2. 兼容 Python 3.10 (修复 f-string 中不能使用反斜杠的问题)。
+    使用“每个会话最新一条”查询替代大量历史扫描，避免高消息量用户侧栏退化。
     """
     try:
-        # 1. 获取该用户所有的自定义标题
         custom_titles = {}
         t_res = supabase.table("session_titles").select("session_id, title").eq("user_id", str(user_id)).execute()
         for row in (t_res.data or []):
@@ -193,17 +292,9 @@ def get_user_sessions(user_id):
             if sid:
                 custom_titles[sid] = title
 
-        # 2. 查询最近的消息记录
-        res = supabase.table("history") \
-            .select("session_id, content, created_at, role") \
-            .eq("user_id", str(user_id)) \
-            .order("created_at", desc=True) \
-            .limit(4000) \
-            .execute()
+        latest_rows = _fetch_latest_session_rows(user_id)
 
-        # 如果当前帐户没有历史记录，请尝试合并旧行
-        # 属于具有相同电子邮件地址的另一个个人资料 ID。
-        if not (t_res.data or []) and not (res.data or []):
+        if not (t_res.data or []) and not latest_rows:
             moved = _relink_legacy_history_by_email(user_id)
             if moved > 0:
                 custom_titles = {}
@@ -213,88 +304,36 @@ def get_user_sessions(user_id):
                     title = row.get('title')
                     if sid:
                         custom_titles[sid] = title
-
-                res = supabase.table("history") \
-                    .select("session_id, content, created_at, role") \
-                    .eq("user_id", str(user_id)) \
-                    .order("created_at", desc=True) \
-                    .limit(4000) \
-                    .execute()
+                latest_rows = _fetch_latest_session_rows(user_id)
 
         sessions = []
         seen_sessions = set()
 
-        # 3. 遍历消息，构建基础会话列表
-        for row in (res.data or []):
+        for row in latest_rows:
             sid = row.get('session_id')
-            if not sid:
+            if not sid or sid in seen_sessions:
                 continue
-            if sid in seen_sessions:
-                continue
+            seen_sessions.add(sid)
+            title = custom_titles.get(sid)
+            if not title:
+                seed_content = row.get("seed_content")
+                seed_role = row.get("seed_role")
+                if seed_content:
+                    title = _derive_session_title(seed_role, seed_content)
+                else:
+                    title = _derive_session_title(row.get("latest_role"), row.get("latest_content"))
+            sessions.append({
+                "id": sid,
+                "title": title,
+                "date": _normalize_session_date(row.get("created_at"))
+            })
 
-            # 只要是用户发过的、或者是系统上下文或者是有标题的，都属于有效会话
-            role = row.get('role')
-            is_valid = role in ['user', 'context'] or sid in custom_titles
-
-            if is_valid:
-                seen_sessions.add(sid)
-                title = custom_titles.get(sid)
-
-                if not title:
-                    # ✨ 兼容性修复：在 Python 3.10 中，不能在 f-string 的 {} 内直接写 \n
-                    prefix = "[记录] " if role == 'context' else ""
-                    raw_content = row.get('content') or ""
-                    clean_content = str(raw_content)[:30].replace('\n', ' ')
-                    title = f"{prefix}{clean_content}..."
-
-                created_at = row.get('created_at')
-                if created_at is None:
-                    created_at = ""
-                elif not isinstance(created_at, str):
-                    try:
-                        created_at = created_at.isoformat()
-                    except Exception:
-                        created_at = str(created_at)
-
-                sessions.append({
-                    "id": sid,
-                    "title": title,
-                    "date": created_at
-                })
-
-        # 3.1 兜底：如果因为角色过滤导致会话为空，允许用任意角色填充
-        if not sessions and (res.data or []):
-            for row in (res.data or []):
-                sid = row.get('session_id')
-                if not sid or sid in seen_sessions:
-                    continue
-                seen_sessions.add(sid)
-                title = custom_titles.get(sid)
-                if not title:
-                    raw_content = row.get('content') or ""
-                    clean_content = str(raw_content)[:30].replace('\n', ' ')
-                    title = f"{clean_content}..."
-                created_at = row.get('created_at')
-                if created_at is None:
-                    created_at = ""
-                elif not isinstance(created_at, str):
-                    try:
-                        created_at = created_at.isoformat()
-                    except Exception:
-                        created_at = str(created_at)
-                sessions.append({
-                    "id": sid,
-                    "title": title,
-                    "date": created_at
-                })
-
-        # 4. 兜底逻辑：拉取有标题但没在最近消息中出现的旧会话
         for sid, title in custom_titles.items():
             if sid not in seen_sessions:
                 sessions.append({
                     "id": sid,
                     "title": title,
-                    "date": "2024-01-01T00:00:00"
+                    "date": ""
                 })
 
         sessions.sort(key=lambda x: x.get('date') or "", reverse=True)

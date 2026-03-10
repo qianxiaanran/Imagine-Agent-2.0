@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -194,36 +194,57 @@ function DecisionCenterPage() {
   const [refreshingAi, setRefreshingAi] = useState(false);
   const [error, setError] = useState('');
   const [backend, setBackend] = useState('local');
+  const dataRequestRef = useRef(null);
+  const aiRequestRef = useRef(null);
+  const overviewBootstrappedRef = useRef(false);
+  const currentAiBackendRef = useRef('local');
 
   const fetchDataSection = useCallback(async ({ refreshData = false, silent = false } = {}) => {
+    if (dataRequestRef.current) return dataRequestRef.current;
     if (!silent) {
       setError('');
       setRefreshing(true);
     }
-    try {
-      const payload = await decisionApi.getData({ refreshData });
-      setDashboardData(payload || null);
-    } catch (fetchError) {
-      setError(fetchError?.message || '数据模块刷新失败');
-    } finally {
-      setRefreshing(false);
-    }
+    const request = (async () => {
+      try {
+        const payload = await decisionApi.getData({ refreshData });
+        setDashboardData(payload || null);
+        return payload || null;
+      } catch (fetchError) {
+        setError(fetchError?.message || '数据模块刷新失败');
+        return null;
+      } finally {
+        dataRequestRef.current = null;
+        setRefreshing(false);
+      }
+    })();
+    dataRequestRef.current = request;
+    return request;
   }, []);
 
   const fetchAiSection = useCallback(
     async ({ refreshAi = false, refreshData = false, silent = false } = {}) => {
+      if (aiRequestRef.current) return aiRequestRef.current;
       if (!silent) {
         setError('');
         setRefreshingAi(true);
       }
-      try {
-        const payload = await decisionApi.getAi({ refreshAi, refreshData, backend });
-        setAiAnalysis(payload?.ai_analysis || {});
-      } catch (fetchError) {
-        setError(fetchError?.message || 'AI分析模块刷新失败');
-      } finally {
-        setRefreshingAi(false);
-      }
+      const request = (async () => {
+        try {
+          const payload = await decisionApi.getAi({ refreshAi, refreshData, backend });
+          setAiAnalysis(payload?.ai_analysis || {});
+          currentAiBackendRef.current = backend;
+          return payload || null;
+        } catch (fetchError) {
+          setError(fetchError?.message || 'AI分析模块刷新失败');
+          return null;
+        } finally {
+          aiRequestRef.current = null;
+          setRefreshingAi(false);
+        }
+      })();
+      aiRequestRef.current = request;
+      return request;
     },
     [backend]
   );
@@ -235,21 +256,13 @@ function DecisionCenterPage() {
 
     (async () => {
       try {
-        const dataPayload = await decisionApi.getData({ refreshData: false });
+        const overviewPayload = await decisionApi.getOverview({ refreshAi: false, refreshData: false, backend });
         if (disposed) return;
-        setDashboardData(dataPayload || null);
+        setDashboardData(overviewPayload || null);
+        setAiAnalysis(overviewPayload?.ai_analysis || {});
+        overviewBootstrappedRef.current = true;
+        currentAiBackendRef.current = backend;
         setLoading(false);
-
-        try {
-          const aiPayload = await decisionApi.getAi({ refreshAi: false, refreshData: false, backend });
-          if (!disposed) {
-            setAiAnalysis(aiPayload?.ai_analysis || {});
-          }
-        } catch (aiError) {
-          if (!disposed) {
-            console.warn('AI section init failed:', aiError);
-          }
-        }
       } catch (dataError) {
         if (!disposed) {
           setError(dataError?.message || '数据决策面板加载失败');
@@ -264,24 +277,43 @@ function DecisionCenterPage() {
   }, []);
 
   useEffect(() => {
-    if (!dashboardData) return;
+    if (!dashboardData || !overviewBootstrappedRef.current) return;
+    if (currentAiBackendRef.current === backend) return;
     void fetchAiSection({ refreshAi: false, refreshData: false, silent: true });
   }, [backend, dashboardData, fetchAiSection]);
 
   useEffect(() => {
     if (!dashboardData) return undefined;
-    const timer = window.setInterval(() => {
-      void fetchDataSection({ refreshData: true, silent: true });
-    }, DATA_AUTO_REFRESH_MS);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    let timer = null;
+    const schedule = () => {
+      timer = window.setTimeout(async () => {
+        await fetchDataSection({ refreshData: true, silent: true });
+        if (!disposed) schedule();
+      }, DATA_AUTO_REFRESH_MS);
+    };
+    schedule();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [dashboardData, fetchDataSection]);
 
   useEffect(() => {
     if (!dashboardData) return undefined;
-    const timer = window.setInterval(() => {
-      void fetchAiSection({ refreshAi: true, refreshData: false, silent: true });
-    }, AI_AUTO_REFRESH_MS);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    let timer = null;
+    const schedule = () => {
+      timer = window.setTimeout(async () => {
+        await fetchAiSection({ refreshAi: true, refreshData: false, silent: true });
+        if (!disposed) schedule();
+      }, AI_AUTO_REFRESH_MS);
+    };
+    schedule();
+    return () => {
+      disposed = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [dashboardData, fetchAiSection]);
 
   const kpis = dashboardData?.kpis || [];
@@ -294,8 +326,17 @@ function DecisionCenterPage() {
   const topProducts = dashboardData?.top_products || [];
   const warehouseRows = dashboardData?.warehouses || [];
   const categoryProfitRows = dashboardData?.category_profit || [];
+  const dataCache = dashboardData?.cache || {};
+  const preaggregationPending = Boolean(dataCache?.preaggregation_pending_refresh);
+  const preaggregationAgeSeconds = Number(dataCache?.preaggregation_age_seconds || 0);
 
   const displayKpis = useMemo(() => kpis.slice(0, 8), [kpis]);
+  const preaggregationText = useMemo(() => {
+    if (!dataCache?.preaggregation_enabled) return '实时聚合';
+    const minutes = Math.max(0, Math.round(preaggregationAgeSeconds / 60));
+    if (preaggregationPending) return `预聚合快照 ${minutes} 分钟前，后台刷新中`;
+    return `预聚合快照 ${minutes} 分钟前`;
+  }, [dataCache?.preaggregation_enabled, preaggregationAgeSeconds, preaggregationPending]);
 
   const aiRefreshText = useMemo(() => {
     const seconds = Number(aiAnalysis?.refresh_after_seconds || 0);
@@ -383,6 +424,10 @@ function DecisionCenterPage() {
               <div className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 dark:border-slate-700 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 bg-white/65 dark:bg-slate-900/70">
                 <Clock3 size={13} />
                 数据5分钟，AI30分钟
+              </div>
+              <div className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 dark:border-slate-700 px-3 py-2 text-xs text-slate-600 dark:text-slate-300 bg-white/65 dark:bg-slate-900/70">
+                <Database size={13} />
+                {preaggregationText}
               </div>
             </div>
           </div>

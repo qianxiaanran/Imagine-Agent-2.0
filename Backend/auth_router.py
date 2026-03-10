@@ -16,6 +16,11 @@ from aliyun_sms_client import send_login_code, verify_login_code
 from supabase_client import get_admin_supabase, get_anon_supabase
 from admin_utils import safe_insert_profile, safe_update_profile
 from datetime import datetime, timezone
+from runtime_storage import (
+    SMS_TOKEN_CACHE_FILE as RUNTIME_SMS_TOKEN_CACHE_FILE,
+    ensure_runtime_layout,
+    migrate_legacy_runtime_files,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 user_router = APIRouter(prefix="/api/user", tags=["User"])
@@ -31,7 +36,9 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # 短信登录令牌缓存（内存 + 磁盘）
 # -----------------------------------------------------------------------------
 SMS_TOKEN_TTL_SECONDS = 14 * 24 * 3600
-SMS_TOKEN_CACHE_FILE = os.path.join(os.path.dirname(__file__), ".sms_token_cache.json")
+ensure_runtime_layout()
+migrate_legacy_runtime_files()
+SMS_TOKEN_CACHE_FILE = str(RUNTIME_SMS_TOKEN_CACHE_FILE)
 
 
 def _load_token_cache_from_disk() -> Dict[str, Dict[str, Any]]:

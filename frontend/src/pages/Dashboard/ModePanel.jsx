@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useRef, useState } from 'react';
 import {
   Zap,
   ScanText,
@@ -22,7 +22,9 @@ import {
   Mic,
   User,
 } from 'lucide-react';
-import MarkdownRenderer from './MarkdownRenderer';
+
+const MarkdownRenderer = React.lazy(() => import('./MarkdownRenderer'));
+const AuditWorkspace = React.lazy(() => import('./AuditWorkspace'));
 
 const AudioPlayer = ({ src }) => {
   const audioRef = useRef(null);
@@ -869,23 +871,26 @@ const ModePanel = ({
 
   if (isAuditMode) {
     return (
-      <AuditPanel
-        panelStyle={panelStyle}
-        panelContent={panelContent}
-        docTypes={auditDocTypes}
-        docType={auditDocType}
-        onDocTypeChange={onAuditDocTypeChange}
-        auditModelBackend={auditModelBackend}
-        onAuditModelBackendChange={onAuditModelBackendChange}
-        onFileSelect={onAuditFileSelect}
-        auditState={auditState}
-        auditFile={auditFile}
-        onReset={onAuditReset}
-        onErpAction={onAuditErpAction}
-        isErpActionLoading={isAuditErpActionLoading}
-        notice={auditNotice}
-        fullWidth={fullWidth}
-      />
+      <Suspense fallback={<div className="w-full h-full flex items-center justify-center text-sm text-gray-500 dark:text-gray-400"><Loader2 size={16} className="animate-spin mr-2" /> 加载审单工作区...</div>}>
+        <AuditWorkspace
+          key={auditState?.jobId || "audit-workspace"}
+          panelStyle={panelStyle}
+          panelContent={panelContent}
+          docTypes={auditDocTypes}
+          docType={auditDocType}
+          onDocTypeChange={onAuditDocTypeChange}
+          auditModelBackend={auditModelBackend}
+          onAuditModelBackendChange={onAuditModelBackendChange}
+          onFileSelect={onAuditFileSelect}
+          auditState={auditState}
+          auditFile={auditFile}
+          onReset={onAuditReset}
+          onErpAction={onAuditErpAction}
+          isErpActionLoading={isAuditErpActionLoading}
+          notice={auditNotice}
+          fullWidth={fullWidth}
+        />
+      </Suspense>
     );
   }
   const showEnhancedPanel = isMeetingMode || isOCRMode;
@@ -1055,7 +1060,9 @@ const ModePanel = ({
                       <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">纪要预览</div>
                       {hasPanelContent ? (
                         <div className="text-sm leading-7 text-gray-700 dark:text-gray-200">
-                          <MarkdownRenderer content={panelContent} />
+                          <Suspense fallback={<div className="text-sm text-gray-400 dark:text-gray-500">加载预览...</div>}>
+                            <MarkdownRenderer content={panelContent} />
+                          </Suspense>
                         </div>
                       ) : (
                         <div className="text-sm text-gray-400 dark:text-gray-500">暂无内容，请先上传音频并完成转写。</div>
@@ -1176,7 +1183,9 @@ const ModePanel = ({
                 {isOcrPreview ? (
                   <div className="w-full h-full min-h-[220px] overflow-y-auto px-4 py-3 text-sm leading-relaxed text-gray-700 dark:text-gray-300 custom-scrollbar">
                     {(panelContent || "").trim() ? (
-                      <MarkdownRenderer content={panelContent} />
+                      <Suspense fallback={<div className="text-sm text-gray-400 dark:text-gray-500">加载预览...</div>}>
+                        <MarkdownRenderer content={panelContent} />
+                      </Suspense>
                     ) : (
                       <div className="h-full flex items-center justify-center text-center px-6">
                         <div>

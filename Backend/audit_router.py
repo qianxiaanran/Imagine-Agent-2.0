@@ -36,6 +36,8 @@ async def audit_start(
             case_id=case_id,
             model_type=model_type,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Audit queue unavailable: {e}")
     snapshot = get_job_snapshot(job["job_id"]) or {}

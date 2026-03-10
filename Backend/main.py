@@ -4,7 +4,7 @@ import time
 import threading
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, Query
@@ -21,6 +21,18 @@ if hasattr(sys.stderr, "reconfigure"):
 _env_dir = os.path.dirname(__file__)
 load_dotenv(dotenv_path=os.path.join(_env_dir, ".env"), override=False)
 load_dotenv(dotenv_path=os.path.join(_env_dir, ".env.local"), override=True)
+from runtime_storage import (
+    RUNTIME_OCR_ROOT,
+    RUNTIME_STATIC_ROOT,
+    build_static_api_url,
+    cleanup_runtime_files,
+    ensure_runtime_layout,
+    migrate_legacy_runtime_files,
+    start_runtime_cleanup_loop,
+)
+
+ensure_runtime_layout()
+migrate_legacy_runtime_files()
 
 # 初始化可选模块
 auth_router = None
@@ -52,38 +64,51 @@ warmup_embeddings = None
 # 添加了可选的同步 ASR 可调用功能
 baidu_asr_from_bytes = None
 get_cached_sms_session = None
+_USER_STATUS_CACHE_TTL_SECONDS = max(5.0, float(os.getenv("USER_STATUS_CACHE_TTL_SECONDS", "15")))
+_USER_STATUS_CACHE_LOCK = threading.Lock()
+_USER_STATUS_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def _save_ocr_upload(content: bytes, filename: str) -> str:
-    base_dir = os.path.dirname(__file__)
     date_folder = datetime.utcnow().strftime("%Y%m%d")
     ext = os.path.splitext(filename or "")[1]
     if ext and len(ext) > 10:
         ext = ""
     safe_name = f"{uuid.uuid4().hex}{ext}"
-    rel_dir = os.path.join("static", "ocr", date_folder)
-    abs_dir = os.path.join(base_dir, rel_dir)
-    os.makedirs(abs_dir, exist_ok=True)
-    abs_path = os.path.join(abs_dir, safe_name)
+    abs_dir = RUNTIME_OCR_ROOT / date_folder
+    abs_dir.mkdir(parents=True, exist_ok=True)
+    abs_path = abs_dir / safe_name
     with open(abs_path, "wb") as f:
         f.write(content)
-    return f"/api/static/ocr/{date_folder}/{safe_name}"
+    return build_static_api_url("ocr", date_folder, safe_name)
 
 
-def _save_ocr_upload(content: bytes, filename: str) -> str:
-    base_dir = os.path.dirname(__file__)
-    date_folder = datetime.utcnow().strftime("%Y%m%d")
-    ext = os.path.splitext(filename or "")[1]
-    if ext and len(ext) > 10:
-        ext = ""
-    safe_name = f"{uuid.uuid4().hex}{ext}"
-    rel_dir = os.path.join("static", "ocr", date_folder)
-    abs_dir = os.path.join(base_dir, rel_dir)
-    os.makedirs(abs_dir, exist_ok=True)
-    abs_path = os.path.join(abs_dir, safe_name)
-    with open(abs_path, "wb") as f:
-        f.write(content)
-    return f"/api/static/ocr/{date_folder}/{safe_name}"
+def _get_cached_user_status_profile(user_id: str) -> Optional[Dict[str, Any]]:
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id or "_fetch_profile" not in globals():
+        return None
+
+    now = time.time()
+    with _USER_STATUS_CACHE_LOCK:
+        cached = _USER_STATUS_CACHE.get(normalized_user_id)
+        if cached and (now - float(cached.get("fetched_at") or 0.0)) < _USER_STATUS_CACHE_TTL_SECONDS:
+            return cached.get("profile")
+
+    profile = _fetch_profile(normalized_user_id)
+    with _USER_STATUS_CACHE_LOCK:
+        _USER_STATUS_CACHE[normalized_user_id] = {
+            "profile": profile,
+            "fetched_at": now,
+        }
+        if len(_USER_STATUS_CACHE) > 512:
+            stale_keys = [
+                key
+                for key, value in _USER_STATUS_CACHE.items()
+                if (now - float(value.get("fetched_at") or 0.0)) >= _USER_STATUS_CACHE_TTL_SECONDS
+            ]
+            for key in stale_keys[:128]:
+                _USER_STATUS_CACHE.pop(key, None)
+    return profile
 
 try:
     from auth_router import router as auth_router, user_router
@@ -132,6 +157,14 @@ except Exception as e:
     traceback.print_exc()
 
 app = FastAPI(title="Enterprise AI API")
+
+@app.on_event("startup")
+def _bootstrap_runtime_storage():
+    ensure_runtime_layout()
+    migrate_legacy_runtime_files()
+    cleanup_runtime_files()
+    start_runtime_cleanup_loop()
+
 
 @app.on_event("startup")
 def _warmup_models():
@@ -194,7 +227,7 @@ async def enforce_user_status(request: Request, call_next):
     if token and len(token) > 100:
         try:
             user = _get_user_from_token(token)
-            profile = _fetch_profile(user.id) if "_fetch_profile" in globals() else None
+            profile = _get_cached_user_status_profile(user.id)
             if profile:
                 if profile.get("status") == "disabled":
                     return JSONResponse(status_code=403, content={"detail": "Account disabled"})
@@ -221,8 +254,7 @@ app.add_middleware(
     allow_credentials=True,
 )
 
-os.makedirs("static/temp_audio", exist_ok=True)
-STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+STATIC_DIR = str(RUNTIME_STATIC_ROOT)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static_root")
 app.mount("/api/static", StaticFiles(directory=STATIC_DIR), name="static_api")
 
