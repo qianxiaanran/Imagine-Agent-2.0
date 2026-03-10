@@ -8,6 +8,8 @@ from supabase_client import engine, supabase
 _HISTORY_ID_FIXED = False
 _SESSION_LIST_INDEXES_FIXED = False
 _SESSION_LIST_LIMIT = 500
+_HISTORY_PAGE_LIMIT_DEFAULT = 40
+_HISTORY_PAGE_LIMIT_MAX = 100
 
 
 def _ensure_history_id_autoincrement():
@@ -93,6 +95,14 @@ def _normalize_session_date(value):
         return value.isoformat()
     except Exception:
         return str(value)
+
+
+def _normalize_history_page_limit(limit):
+    try:
+        value = int(limit or _HISTORY_PAGE_LIMIT_DEFAULT)
+    except Exception:
+        value = _HISTORY_PAGE_LIMIT_DEFAULT
+    return max(1, min(value, _HISTORY_PAGE_LIMIT_MAX))
 
 
 def _derive_session_title(role, content):
@@ -257,6 +267,86 @@ def get_history(user_id, session_id):
     except Exception as e:
         print(f"Error fetching history: {e}")
         return []
+
+
+def get_history_context_bundle(user_id, session_id):
+    """Fetch supporting context/meta records used to restore workspace state."""
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    SELECT id, role, content, created_at, func_type
+                    FROM public.history
+                    WHERE session_id = :session_id
+                      AND user_id = :user_id
+                      AND role IN ('context', 'meta')
+                    ORDER BY id ASC
+                    """
+                ),
+                {"session_id": str(session_id), "user_id": str(user_id)},
+            )
+            return [dict(row) for row in result.mappings().all()]
+    except Exception as e:
+        print(f"Error fetching history context bundle: {e}")
+        return []
+
+
+def get_history_page(user_id, session_id, limit=40, before_id=None, include_context=False):
+    """
+    Fetch chat messages by page for long sessions.
+    Returns messages in ascending order for direct frontend consumption.
+    """
+    page_limit = _normalize_history_page_limit(limit)
+    params = {
+        "session_id": str(session_id),
+        "user_id": str(user_id),
+        "limit": page_limit + 1,
+    }
+    before_clause = ""
+    if before_id not in (None, ""):
+        try:
+            params["before_id"] = int(before_id)
+            before_clause = "AND id < :before_id"
+        except Exception:
+            before_clause = ""
+
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    f"""
+                    SELECT id, role, content, created_at, func_type
+                    FROM public.history
+                    WHERE session_id = :session_id
+                      AND user_id = :user_id
+                      AND role IN ('user', 'assistant')
+                      {before_clause}
+                    ORDER BY id DESC
+                    LIMIT :limit
+                    """
+                ),
+                params,
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+    except Exception as e:
+        print(f"Error fetching history page: {e}")
+        rows = []
+
+    has_more = len(rows) > page_limit
+    page_rows = rows[:page_limit]
+    next_before_id = page_rows[-1].get("id") if has_more and page_rows else None
+    context_items = []
+    if include_context and before_id in (None, ""):
+        context_items = get_history_context_bundle(user_id, session_id)
+
+    return {
+        "items": list(reversed(page_rows)),
+        "context_items": context_items,
+        "limit": page_limit,
+        "has_more": has_more,
+        "next_before_id": next_before_id,
+    }
 
 
 def get_history_limited(user_id, session_id, limit=20):

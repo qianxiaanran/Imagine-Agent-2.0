@@ -1,24 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Bot } from 'lucide-react';
 
 const LoadingScreen = ({ text = "正在启动智能办公空间...", isVisible = true }) => {
-  const [shouldRender, setShouldRender] = useState(true);
-
-  // 监听 isVisible 变化，处理淡出动画
-  useEffect(() => {
-    if (!isVisible) {
-      // 延迟卸载：等待 CSS transition (700ms) 完成后再从 DOM 中移除
-      const timer = setTimeout(() => {
-        setShouldRender(false);
-      }, 800);
-      return () => clearTimeout(timer);
-    } else {
-      setShouldRender(true);
-    }
-  }, [isVisible]);
-
-  if (!shouldRender) return null;
-
   return (
     <>
       <style>{`

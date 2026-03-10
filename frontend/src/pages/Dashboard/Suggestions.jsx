@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from "react";
+import React, { memo } from "react";
 import {
   Sparkles,
   Building2,
@@ -48,88 +48,78 @@ const Suggestions = memo(function Suggestions({
 }) {
   const normalizedMode = String(mode || "").toLowerCase();
   const isGeneralEnterpriseQA = generalModes.includes(normalizedMode);
+  const common = [
+    {
+      key: "intro_company",
+      title: "公司/业务介绍",
+      text: "用数据库查询一下公司的基本信息（专业语气）",
+      Icon: Building2,
+    },
+    {
+      key: "process",
+      title: "流程怎么走",
+      text: "请用步骤说明：合同审批流程通常包含哪些节点？每个节点的输入输出是什么？",
+      Icon: ClipboardList,
+    },
+    {
+      key: "compliance",
+      title: "合规与风险提示",
+      text: "帮我列一份“对外合同”常见风险点清单，并给出对应的规避建议（条款层面）",
+      Icon: ShieldCheck,
+    },
+    {
+      key: "hr",
+      title: "HR/行政制度问答",
+      text: "请给一个通用的“请假/报销/出差”制度说明模板，要求清晰可执行",
+      Icon: Users,
+    },
+  ];
 
-  // ✅ 非通用企业问答模式：不显示
+  const db = [
+    {
+      key: "db_top_customers",
+      title: "数据库：客户TOP统计",
+      text: "查询销售订单金额TOP10客户，并按客户汇总（订单数/总额/最近下单日期）",
+      Icon: Database,
+    },
+    {
+      key: "db_sales_summary",
+      title: "数据库：月度销售汇总",
+      text: "统计近6个月每月销售额、订单数、客单价，并指出异常波动的月份及可能原因",
+      Icon: Database,
+    },
+  ];
+
+  const docs = [
+    {
+      key: "doc_terms",
+      title: "文档：条款定位与解释",
+      text: "从我上传的合同/制度中定位“付款条款/交付周期/违约责任”的原文，并用通俗话解释",
+      Icon: FileText,
+    },
+    {
+      key: "doc_compare",
+      title: "文档：总结提取",
+      text: "总结我上传的文档",
+      Icon: Search,
+    },
+  ];
+
+  const suggestionPool =
+    Array.isArray(overrideSuggestions) && overrideSuggestions.length > 0
+      ? overrideSuggestions
+      : normalizedMode === "database"
+        ? db
+        : normalizedMode === "documents"
+          ? docs
+          : [...common, ...db.slice(0, 1), ...docs.slice(0, 1)];
+
+  const visibleSuggestions =
+    typeof limit === "number"
+      ? suggestionPool.slice(0, Math.max(0, limit))
+      : suggestionPool;
+
   if (!isGeneralEnterpriseQA) return null;
-
-  const suggestions = useMemo(() => {
-    if (Array.isArray(overrideSuggestions) && overrideSuggestions.length > 0) {
-      return overrideSuggestions;
-    }
-    // ——通用问答（适用于 general/chat/qa）
-    const common = [
-      {
-        key: "intro_company",
-        title: "公司/业务介绍",
-        text: "用数据库查询一下公司的基本信息（专业语气）",
-        Icon: Building2,
-      },
-      {
-        key: "process",
-        title: "流程怎么走",
-        text: "请用步骤说明：合同审批流程通常包含哪些节点？每个节点的输入输出是什么？",
-        Icon: ClipboardList,
-      },
-      {
-        key: "compliance",
-        title: "合规与风险提示",
-        text: "帮我列一份“对外合同”常见风险点清单，并给出对应的规避建议（条款层面）",
-        Icon: ShieldCheck,
-      },
-      {
-        key: "hr",
-        title: "HR/行政制度问答",
-        text: "请给一个通用的“请假/报销/出差”制度说明模板，要求清晰可执行",
-        Icon: Users,
-      },
-    ];
-
-    // ——数据库查询（适用于 database）
-    const db = [
-      {
-        key: "db_top_customers",
-        title: "数据库：客户TOP统计",
-        text: "查询销售订单金额TOP10客户，并按客户汇总（订单数/总额/最近下单日期）",
-        Icon: Database,
-      },
-      {
-        key: "db_sales_summary",
-        title: "数据库：月度销售汇总",
-        text: "统计近6个月每月销售额、订单数、客单价，并指出异常波动的月份及可能原因",
-        Icon: Database,
-      },
-    ];
-
-    // ——文档分析（适用于 documents）
-    const docs = [
-      {
-        key: "doc_terms",
-        title: "文档：条款定位与解释",
-        text: "从我上传的合同/制度中定位“付款条款/交付周期/违约责任”的原文，并用通俗话解释",
-        Icon: FileText,
-      },
-      {
-        key: "doc_compare",
-        title: "文档：总结提取",
-        text: "总结我上传的文档",
-        Icon: Search,
-      },
-    ];
-
-    // ✅ 根据 mode 做“更相关”的建议集合（避免在 database 里出现太多闲聊建议）
-    if (normalizedMode === "database") return [...db];
-    if (normalizedMode === "documents") return [...docs];
-
-    // general/chat/qa：给通用问答 + 也给一点点入口提示（可选）
-    return [...common, ...db.slice(0, 1), ...docs.slice(0, 1)];
-  }, [normalizedMode, overrideSuggestions]);
-
-  const visibleSuggestions = useMemo(() => {
-    if (typeof limit === "number") {
-      return suggestions.slice(0, Math.max(0, limit));
-    }
-    return suggestions;
-  }, [suggestions, limit]);
 
   const headerTitle =
     normalizedMode === "database"

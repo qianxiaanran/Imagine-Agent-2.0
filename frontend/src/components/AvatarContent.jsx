@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { getAvatarCandidates, getAvatarFallback } from "../utils/avatar";
 
 const AvatarContent = ({
@@ -10,23 +10,33 @@ const AvatarContent = ({
 }) => {
   const sources = useMemo(() => getAvatarCandidates(avatar), [avatar]);
   const sourceKey = useMemo(() => sources.join("|"), [sources]);
-  const [srcIndex, setSrcIndex] = useState(0);
+  const fallback = useMemo(() => getAvatarFallback(avatar, name), [avatar, name]);
+  const [imageState, setImageState] = useState(() => ({
+    sourceKey,
+    srcIndex: 0,
+    imgFailed: false,
+  }));
+  const isCurrentSourceSet = imageState.sourceKey === sourceKey;
+  const srcIndex = isCurrentSourceSet ? imageState.srcIndex : 0;
+  const imgFailed = isCurrentSourceSet ? imageState.imgFailed : false;
   const src = sources[srcIndex] || "";
 
-  const fallback = useMemo(() => getAvatarFallback(avatar, name), [avatar, name]);
-  const [imgFailed, setImgFailed] = useState(false);
-
-  useEffect(() => {
-    setSrcIndex(0);
-    setImgFailed(false);
-  }, [sourceKey]);
-
   const handleImgError = () => {
-    if (srcIndex < sources.length - 1) {
-      setSrcIndex((prev) => prev + 1);
-      return;
-    }
-    setImgFailed(true);
+    setImageState((prev) => {
+      const baseIndex = prev.sourceKey === sourceKey ? prev.srcIndex : 0;
+      if (baseIndex < sources.length - 1) {
+        return {
+          sourceKey,
+          srcIndex: baseIndex + 1,
+          imgFailed: false,
+        };
+      }
+      return {
+        sourceKey,
+        srcIndex: baseIndex,
+        imgFailed: true,
+      };
+    });
   };
 
   if (src && !imgFailed) {

@@ -56,8 +56,16 @@ export default function App() {
   const isCapabilitiesRoute = normalizedPath === '/capabilities';
   const isQuickStartRoute = normalizedPath === '/quickstart';
   const shouldShowLoading = !isAuthReady;
+  const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
+  const hasStoredAuthHint = rememberUntil > 0 || !!localStorage.getItem(AUTH_TOKEN_KEY);
+  const shouldInitializeAuthClient =
+    !isShareRoute && (isAuthenticated || isAdminRoute || isDecisionRoute || hasStoredAuthHint);
 
   useEffect(() => {
+    if (!shouldInitializeAuthClient) {
+      return undefined;
+    }
+
     let unsubscribe = null;
     let isDisposed = false;
 
@@ -108,7 +116,7 @@ export default function App() {
       isDisposed = true;
       unsubscribe?.();
     };
-  }, []);
+  }, [shouldInitializeAuthClient]);
 
   useEffect(() => {
     if (isShareRoute) {
@@ -144,7 +152,6 @@ export default function App() {
       };
 
       try {
-        const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
         const hasStoredToken = !!localStorage.getItem(AUTH_TOKEN_KEY);
         const hasAuthHint = rememberUntil > 0 || hasStoredToken;
         const localTokenHint = String(localStorage.getItem(AUTH_TOKEN_KEY) || '');
@@ -213,7 +220,7 @@ export default function App() {
     };
 
     void checkAuth();
-  }, [isShareRoute, isAdminRoute, isDecisionRoute, isCapabilitiesRoute, isQuickStartRoute]);
+  }, [isShareRoute, isAdminRoute, isDecisionRoute, isCapabilitiesRoute, isQuickStartRoute, rememberUntil]);
 
   useEffect(() => {
     if (shouldShowLoading) {

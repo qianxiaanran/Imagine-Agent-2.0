@@ -65,7 +65,7 @@ const syncTokensFromSupabaseSession = async () => {
       localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, session.refresh_token);
     }
     return session.access_token;
-  } catch (error) {
+  } catch {
     return null;
   }
 };

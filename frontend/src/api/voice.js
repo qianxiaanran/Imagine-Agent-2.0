@@ -1,6 +1,5 @@
 import apiClient from './apiClient';
 import { supabase, STORAGE_BUCKET } from './supabaseClient';
-import { v4 as uuidv4 } from 'uuid'; // 如果没有uuid库，可以用简单的随机字符串代替
 
 // 轮询辅助函数 (保持不变)
 const pollTaskResult = async (taskId) => {

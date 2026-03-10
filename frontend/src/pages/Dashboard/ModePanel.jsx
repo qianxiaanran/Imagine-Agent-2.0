@@ -213,13 +213,37 @@ const AuditPanel = ({
   fullWidth = false,
 }) => {
   const fileInputRef = useRef(null);
-  const [expandedFindings, setExpandedFindings] = useState({});
-  const [isConfigExpanded, setIsConfigExpanded] = useState(false);
+  const auditStateKey = String(auditState?.jobId || "idle");
+  const [auditUiState, setAuditUiState] = useState(() => ({
+    stateKey: "idle",
+    expandedFindings: {},
+    isConfigExpanded: false,
+  }));
+  const expandedFindings = auditUiState.stateKey === auditStateKey ? auditUiState.expandedFindings : {};
+  const isConfigExpanded = auditUiState.stateKey === auditStateKey ? auditUiState.isConfigExpanded : false;
 
-  useEffect(() => {
-    setExpandedFindings({});
-    setIsConfigExpanded(false);
-  }, [auditState?.jobId]);
+  const toggleConfigExpanded = () => {
+    setAuditUiState((prev) => {
+      const prevExpandedFindings = prev.stateKey === auditStateKey ? prev.expandedFindings : {};
+      const prevExpanded = prev.stateKey === auditStateKey ? prev.isConfigExpanded : false;
+      return {
+        stateKey: auditStateKey,
+        expandedFindings: prevExpandedFindings,
+        isConfigExpanded: !prevExpanded,
+      };
+    });
+  };
+
+  const toggleFindingExpanded = (key) => {
+    setAuditUiState((prev) => {
+      const prevExpandedFindings = prev.stateKey === auditStateKey ? prev.expandedFindings : {};
+      return {
+        stateKey: auditStateKey,
+        expandedFindings: { ...prevExpandedFindings, [key]: !prevExpandedFindings[key] },
+        isConfigExpanded: prev.stateKey === auditStateKey ? prev.isConfigExpanded : false,
+      };
+    });
+  };
 
   const status = auditState?.status || "idle";
   const isBusy = ["uploading", "pending", "running"].includes(status);
@@ -459,7 +483,7 @@ const AuditPanel = ({
         <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
           <button
             type="button"
-            onClick={() => setIsConfigExpanded((prev) => !prev)}
+            onClick={toggleConfigExpanded}
             className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left"
           >
             <div>
@@ -754,7 +778,7 @@ const AuditPanel = ({
                     <div key={key} className="rounded-lg border border-gray-100 dark:border-gray-800 bg-gray-50/60 dark:bg-gray-900/30">
                       <button
                         type="button"
-                        onClick={() => setExpandedFindings((prev) => ({ ...prev, [key]: !expanded }))}
+                        onClick={() => toggleFindingExpanded(key)}
                         className="w-full text-left px-3 py-3 flex items-start justify-between gap-3"
                       >
                         <div className="flex-1">
@@ -860,14 +884,9 @@ const ModePanelComponent = ({
   const [meetingViewTab, setMeetingViewTab] = useState("transcript");
   const [isMeetingEditing, setIsMeetingEditing] = useState(false);
   const [meetingSearchKeyword, setMeetingSearchKeyword] = useState("");
-
-  useEffect(() => {
-    if (!isMeetingMode) {
-      setMeetingViewTab("transcript");
-      setIsMeetingEditing(false);
-      setMeetingSearchKeyword("");
-    }
-  }, [isMeetingMode]);
+  const effectiveMeetingViewTab = isMeetingMode ? meetingViewTab : "transcript";
+  const effectiveIsMeetingEditing = isMeetingMode ? isMeetingEditing : false;
+  const effectiveMeetingSearchKeyword = isMeetingMode ? meetingSearchKeyword : "";
 
   if (isAuditMode) {
     return (
@@ -920,7 +939,7 @@ const ModePanelComponent = ({
     .split(/\r?\n+/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const normalizedMeetingSearch = meetingSearchKeyword.trim().toLowerCase();
+  const normalizedMeetingSearch = effectiveMeetingSearchKeyword.trim().toLowerCase();
   const filteredTranscriptLines = normalizedMeetingSearch
     ? transcriptLines.filter((line) => line.toLowerCase().includes(normalizedMeetingSearch))
     : transcriptLines;
@@ -1001,7 +1020,7 @@ const ModePanelComponent = ({
                       <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
                       <input
                         type="text"
-                        value={meetingSearchKeyword}
+                        value={effectiveMeetingSearchKeyword}
                         onChange={(e) => setMeetingSearchKeyword(e.target.value)}
                         placeholder="搜索逐字稿关键词"
                         className="w-full h-9 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 pl-9 pr-3 text-sm text-gray-700 dark:text-gray-200 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-200 dark:focus:ring-blue-800"
@@ -1010,7 +1029,7 @@ const ModePanelComponent = ({
                     <button
                       type="button"
                       onClick={() => {
-                        if (meetingViewTab !== "transcript") {
+                        if (effectiveMeetingViewTab !== "transcript") {
                           setMeetingViewTab("transcript");
                           setIsMeetingEditing(true);
                           return;
@@ -1019,7 +1038,7 @@ const ModePanelComponent = ({
                       }}
                       className="h-9 px-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
                     >
-                      {isMeetingEditing ? "完成编辑" : "手动编辑"}
+                      {effectiveIsMeetingEditing ? "完成编辑" : "手动编辑"}
                     </button>
                   </div>
 
@@ -1031,7 +1050,7 @@ const ModePanelComponent = ({
                         setIsMeetingEditing(false);
                       }}
                       className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                        meetingViewTab === "summary"
+                        effectiveMeetingViewTab === "summary"
                           ? "bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm"
                           : "text-gray-500 dark:text-gray-400"
                       }`}
@@ -1042,7 +1061,7 @@ const ModePanelComponent = ({
                       type="button"
                       onClick={() => setMeetingViewTab("transcript")}
                       className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                        meetingViewTab === "transcript"
+                        effectiveMeetingViewTab === "transcript"
                           ? "bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm"
                           : "text-gray-500 dark:text-gray-400"
                       }`}
@@ -1054,7 +1073,7 @@ const ModePanelComponent = ({
               </div>
 
               <div className="flex-1 min-h-0 overflow-hidden">
-                {meetingViewTab === "summary" ? (
+                {effectiveMeetingViewTab === "summary" ? (
                   <div className="h-full overflow-y-auto custom-scrollbar p-4 space-y-3">
                     <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50/70 dark:bg-gray-900/60 p-3">
                       <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">纪要预览</div>
@@ -1072,7 +1091,7 @@ const ModePanelComponent = ({
                       建议操作：在右侧输入“请生成会议纪要（结论、行动项、负责人、截止时间）”，可快速得到结构化结果。
                     </div>
                   </div>
-                ) : isMeetingEditing ? (
+                ) : effectiveIsMeetingEditing ? (
                   <div className="h-full p-4">
                     <textarea
                       className="w-full h-full min-h-[260px] resize-none border border-gray-200 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-900 px-4 py-3 text-sm leading-7 text-gray-700 dark:text-gray-300 custom-scrollbar focus:ring-2 focus:ring-blue-200 dark:focus:ring-blue-800"
@@ -1097,7 +1116,7 @@ const ModePanelComponent = ({
                             <div className="flex-1 min-w-0">
                               <div className="text-[11px] text-gray-400 dark:text-gray-500">片段 {String(index + 1).padStart(2, "0")}</div>
                               <div className="text-sm text-gray-700 dark:text-gray-200 leading-6 break-words">
-                                <HighlightedText text={line} highlight={meetingSearchKeyword} />
+                                <HighlightedText text={line} highlight={effectiveMeetingSearchKeyword} />
                               </div>
                             </div>
                           </div>

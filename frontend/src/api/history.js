@@ -1,11 +1,46 @@
 import apiClient from './apiClient';
 
+const normalizeHistoryPagePayload = (result) => {
+  if (Array.isArray(result)) {
+    return {
+      items: result,
+      contextItems: [],
+      hasMore: false,
+      nextBeforeId: null,
+    };
+  }
+
+  const items = Array.isArray(result?.items)
+    ? result.items
+    : (Array.isArray(result?.data) ? result.data : []);
+  const contextItems = Array.isArray(result?.context_items)
+    ? result.context_items
+    : (Array.isArray(result?.contextItems) ? result.contextItems : []);
+
+  return {
+    items,
+    contextItems,
+    hasMore: Boolean(result?.has_more),
+    nextBeforeId: result?.next_before_id ?? null,
+  };
+};
+
 const historyApi = {
   getSessions: (userId) =>
     apiClient(`/api/history/sessions?user_id=${userId}`, { method: 'GET' }),
 
-  getSessionMessages: async (sessionId, userId) => {
-    const result = await apiClient(`/api/history/${sessionId}?user_id=${userId}`, { method: 'GET' });
+  getSessionMessagesPage: async (sessionId, userId, { limit = 40, beforeId = null, includeContext = false } = {}) => {
+    const params = new URLSearchParams({ user_id: userId });
+    if (limit) params.set('limit', String(limit));
+    if (beforeId) params.set('before_id', String(beforeId));
+    if (includeContext) params.set('include_context', 'true');
+    const result = await apiClient(`/api/history/${sessionId}?${params.toString()}`, { method: 'GET' });
+    return normalizeHistoryPagePayload(result);
+  },
+
+  getSessionMessages: async (sessionId, userId, options = {}) => {
+    const page = await historyApi.getSessionMessagesPage(sessionId, userId, options);
+    const result = [...page.contextItems, ...page.items];
     if (Array.isArray(result)) return result;
     if (Array.isArray(result?.data)) return result.data;
     if (Array.isArray(result?.items)) return result.items;

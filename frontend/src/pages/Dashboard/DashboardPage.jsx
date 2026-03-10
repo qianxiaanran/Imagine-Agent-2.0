@@ -17,6 +17,11 @@ import historyApi from '../../api/history';
 import presentationApi from '../../api/presentation';
 import { convertWebMToWav } from '../../utils/audio';
 import {
+  HISTORY_PAGE_SIZE,
+  normalizeHistoryChatMessages,
+  useSessionHistoryPagination,
+} from './useSessionHistoryPagination';
+import {
   APP_SETTINGS_UPDATED_EVENT,
   DEFAULT_APP_SETTINGS,
   loadAppSettings,
@@ -1291,6 +1296,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const currentSessionIdRef = useRef(null);
   const [sessionList, setSessionList] = useState([]);
+  const [historyCursor, setHistoryCursor] = useState(null);
+  const [historyHasMoreServer, setHistoryHasMoreServer] = useState(false);
+  const [isHistoryPageLoading, setIsHistoryPageLoading] = useState(false);
   const sessionRefreshPromiseRef = useRef(null);
   const sessionRefreshQueuedUidRef = useRef('');
   const [isRecordingMode, setIsRecordingMode] = useState(false);
@@ -1641,7 +1649,20 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       .slice(-MARKDOWN_MESSAGE_COUNT)
       .some((msg) => msg?.role === 'assistant' && isLikelyMarkdown(msg?.content || ''));
   }, [chatHistory]);
-  const hasMoreMessages = chatHistory.length > normalizedVisibleCount;
+  const { loadOlderSessionMessages, resetHistoryPaginationState } = useSessionHistoryPagination({
+    currentSessionIdRef,
+    userId: userProfile.id,
+    historyCursor,
+    historyHasMoreServer,
+    chatHistoryLength: chatHistory.length,
+    setChatHistory,
+    setVisibleMessageCount,
+    setHistoryCursor,
+    setHistoryHasMoreServer,
+    setIsHistoryPageLoading,
+    initialMessageCount: INITIAL_MESSAGE_COUNT,
+  });
+  const hasMoreMessages = chatHistory.length > normalizedVisibleCount || historyHasMoreServer;
   const showChatSkeleton = (isProfileLoading || isSessionsLoading) && chatHistory.length === 0;
 
   useEffect(() => {
@@ -2728,6 +2749,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       setSelectedModel(modelId);
       setChatHistory([]);
+      currentSessionIdRef.current = null;
+      resetHistoryPaginationState();
       clearHistoryExpandTask();
       setHistoryRenderTarget(INITIAL_MESSAGE_COUNT);
       setVisibleMessageCount(INITIAL_MESSAGE_COUNT);
@@ -2809,6 +2832,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
   };
 
+  const handleLoadMoreMessages = useCallback(() => {
+    if (normalizedVisibleCount < chatHistory.length) {
+      setVisibleMessageCount((count) => Math.min(chatHistory.length, count + INITIAL_MESSAGE_COUNT));
+      return;
+    }
+    if (historyHasMoreServer && !isHistoryPageLoading) {
+      void loadOlderSessionMessages();
+    }
+  }, [chatHistory.length, historyHasMoreServer, isHistoryPageLoading, loadOlderSessionMessages, normalizedVisibleCount]);
+
   const handleSessionClick = async (sessionId) => {
     if (isProcessing) return;
     setIsMobileSidebarOpen(false);
@@ -2823,18 +2856,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setAudioFileUrl(null);
     setCurrentAudioPath(null);
     setPendingFiles([]);
+    currentSessionIdRef.current = null;
+    resetHistoryPaginationState();
     resetAuditState();
     setSpeakingIdx(null);
     window.speechSynthesis.cancel();
 
     try {
       const uid = userProfile.id || 'anonymous';
-      const messages = await historyApi.getSessionMessages(sessionId, uid);
-      const safeMessages = Array.isArray(messages)
-        ? messages
-        : (Array.isArray(messages?.data)
-          ? messages.data
-          : (Array.isArray(messages?.items) ? messages.items : []));
+      const messagePage = await historyApi.getSessionMessagesPage(sessionId, uid, {
+        limit: HISTORY_PAGE_SIZE,
+        includeContext: true,
+      });
+      const safeMessages = [...(messagePage.contextItems || []), ...(messagePage.items || [])];
 
       let metaMsg = null;
       let contextMsg = null;
@@ -2889,15 +2923,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const restoredStandalonePptState = targetModel === 3 ? parseStandalonePptHistoryState(safeMessages) : null;
       const isStandalonePptHistory = !!restoredStandalonePptState;
 
-      const chatMsgs = safeMessages.filter((m) => m.role !== 'context' && m.role !== 'meta');
-      const normalizedChatMsgs = chatMsgs.length > 0
-        ? chatMsgs.map((msg) => ({
-            ...msg,
-            role: msg?.role === 'user' ? 'user' : 'assistant',
-            content: typeof msg?.content === 'string'
-              ? msg.content
-              : (msg?.content == null ? '' : JSON.stringify(msg.content))
-          }))
+      const normalizedChatMsgs = normalizeHistoryChatMessages(messagePage.items);
+      const resolvedChatHistory = normalizedChatMsgs.length > 0
+        ? normalizedChatMsgs
         : (isStandalonePptHistory
           ? []
           : safeMessages.length > 0
@@ -2910,11 +2938,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               content: '该历史会话暂无内容。'
             }]);
       setHistoryRenderTarget(HISTORY_FIRST_PAINT_COUNT);
-      setChatHistory(normalizedChatMsgs);
-      setVisibleMessageCount(Math.min(HISTORY_FIRST_PAINT_COUNT, normalizedChatMsgs.length));
+      setChatHistory(resolvedChatHistory);
+      setVisibleMessageCount(Math.min(HISTORY_FIRST_PAINT_COUNT, resolvedChatHistory.length));
       setExpandedSources({});
+      setHistoryCursor(messagePage.nextBeforeId);
+      setHistoryHasMoreServer(Boolean(messagePage.hasMore));
       scheduleHistoryExpand();
       setPanelContent(isStandalonePptHistory ? '' : (contextMsg ? contextMsg.content : ''));
+      currentSessionIdRef.current = sessionId;
       setCurrentSessionId(sessionId);
 
       if (targetModel === 2 && contextMsg?.content) {
@@ -3072,6 +3103,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const handleNewChat = () => {
       setChatHistory([]);
+      currentSessionIdRef.current = null;
+      resetHistoryPaginationState();
       clearHistoryExpandTask();
       setHistoryRenderTarget(INITIAL_MESSAGE_COUNT);
       setVisibleMessageCount(0);
@@ -3774,6 +3807,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           if (mode === 'ocr') {
               const entries = pending.map(buildOcrEntry);
               if (entries.length) {
+                  currentSessionIdRef.current = null;
                   setCurrentSessionId(null);
                   setPanelContent('');
                   setSelectedOcrLine(null);
@@ -4042,6 +4076,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     if (isOCRMode || willSwitchToOcr) {
         const newEntries = newWrappers.map(buildOcrEntry);
         if (newEntries.length) {
+            currentSessionIdRef.current = null;
             setCurrentSessionId(null);
             setPanelContent('');
             setSelectedOcrLine(null);
@@ -8409,10 +8444,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                 {hasMoreMessages && (
                                   <div className="flex justify-center">
                                     <button
-                                      onClick={() => setVisibleMessageCount((count) => Math.min(chatHistory.length, count + INITIAL_MESSAGE_COUNT))}
+                                      onClick={handleLoadMoreMessages}
+                                      disabled={isHistoryPageLoading}
                                       className="text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 px-3 py-1.5 rounded-full border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
                                     >
-                                      加载更多
+                                      {isHistoryPageLoading ? '加载中...' : '加载更多'}
                                     </button>
                                   </div>
                                 )}

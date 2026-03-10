@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Header, Request
+from fastapi import APIRouter, HTTPException, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -56,7 +56,14 @@ STREAM_UNTHROTTLED = os.getenv("STREAM_UNTHROTTLED", "true").lower() != "false"
 # -----------------------------------------------------------------------------
 
 from supabase_client import require_supabase
-from history_manager import get_history, get_history_limited, get_user_sessions, delete_session, rename_session
+from history_manager import (
+    delete_session,
+    get_history,
+    get_history_limited,
+    get_history_page,
+    get_user_sessions,
+    rename_session,
+)
 from deepseek_llm import ask_llm_stream_async, ask_llm
 
 # 引入我们新构建的模块（仅在 LangGraph 路径需要）
@@ -3624,7 +3631,21 @@ def get_sessions_api(user_id: str):
 
 
 @router.get("/history/{session_id}")
-def get_session_messages_api(session_id: str, user_id: str):
+def get_session_messages_api(
+    session_id: str,
+    user_id: str,
+    limit: Optional[int] = Query(default=None),
+    before_id: Optional[int] = Query(default=None),
+    include_context: bool = Query(default=False),
+):
+    if limit is not None or before_id is not None or include_context:
+        return get_history_page(
+            user_id,
+            session_id,
+            limit=limit or 40,
+            before_id=before_id,
+            include_context=include_context,
+        )
     return get_history(user_id, session_id)
 
 
