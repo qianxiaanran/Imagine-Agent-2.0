@@ -622,7 +622,7 @@ const Sidebar = ({
                         </button>
                          <div className="px-3 py-1 flex items-center gap-2">
                             <Activity size={10} className={currentMode === 'database' ? 'text-green-500' : 'text-blue-500'} />
-                            <span className="text-[10px] text-gray-400">当前: {currentMode === 'database' ? 'SQL模式' : '文档模式'}</span>
+                            <span className="text-[10px] text-gray-400">当前: {currentMode === 'database' ? 'SQL模式' : (currentMode === 'rag' ? '知识库模式' : '通用模式')}</span>
                          </div>
                       </div>
                     </div>

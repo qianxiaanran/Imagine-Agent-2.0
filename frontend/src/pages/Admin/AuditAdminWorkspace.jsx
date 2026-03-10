@@ -56,6 +56,8 @@ const REVIEW_OPTIONS = [
   { value: "pending", label: "待复核" },
 ];
 
+const AUDIT_RECORD_PAGE_SIZE = 100;
+
 const cn = (...parts) => parts.filter(Boolean).join(" ");
 
 const formatDate = (value) => {
@@ -457,6 +459,14 @@ const AuditAdminWorkspace = () => {
   const [view, setView] = useState("warnings");
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(0);
+  const [meta, setMeta] = useState({
+    count: 0,
+    total_visible: 0,
+    offset: 0,
+    limit: AUDIT_RECORD_PAGE_SIZE,
+    has_more: false,
+  });
   const [filters, setFilters] = useState({
     query: "",
     docType: "",
@@ -474,20 +484,36 @@ const AuditAdminWorkspace = () => {
 
   const loadRecords = async () => {
     setLoading(true);
-    const effectiveQuery = (filters.query || deferredQuery || "").trim();
+    const effectiveQuery = (deferredQuery || filters.query || "").trim();
     try {
       const res = await adminApi.listAuditRecords({
-        limit: 500,
+        limit: AUDIT_RECORD_PAGE_SIZE,
+        offset: page * AUDIT_RECORD_PAGE_SIZE,
         query: effectiveQuery || undefined,
         doc_type: filters.docType || undefined,
         status: filters.status || undefined,
         risk_level: filters.risk || undefined,
+        review_status: filters.review || undefined,
       });
       startTransition(() => {
         setRecords(Array.isArray(res?.data) ? res.data : []);
+        setMeta({
+          count: Number(res?.meta?.count || 0),
+          total_visible: Number(res?.meta?.total_visible || 0),
+          offset: Number(res?.meta?.offset || 0),
+          limit: Number(res?.meta?.limit || AUDIT_RECORD_PAGE_SIZE),
+          has_more: Boolean(res?.meta?.has_more),
+        });
       });
     } catch (error) {
       setRecords([]);
+      setMeta({
+        count: 0,
+        total_visible: 0,
+        offset: page * AUDIT_RECORD_PAGE_SIZE,
+        limit: AUDIT_RECORD_PAGE_SIZE,
+        has_more: false,
+      });
     } finally {
       setLoading(false);
     }
@@ -495,14 +521,9 @@ const AuditAdminWorkspace = () => {
 
   useEffect(() => {
     loadRecords();
-  }, [deferredQuery, filters.docType, filters.status, filters.risk]);
+  }, [deferredQuery, filters.docType, filters.status, filters.risk, filters.review, page]);
 
-  const visibleRecords = records.filter((item) => {
-    if (!filters.review) return true;
-    const reviewStatus = String(item?.review_status || "").toLowerCase();
-    if (filters.review === "pending") return !reviewStatus;
-    return reviewStatus === filters.review;
-  });
+  const visibleRecords = records;
 
   const openDetail = async (record) => {
     setActiveRecord(record);
@@ -556,7 +577,7 @@ const AuditAdminWorkspace = () => {
 
   const totalAmount = visibleRecords.reduce((sum, item) => sum + (Number(item?.amount) || 0), 0);
   const metrics = {
-    total: visibleRecords.length,
+    total: Number(meta.total_visible || visibleRecords.length),
     high: visibleRecords.filter((item) => item?.risk_level === "high").length,
     pending: visibleRecords.filter((item) => !item?.review_status || item?.review_status === "need_more").length,
     approved: visibleRecords.filter((item) => item?.review_status === "approved").length,
@@ -632,7 +653,11 @@ const AuditAdminWorkspace = () => {
                 <Search size={16} className="text-slate-400 dark:text-slate-500" />
                 <input
                   value={filters.query}
-                  onChange={(e) => setFilters((prev) => ({ ...prev, query: e.target.value }))}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setPage(0);
+                    setFilters((prev) => ({ ...prev, query: value }));
+                  }}
                   placeholder="请输入合同名称、编号、公司名称"
                   className="w-full bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400 dark:text-slate-200 dark:placeholder:text-slate-500"
                 />
@@ -640,7 +665,11 @@ const AuditAdminWorkspace = () => {
 
               <select
                 value={filters.docType}
-                onChange={(e) => setFilters((prev) => ({ ...prev, docType: e.target.value }))}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setPage(0);
+                  setFilters((prev) => ({ ...prev, docType: value }));
+                }}
                 className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
               >
                 {DOC_TYPE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -648,7 +677,11 @@ const AuditAdminWorkspace = () => {
 
               <select
                 value={filters.status}
-                onChange={(e) => setFilters((prev) => ({ ...prev, status: e.target.value }))}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setPage(0);
+                  setFilters((prev) => ({ ...prev, status: value }));
+                }}
                 className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
               >
                 {STATUS_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -656,7 +689,11 @@ const AuditAdminWorkspace = () => {
 
               <select
                 value={filters.risk}
-                onChange={(e) => setFilters((prev) => ({ ...prev, risk: e.target.value }))}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setPage(0);
+                  setFilters((prev) => ({ ...prev, risk: value }));
+                }}
                 className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
               >
                 {RISK_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -664,7 +701,11 @@ const AuditAdminWorkspace = () => {
 
               <select
                 value={filters.review}
-                onChange={(e) => setFilters((prev) => ({ ...prev, review: e.target.value }))}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setPage(0);
+                  setFilters((prev) => ({ ...prev, review: value }));
+                }}
                 className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
               >
                 {REVIEW_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
@@ -678,6 +719,31 @@ const AuditAdminWorkspace = () => {
                 <RefreshCw size={15} />
                 刷新
               </button>
+            </div>
+
+            <div className="mt-4 flex flex-col gap-3 text-xs text-slate-500 dark:text-slate-400 md:flex-row md:items-center md:justify-between">
+              <div>
+                当前显示 {visibleRecords.length} 条，匹配结果 {meta.total_visible || visibleRecords.length} 条
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPage((prev) => Math.max(prev - 1, 0))}
+                  disabled={loading || page === 0}
+                  className="rounded-xl border border-slate-200 px-3 py-1.5 text-slate-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                >
+                  上一页
+                </button>
+                <span>第 {page + 1} 页</span>
+                <button
+                  type="button"
+                  onClick={() => setPage((prev) => prev + 1)}
+                  disabled={loading || !meta.has_more}
+                  className="rounded-xl border border-slate-200 px-3 py-1.5 text-slate-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                >
+                  下一页
+                </button>
+              </div>
             </div>
           </div>
 

@@ -46,7 +46,7 @@ const capabilityModules = [
   {
     title: '对话与知识检索',
     description: '支持通用问答、知识库引用、联网搜索，回答可回溯上下文并保留会话历史。',
-    features: ['多轮对话', 'RAG 引用文档', '联网搜索模式', '历史会话管理'],
+    features: ['多轮对话', '知识库问答', '联网搜索模式', '历史会话管理'],
     icon: BookOpen,
     accent: 'from-blue-500/15 to-transparent',
   },

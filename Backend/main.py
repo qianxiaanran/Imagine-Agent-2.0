@@ -46,6 +46,8 @@ warmup_decision_cache = None
 upload_document_to_vector_store = None
 delete_user_documents = None
 store_text_to_vector_store = None
+submit_document_upload_task = None
+get_document_upload_task = None
 submit_file_task = None
 get_task_result = None
 submit_supabase_task = None
@@ -117,6 +119,7 @@ try:
     from admin_router import router as admin_router
     from decision_router import router as decision_router, warmup_decision_cache
     from documents_processing import upload_document_to_vector_store, delete_user_documents, store_text_to_vector_store, warmup_embeddings
+    from document_upload_tasks import submit_document_upload_task, get_document_upload_task
     from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase
     from ocr_manager import OCRManager, get_shared_ocr_manager
     from history_manager import save_context
@@ -559,7 +562,7 @@ async def upload_docs(
     replace_existing: bool = Form(False),
     files: List[UploadFile] = File(...),
 ):
-    if not upload_document_to_vector_store:
+    if not submit_document_upload_task:
         return {"error": "Document Service Unavailable"}
 
     provided_user_id = (user_id or "").strip()
@@ -591,35 +594,41 @@ async def upload_docs(
     if not resolved_user_id:
         return JSONResponse(status_code=400, content={"error": "Missing user_id"})
 
-    if replace_existing and delete_user_documents:
-        try:
-            delete_user_documents(resolved_user_id)
-        except Exception:
-            pass
-
-    ok, fail = 0, []
-    previews = []
+    upload_items: List[Dict[str, Any]] = []
     for f in files:
         try:
             content = await f.read()
-            success, msg, preview_text = upload_document_to_vector_store(content, f.filename, resolved_user_id)
-            if success:
-                ok += 1
-                if preview_text:
-                    previews.append(f"--- Document: {f.filename} ---\n{preview_text}")
-            else:
-                fail.append({"file": f.filename, "error": msg})
+            if not content:
+                return JSONResponse(status_code=400, content={"error": f"Empty file: {f.filename}"})
+            upload_items.append(
+                {
+                    "filename": f.filename,
+                    "content": content,
+                    "content_type": f.content_type or "application/octet-stream",
+                    "size": len(content),
+                }
+            )
         except Exception as e:
-            fail.append({"file": f.filename, "error": str(e)})
+            return JSONResponse(status_code=400, content={"error": f"Read file failed: {f.filename}: {e}"})
 
-    status = "success" if ok > 0 and not fail else ("partial" if ok > 0 else "failed")
+    task = submit_document_upload_task(
+        user_id=resolved_user_id,
+        files=upload_items,
+        replace_existing=replace_existing,
+    )
     return {
-        "status": status,
-        "ok": ok,
-        "failed": len(fail),
-        "errors": fail,
-        "previews": "\n\n".join(previews),
+        "status": "queued",
+        "task_id": task.get("task_id"),
+        "file_count": len(upload_items),
+        "message": "Document upload task submitted",
     }
+
+
+@app.get("/api/documents/upload/result/{task_id}")
+async def get_document_upload_result_api(task_id: str):
+    if not get_document_upload_task:
+        return {"error": "Document Service Unavailable"}
+    return get_document_upload_task(task_id)
 
 @app.post("/api/generate/report")
 def api_gen_report(req: ReportRequest):

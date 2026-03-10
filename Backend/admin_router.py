@@ -244,6 +244,172 @@ def _audit_record_matches_query(record: Dict[str, Any], query: str) -> bool:
     return keyword in haystack
 
 
+def _normalize_review_filter(value: Optional[str]) -> Optional[str]:
+    normalized = _audit_text(value).lower()
+    if normalized in {"approved", "rejected", "need_more", "pending"}:
+        return normalized
+    return None
+
+
+def _record_matches_filters(
+    record: Dict[str, Any],
+    *,
+    user_id: Optional[str] = None,
+    doc_type: Optional[str] = None,
+    status: Optional[str] = None,
+    risk_level: Optional[str] = None,
+    review_status: Optional[str] = None,
+    query: Optional[str] = None,
+) -> bool:
+    if user_id and _audit_text(record.get("user_id")) != _audit_text(user_id):
+        return False
+    if doc_type and _audit_text(record.get("doc_type")).lower() != _audit_text(doc_type).lower():
+        return False
+    if status and _audit_text(record.get("status")).lower() != _audit_text(status).lower():
+        return False
+    if risk_level and _audit_text(record.get("risk_level")).lower() != _audit_text(risk_level).lower():
+        return False
+
+    normalized_review = _normalize_review_filter(review_status)
+    review_value = _audit_text(record.get("review_status")).lower()
+    if normalized_review == "pending":
+        if review_value:
+            return False
+    elif normalized_review and review_value != normalized_review:
+        return False
+
+    if query and not _audit_record_matches_query(record, query):
+        return False
+    return True
+
+
+def _merge_audit_record_payload(primary: Dict[str, Any], fallback: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(primary or {})
+    for key, value in (fallback or {}).items():
+        if key not in merged:
+            merged[key] = value
+            continue
+        current = merged.get(key)
+        if current in (None, "", [], {}) and value not in (None, "", [], {}):
+            merged[key] = value
+            continue
+        if isinstance(current, dict) and not current and isinstance(value, dict):
+            merged[key] = value
+    return merged
+
+
+def _review_payload_from_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    status = _audit_text(row.get("review_status"))
+    comment = row.get("review_comment")
+    reviewer_id = row.get("reviewer_id")
+    updated_at = row.get("review_updated_at")
+    created_at = row.get("review_created_at")
+    if not any([status, comment, reviewer_id, updated_at, created_at]):
+        return None
+    return {
+        "status": status,
+        "comment": comment,
+        "reviewer_id": reviewer_id,
+        "updated_at": updated_at,
+        "created_at": created_at,
+    }
+
+
+def _build_audit_record_from_db_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    job = {key: value for key, value in dict(row or {}).items() if not str(key).startswith("review_") and key != "result_json"}
+    result = row.get("result_json") if isinstance(row.get("result_json"), dict) else {}
+    review = _review_payload_from_row(row)
+    return _build_audit_record_payload(job, result, review)
+
+
+def _load_db_audit_record_rows(
+    *,
+    limit: int,
+    user_id: Optional[str] = None,
+    doc_type: Optional[str] = None,
+    status: Optional[str] = None,
+    risk_level: Optional[str] = None,
+    review_status: Optional[str] = None,
+    query: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    fetch_limit = max(50, min(int(limit or 0), 2000))
+    normalized_query = _audit_text(query).lower()
+    query_like = f"%{normalized_query}%"
+    normalized_review = _normalize_review_filter(review_status)
+    normalized_risk = _audit_text(risk_level).lower() or None
+
+    sql = text(
+        """
+        SELECT
+            j.*,
+            r.result_json,
+            rv.status AS review_status,
+            rv.comment AS review_comment,
+            rv.reviewer_id AS reviewer_id,
+            rv.updated_at AS review_updated_at,
+            rv.created_at AS review_created_at
+        FROM audit_jobs AS j
+        LEFT JOIN audit_results AS r
+            ON r.job_id = j.job_id
+        LEFT JOIN LATERAL (
+            SELECT status, comment, reviewer_id, updated_at, created_at
+            FROM audit_reviews
+            WHERE audit_reviews.job_id = j.job_id
+            ORDER BY COALESCE(updated_at, created_at) DESC NULLS LAST
+            LIMIT 1
+        ) AS rv ON TRUE
+        WHERE (:user_id = '' OR j.user_id = :user_id)
+          AND (:doc_type = '' OR LOWER(COALESCE(j.doc_type, '')) = :doc_type)
+          AND (:status = '' OR LOWER(COALESCE(j.status, '')) = :status)
+          AND (:risk_level = '' OR LOWER(COALESCE(r.result_json ->> 'risk_level', '')) = :risk_level)
+          AND (
+                :review_status = ''
+                OR (:review_status = 'pending' AND COALESCE(rv.status, '') = '')
+                OR (:review_status <> 'pending' AND LOWER(COALESCE(rv.status, '')) = :review_status)
+              )
+          AND (
+                :query_like = ''
+                OR LOWER(COALESCE(j.job_id, '')) LIKE :query_like
+                OR LOWER(COALESCE(j.user_id, '')) LIKE :query_like
+                OR LOWER(COALESCE(j.file_name, '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json ->> 'summary', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json ->> 'headline', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json ->> 'recognized_doc_subtype_label', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'vendor', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'payee', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'buyer', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'customer', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'contract_no', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'invoice_no', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'application_no', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'subject', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'contract_title', '')) LIKE :query_like
+                OR LOWER(COALESCE(r.result_json -> 'extracted_fields' ->> 'project_name', '')) LIKE :query_like
+              )
+        ORDER BY COALESCE(j.created_at, j.updated_at) DESC NULLS LAST, j.job_id DESC
+        LIMIT :fetch_limit
+        """
+    )
+
+    try:
+        with engine.begin() as conn:
+            return [dict(row) for row in conn.execute(
+                sql,
+                {
+                    "user_id": _audit_text(user_id),
+                    "doc_type": _audit_text(doc_type).lower(),
+                    "status": _audit_text(status).lower(),
+                    "risk_level": normalized_risk or "",
+                    "review_status": normalized_review or "",
+                    "query_like": query_like if normalized_query else "",
+                    "fetch_limit": fetch_limit,
+                },
+            ).mappings().all()]
+    except Exception as e:
+        print(f"[Admin Audit] SQL audit record query failed: {e}")
+        return []
+
+
 def _list_merged_audit_jobs(
     *,
     limit: int,
@@ -255,7 +421,8 @@ def _list_merged_audit_jobs(
     jobs_by_id: Dict[str, Dict[str, Any]] = {}
     sb = require_supabase()
     try:
-        db_query = sb.table("audit_jobs").select("*").order("created_at", desc=True).range(0, max(limit + offset + 200, 500) - 1)
+        fetch_limit = max(limit + offset + 40, 200)
+        db_query = sb.table("audit_jobs").select("*").order("created_at", desc=True).range(0, fetch_limit - 1)
         if user_id:
             db_query = db_query.eq("user_id", user_id)
         if doc_type:
@@ -668,61 +835,84 @@ def list_audit_records(
     doc_type: Optional[str] = None,
     risk_level: Optional[str] = None,
     status: Optional[str] = None,
+    review_status: Optional[str] = None,
     query: Optional[str] = None,
-    limit: int = Query(200, ge=1, le=500),
+    limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
     ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN, ROLE_AUDITOR])),
 ):
-    search = query
-    jobs = _list_merged_audit_jobs(
-        limit=limit,
-        offset=offset,
+    _ = ctx
+    search = _audit_text(query)
+    fetch_window = min(max(offset + limit + 120, 240), 2000)
+
+    db_rows = _load_db_audit_record_rows(
+        limit=fetch_window,
         user_id=user_id,
         doc_type=doc_type,
         status=status,
+        risk_level=risk_level,
+        review_status=review_status,
+        query=search,
     )
-    job_ids = [_audit_text(j.get("job_id")) for j in jobs if _audit_text(j.get("job_id"))]
-
-    results_map = {}
-    review_map = {}
-    if job_ids:
-        sb = require_supabase()
-        try:
-            r_res = sb.table("audit_results").select("job_id,result_json").in_("job_id", job_ids).execute()
-            for row in r_res.data or []:
-                results_map[row["job_id"]] = row.get("result_json")
-        except Exception as e:
-            print(f"[Admin Audit] Load audit_results failed: {e}")
-
-        try:
-            review_res = sb.table("audit_reviews").select("*").in_("job_id", job_ids).execute()
-            for row in review_res.data or []:
-                review_map[row["job_id"]] = row
-        except Exception as e:
-            print(f"[Admin Audit] Load audit_reviews failed: {e}")
-
-    out = []
-    for job in jobs:
-        job_id = _audit_text(job.get("job_id"))
-        result = results_map.get(job_id)
-        if not isinstance(result, dict):
-            result = job.get("result") if isinstance(job.get("result"), dict) else {}
-        review = review_map.get(job_id)
-        risk = _audit_text((result or {}).get("risk_level")).lower()
-        if risk_level and risk != _audit_text(risk_level).lower():
+    records_by_id: Dict[str, Dict[str, Any]] = {}
+    for row in db_rows:
+        record = _build_audit_record_from_db_row(row)
+        if not _record_matches_filters(
+            record,
+            user_id=user_id,
+            doc_type=doc_type,
+            status=status,
+            risk_level=risk_level,
+            review_status=review_status,
+            query=search,
+        ):
             continue
-        row = _build_audit_record_payload(job, result, review)
-        if not _audit_record_matches_query(row, search or ""):
+        job_id = _audit_text(record.get("job_id"))
+        if job_id:
+            records_by_id[job_id] = record
+
+    local_rows = list_local_audit_jobs(limit=fetch_window, offset=0)
+    for local_job in local_rows:
+        local_record = _build_audit_record_payload(
+            local_job,
+            local_job.get("result") if isinstance(local_job.get("result"), dict) else {},
+            None,
+        )
+        if not _record_matches_filters(
+            local_record,
+            user_id=user_id,
+            doc_type=doc_type,
+            status=status,
+            risk_level=risk_level,
+            review_status=review_status,
+            query=search,
+        ):
             continue
-        out.append(row)
+        job_id = _audit_text(local_record.get("job_id"))
+        if not job_id:
+            continue
+        existing = records_by_id.get(job_id)
+        records_by_id[job_id] = _merge_audit_record_payload(existing or {}, local_record) if existing else local_record
+
+    all_records = list(records_by_id.values())
+    all_records.sort(
+        key=lambda item: (
+            _audit_text(item.get("created_at") or item.get("document_date")),
+            _audit_text(item.get("job_id")),
+        ),
+        reverse=True,
+    )
+    page_rows = all_records[offset: offset + limit]
+    has_more = len(all_records) > (offset + limit)
     return {
         "success": True,
-        "data": out,
+        "data": page_rows,
         "meta": {
-            "count": len(out),
+            "count": len(page_rows),
+            "total_visible": len(all_records),
             "offset": offset,
             "limit": limit,
-            "has_more": len(jobs) >= limit,
+            "has_more": has_more,
         },
     }
 

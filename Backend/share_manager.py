@@ -7,12 +7,15 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
-from history_manager import get_history
+from history_manager import get_history, get_history_limited
 from supabase_client import engine, supabase
 
 _SCHEMA_READY = False
 _SCHEMA_LOCK = Lock()
 _LAST_ERROR = ""
+SHARE_SNAPSHOT_HEAD_MESSAGES = 8
+SHARE_SNAPSHOT_TAIL_MESSAGES = 80
+SHARE_SNAPSHOT_MAX_CONTENT_CHARS = 5000
 
 
 def _set_last_error(message: str) -> None:
@@ -208,7 +211,14 @@ def _normalize_days(days: Any) -> int:
     return value
 
 
-def _build_snapshot(raw_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _truncate_share_content(value: Any) -> str:
+    text = str(value or "")
+    if len(text) <= SHARE_SNAPSHOT_MAX_CONTENT_CHARS:
+        return text
+    return text[:SHARE_SNAPSHOT_MAX_CONTENT_CHARS] + "\n\n[内容已为分享快照截断]"
+
+
+def _build_snapshot(raw_history: List[Dict[str, Any]], total_count: Optional[int] = None) -> List[Dict[str, Any]]:
     snapshot_data: List[Dict[str, Any]] = []
     allowed_roles = {"user", "assistant", "system", "context", "meta"}
     for msg in raw_history or []:
@@ -218,11 +228,24 @@ def _build_snapshot(raw_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         snapshot_data.append(
             {
                 "role": role,
-                "content": msg.get("content"),
+                "content": _truncate_share_content(msg.get("content")),
                 "created_at": msg.get("created_at"),
                 "func_type": msg.get("func_type"),
             }
         )
+    if total_count and total_count > len(snapshot_data):
+        omitted = max(int(total_count) - len(snapshot_data), 0)
+        if omitted > 0:
+            insert_at = min(SHARE_SNAPSHOT_HEAD_MESSAGES, len(snapshot_data))
+            snapshot_data.insert(
+                insert_at,
+                {
+                    "role": "assistant",
+                    "content": f"为控制分享快照体积，已省略中间约 {omitted} 条历史消息。",
+                    "created_at": None,
+                    "func_type": "share_truncated_notice",
+                },
+            )
     return snapshot_data
 
 
@@ -278,24 +301,90 @@ def _infer_owner_user_id(session_id: str) -> str:
     return ""
 
 
-def _load_history_for_share(owner_user_id: str, session_id: str) -> List[Dict[str, Any]]:
-    # 首先优先选择严格的所有者+会话匹配。
-    rows = get_history(str(owner_user_id), str(session_id)) or []
-    if rows:
-        return rows
+def _fetch_share_history_rows(
+    owner_user_id: str,
+    session_id: str,
+    *,
+    limit: int,
+    desc: bool,
+) -> List[Dict[str, Any]]:
+    query = (
+        supabase.table("history")
+        .select("role, content, created_at, func_type")
+        .eq("session_id", str(session_id))
+    )
+    normalized_owner = str(owner_user_id or "").strip()
+    if normalized_owner and normalized_owner.lower() != "anonymous":
+        query = query.eq("user_id", normalized_owner)
+    response = query.order("created_at", desc=desc).limit(limit).execute()
+    rows = response.data or []
+    if desc:
+        rows = list(reversed(rows))
+    return rows
 
-    # 后备：如果无法确认所有者，至少共享当前会话快照。
+
+def _count_history_for_share(owner_user_id: str, session_id: str) -> int:
     try:
-        fallback = (
+        query = (
             supabase.table("history")
-            .select("*")
+            .select("id", count="exact", head=True)
             .eq("session_id", str(session_id))
-            .order("created_at")
-            .execute()
         )
-        return fallback.data or []
+        normalized_owner = str(owner_user_id or "").strip()
+        if normalized_owner and normalized_owner.lower() != "anonymous":
+            query = query.eq("user_id", normalized_owner)
+        response = query.execute()
+        return int(getattr(response, "count", 0) or 0)
     except Exception:
-        return []
+        return 0
+
+
+def _merge_share_history_rows(head_rows: List[Dict[str, Any]], tail_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for item in (head_rows or []) + (tail_rows or []):
+        dedup_key = (
+            str(item.get("created_at") or ""),
+            str(item.get("role") or ""),
+            str(item.get("func_type") or ""),
+            str(item.get("content") or "")[:128],
+        )
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        merged.append(item)
+    return merged
+
+
+def _load_history_for_share(owner_user_id: str, session_id: str) -> tuple[List[Dict[str, Any]], int]:
+    try:
+        total_count = _count_history_for_share(owner_user_id, session_id)
+        head_rows = _fetch_share_history_rows(
+            owner_user_id,
+            session_id,
+            limit=SHARE_SNAPSHOT_HEAD_MESSAGES,
+            desc=False,
+        )
+        if total_count <= SHARE_SNAPSHOT_HEAD_MESSAGES:
+            return head_rows, total_count or len(head_rows)
+
+        tail_rows = _fetch_share_history_rows(
+            owner_user_id,
+            session_id,
+            limit=SHARE_SNAPSHOT_TAIL_MESSAGES,
+            desc=True,
+        )
+        merged = _merge_share_history_rows(head_rows, tail_rows)
+        return merged, total_count or len(merged)
+    except Exception:
+        pass
+
+    rows = get_history_limited(str(owner_user_id), str(session_id), limit=SHARE_SNAPSHOT_TAIL_MESSAGES) or []
+    if rows:
+        return rows, len(rows)
+
+    rows = get_history(str(owner_user_id), str(session_id)) or []
+    return rows, len(rows)
 
 
 def create_share_link(user_id: str, session_id: str, title: Optional[str] = None, days: int = 7):
@@ -315,8 +404,8 @@ def create_share_link(user_id: str, session_id: str, title: Optional[str] = None
         if not owner_user_id or owner_user_id.lower() == "anonymous":
             owner_user_id = _infer_owner_user_id(str(session_id)) or owner_user_id or "anonymous"
 
-        raw_history = _load_history_for_share(owner_user_id, str(session_id))
-        snapshot_data = _build_snapshot(raw_history)
+        raw_history, total_history_count = _load_history_for_share(owner_user_id, str(session_id))
+        snapshot_data = _build_snapshot(raw_history, total_count=total_history_count)
 
         link_payload = {
             "session_id": str(session_id),

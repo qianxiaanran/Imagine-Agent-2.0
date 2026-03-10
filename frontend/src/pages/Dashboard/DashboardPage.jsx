@@ -139,6 +139,16 @@ const STANDALONE_PPT_CONTENT_FOCUS_OPTIONS = [
     ],
   },
 ];
+
+function useStableCallback(callback) {
+  const callbackRef = useRef(callback);
+
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
+
+  return useCallback((...args) => callbackRef.current?.(...args), []);
+}
 const STANDALONE_PPT_TOPIC_SUGGESTIONS = ["学术报告", "教学备课", "政策宣讲", "心得体会分享", "工作总结"];
 const STANDALONE_PPT_TOPIC_SUGGESTION_PROMPTS = {
   "学术报告": "PPT主题：\n研究对象：\n希望突出：研究背景、方法思路、核心结论",
@@ -531,7 +541,7 @@ const WRITING_FIELD_SUGGESTIONS = {
 const ONBOARDING_STORAGE_PREFIX = "onboarding_seen_v1_";
 const ONBOARDING_MESSAGES = [
   "顶部左侧的模式下拉可切换到报告/PPT/邮件写作、会议纪要、OCR、审单等场景。",
-  "左侧栏（手机点左上角菜单）有新建/搜索聊天和历史会话，知识库入口也在这里；输入框左侧“＋”用于上传文件并启用引用文档/数据库/联网。这是我首次完成这种类型的项目，目前可能还有诸多bug，如有建议请联系我，我会尽可能改正，感谢使用！"
+  "左侧栏（手机点左上角菜单）有新建/搜索聊天和历史会话，知识库入口也在这里；输入框左侧“＋”用于上传文件并启用知识库/数据库/联网。这是我首次完成这种类型的项目，目前可能还有诸多bug，如有建议请联系我，我会尽可能改正，感谢使用！"
 ];
 const MODEL_OPTIONS = [
   { id: 0, name: "通用助手", icon: Bot },
@@ -1376,6 +1386,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const chatEndRef = useRef(null);
   const chatScrollRef = useRef(null);
   const abortControllerRef = useRef(null); // ✨ 控制打断的 Ref
+  const activeChatRequestRef = useRef(null);
   const keyboardLockPrevRef = useRef({ body: null, html: null });
   const virtualKeyboardEnabledRef = useRef(false);
 
@@ -1745,22 +1756,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           streamDisplayRef.current += remaining;
       }
       flushStreamingUi(true);
-  };
-
-
-  const commitStreamToHistory = (finalTextOverride) => {
-    const finalText = finalTextOverride || streamingAssistantText || '';
-    if (!finalText) return;
-    setChatHistory((prev) => {
-        if (!prev.length) return prev;
-        const lastIndex = prev.length - 1;
-        const lastMsg = prev[lastIndex]; // Fix: Define lastMsg
-        // 如果已经是这个内容了，或者不是 assistant，就不更新
-        if (lastMsg.role !== 'assistant' || lastMsg.content === finalText) return prev;
-        const next = [...prev];
-        next[lastIndex] = { ...lastMsg, content: finalText };
-        return next;
-    });
   };
 
   const clearHistoryExpandTask = () => {
@@ -3185,7 +3180,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     }
   }, [models, selectedModel]);
 
-  const savePanelContext = async (sid, content, type = 'context_save') => {
+  const savePanelContext = useCallback(async (sid, content, type = 'context_save') => {
       if (!sid || !content) return;
       try {
           setIsSavingContext(true);
@@ -3195,9 +3190,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       } finally {
           setIsSavingContext(false);
       }
-  };
+  }, [userProfile.id]);
 
-  const saveSessionMeta = async (sid, modelId, mode, audioPath = null, backend = 'local') => {
+  const saveSessionMeta = useCallback(async (sid, modelId, mode, audioPath = null, backend = 'local') => {
     if (!sid) return;
     try {
         const metaObj = {
@@ -3214,7 +3209,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     } catch (e) {
         console.error("Failed to save session meta", e);
     }
-  };
+  }, [userProfile.id]);
 
   const ensureHistorySessionForCreative = () => {
       let sid = currentSessionId;
@@ -3597,12 +3592,74 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           }
 
           if (result.status >= 200 && result.status < 300) {
-              return result.data || {};
+              const initialData = result.data || {};
+              const taskId = initialData?.task_id;
+              if (!taskId) {
+                  return initialData;
+              }
+
+              updatePendingFile(wrapper.id, { status: 'processing', progress: 0 });
+              return await pollDocumentUploadTaskWithAuthRetry(taskId, (task) => {
+                  updatePendingFile(wrapper.id, {
+                      status: task?.status === 'failed' ? 'error' : 'processing',
+                      progress: Math.max(0, Math.min(100, Number(task?.progress) || 0)),
+                      error: task?.status === 'failed' ? (task?.error_message || '') : ''
+                  });
+              });
           }
 
           const message = result?.data?.detail || result?.data?.error || `Upload failed with status ${result.status}`;
           throw new Error(message);
       })();
+  };
+
+  const pollDocumentUploadTaskWithAuthRetry = async (taskId, onProgress) => {
+      const fetchOnce = async (authToken) => {
+          const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+          const response = await fetch(`${API_BASE_URL}/api/documents/upload/result/${taskId}`, {
+              method: 'GET',
+              headers
+          });
+          let data = null;
+          try {
+              data = await response.json();
+          } catch {
+              data = null;
+          }
+          return { response, data };
+      };
+
+      let token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const startedAt = Date.now();
+
+      while (true) {
+          let result = await fetchOnce(token);
+          if (result.response.status === 401) {
+              const refreshedToken = await refreshAccessTokenFromApiClient();
+              if (refreshedToken) {
+                  token = refreshedToken;
+                  result = await fetchOnce(token);
+              }
+          }
+
+          const data = result.data || {};
+          if (!result.response.ok && data?.status !== 'failed') {
+              const message = data?.detail || data?.error || `Task polling failed with status ${result.response.status}`;
+              throw new Error(message);
+          }
+
+          onProgress?.(data);
+
+          if (data?.status === 'completed' || data?.status === 'failed') {
+              return data;
+          }
+
+          if (Date.now() - startedAt > 15 * 60 * 1000) {
+              throw new Error('文档上传处理超时');
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
   };
 
   const uploadDocumentWithAuthRetry = async (formData) => {
@@ -3633,12 +3690,23 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           }
       }
 
+      if (result.response.ok && result.data?.task_id) {
+          const finalData = await pollDocumentUploadTaskWithAuthRetry(result.data.task_id);
+          return {
+              response: {
+                  ok: finalData?.status === 'completed',
+                  status: finalData?.status === 'failed' ? 500 : 200
+              },
+              data: finalData
+          };
+      }
+
       return result;
   };
 
   const parseUploadResult = (data) => {
       const okCount = Number(data?.ok ?? 0);
-      const status = data?.status;
+      const status = data?.result_status || data?.status;
       const isSuccess = (status === 'success' || status === 'partial') && okCount > 0;
       let error = data?.error || '';
 
@@ -3659,8 +3727,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (!wrappers.length) return;
       setIsUploadingFile(true);
 
-      let ragTriggered = false;
-
       try {
           for (const wrapper of wrappers) {
               try {
@@ -3673,7 +3739,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           uploaded: true,
                           previewText: data.previews || ''
                       });
-                      ragTriggered = true;
                   } else {
                       updatePendingFile(wrapper.id, {
                           status: 'error',
@@ -3691,9 +3756,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               }
           }
       } finally {
-          if (ragTriggered && currentMode !== 'rag') {
-              onModeChange('rag');
-          }
           setIsUploadingFile(false);
       }
   };
@@ -3733,11 +3795,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   }, [selectedModel]);
 
   const processFiles = async (filesToProcess) => {
-      if (!filesToProcess || filesToProcess.length === 0) return { context: "", success: true, ragTriggered: false };
+      if (!filesToProcess || filesToProcess.length === 0) return { context: "", success: true };
 
       let combinedContext = "";
       let hasError = false;
-      let ragTriggered = false;
       let ocrSessionId = null;
       let meetingAudioPath = null;
 
@@ -3929,11 +3990,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           if (data.previews) {
                              combinedContext += `[新上传文档摘要]\n${data.previews}\n\n`;
                           }
-
-                          if (currentMode !== 'rag') {
-                             onModeChange('rag');
-                          }
-                          ragTriggered = true;
                       } else {
                           console.error(`RAG Upload failed`, data);
                           alert(`文件 ${file.name} 上传失败: ${error || 'Upload failed'}`);
@@ -3953,7 +4009,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           setIsUploadingFile(false);
       }
 
-      return { context: combinedContext, success: !hasError, ragTriggered, sessionId: ocrSessionId, audioPath: meetingAudioPath };
+      return { context: combinedContext, success: !hasError, sessionId: ocrSessionId, audioPath: meetingAudioPath };
   };
 
   const handleFileSelect = async (e) => {
@@ -4114,15 +4170,38 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setPendingFiles(prev => prev.filter(f => f.id !== id));
   };
 
+  const restoreCancelledDraft = (requestState) => {
+      if (!requestState?.restoreOnCancel) return;
+      setInputValue(requestState.text || '');
+      setPendingFiles(Array.isArray(requestState.files) ? requestState.files : []);
+      if (typeof window !== 'undefined') {
+          window.requestAnimationFrame(() => {
+              const input = messageInputRef.current;
+              if (!input) return;
+              input.focus();
+              const cursor = String(requestState.text || '').length;
+              input.setSelectionRange(cursor, cursor);
+          });
+      }
+  };
+
   // ✨ 新增：停止生成功能
   const handleStopGeneration = () => {
+      const activeRequest = activeChatRequestRef.current;
+      if (activeRequest) {
+          activeRequest.cancelled = true;
+          activeChatRequestRef.current = null;
+          setChatHistory((prev) => prev.slice(0, Math.max(0, activeRequest.historyLengthBeforeSend || 0)));
+          restoreCancelledDraft(activeRequest);
+      }
       if (abortControllerRef.current) {
           abortControllerRef.current.abort();
           abortControllerRef.current = null;
       }
-      stopSmoothStream(); // 停止动画并刷新剩余内容
-      commitStreamToHistory(streamDisplayRef.current);
+      stopSmoothStream(); // 停止动画并清空当前流
       setStreamingAssistantText('');
+      streamBufferRef.current = '';
+      streamDisplayRef.current = "";
       setIsProcessing(false);
   };
 
@@ -4149,6 +4228,15 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         .filter(pf => pf.uploaded && pf.previewText)
         .map(pf => pf.previewText)
         .join('\n\n');
+    const requestState = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        cancelled: false,
+        historyLengthBeforeSend: chatHistory.length,
+        restoreOnCancel: !isHidden,
+        text: textToSend,
+        files: filesToDisplay,
+    };
+    activeChatRequestRef.current = requestState;
 
     if (!textOverride) {
         setInputValue('');
@@ -4194,7 +4282,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     // let currentText = ""; // 移除：使用 streamBufferRef 代替
 
     try {
-         const { context: fileContext, success, ragTriggered, sessionId: ocrSessionId, audioPath: meetingAudioPath } = await processFiles(filesToProcess);
+         const { context: fileContext, sessionId: ocrSessionId, audioPath: meetingAudioPath } = await processFiles(filesToProcess);
+         if (requestState.cancelled) return;
          if (isOCRMode && ocrSessionId && ocrSessionId !== currentSessionId) {
              setCurrentSessionId(ocrSessionId);
          }
@@ -4243,9 +4332,6 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
          if (token) headers['Authorization'] = `Bearer ${token}`;
 
          let effectiveMode = isAuditMode ? 'audit' : currentMode;
-         if (ragTriggered) {
-             effectiveMode = 'rag';
-         }
 
          const shouldIsolateRagContext = effectiveMode === 'rag' && attachedFileNames.length > 0;
          const isolatedRagContext = [fileContext, uploadedContext].filter(Boolean).join('\n\n');
@@ -4273,6 +4359,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             body: JSON.stringify(payload),
             signal: controller.signal
          });
+         if (requestState.cancelled) return;
 
          if (!response.ok) throw new Error("API Error");
          if (!response.body) throw new Error("No response body");
@@ -4284,7 +4371,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
          let buffer = "";
          let sessionAssigned = false;
          const processMainStreamLine = (line) => {
-            if (!line || !line.trim()) return;
+            if (requestState.cancelled || !line || !line.trim()) return;
             try {
                 const json = JSON.parse(line);
                 if (json.t === 'c') {
@@ -4322,10 +4409,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                         }
                     }
                 }
-            } catch (e) {}
+            } catch {
+                // Ignore malformed stream chunks and continue parsing subsequent lines.
+            }
          };
 
-         while (!done) {
+         while (!done && !requestState.cancelled) {
             const { value, done: doneReading } = await reader.read();
             done = doneReading;
             const chunkValue = decoder.decode(value, { stream: true });
@@ -4337,6 +4426,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                 processMainStreamLine(line);
             }
          }
+         if (requestState.cancelled) return;
 
          // 处理 decoder/缓冲区尾包，避免最后一段无换行时被丢弃
          const tailChunk = decoder.decode();
@@ -4346,7 +4436,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
              tailLines.forEach(processMainStreamLine);
          }
     } catch (e) {
-      if (e.name === 'AbortError') {
+      if (requestState.cancelled || e.name === 'AbortError') {
           console.log('Generation stopped by user');
       } else {
           // 出错时重置动画状态
@@ -4359,62 +4449,67 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           });
       }
     } finally {
-      // ✨ 停止动画
-      stopSmoothStream();
+      if (!requestState.cancelled) {
+        // ✨ 停止动画
+        stopSmoothStream();
 
-      // ⚠️ 关键修复：确保状态更新的顺序，避免闪烁和“变回加载动画”
+        // ⚠️ 关键修复：确保状态更新的顺序，避免闪烁和“变回加载动画”
 
-      // 修复开始：在清除引用之前捕获本地值
-      const finalContent = streamDisplayRef.current;
-      const resolvedFinalContent =
-        (!finalContent || !finalContent.trim()) && shouldPostProcessReply
-          ? '未收到模型返回内容，请重试；如在引用文档模式，建议减少上下文长度或切换云端模型。'
-          : finalContent;
-      // 固定结束
+        // 修复开始：在清除引用之前捕获本地值
+        const finalContent = streamDisplayRef.current;
+        const resolvedFinalContent =
+          (!finalContent || !finalContent.trim()) && shouldPostProcessReply
+            ? '未收到模型返回内容，请重试；如在知识库模式，建议减少上下文长度或切换云端模型。'
+            : finalContent;
+        // 固定结束
 
-      // 1. 先同步更新历史记录 - 保证 UI 有内容可读
-      setChatHistory(prev => {
-        if (!prev.length) return prev;
-        const lastIndex = prev.length - 1;
-        // 如果已经是这个内容了，直接返回
-        if (prev[lastIndex].content === resolvedFinalContent) return prev; // Use local variable
-        const next = [...prev];
-        next[lastIndex] = { ...next[lastIndex], content: resolvedFinalContent }; // Use local variable
-        return next;
-      });
+        // 1. 先同步更新历史记录 - 保证 UI 有内容可读
+        setChatHistory(prev => {
+          if (!prev.length) return prev;
+          const lastIndex = prev.length - 1;
+          // 如果已经是这个内容了，直接返回
+          if (prev[lastIndex].content === resolvedFinalContent) return prev; // Use local variable
+          const next = [...prev];
+          next[lastIndex] = { ...next[lastIndex], content: resolvedFinalContent }; // Use local variable
+          return next;
+        });
 
-      // 2. 关闭处理状态
-      setIsProcessing(false);
+        // 2. 关闭处理状态
+        setIsProcessing(false);
 
-      // 3. 最后清除流式缓冲
-      setStreamingAssistantText('');
-      streamBufferRef.current = '';
-      streamDisplayRef.current = "";
+        // 3. 最后清除流式缓冲
+        setStreamingAssistantText('');
+        streamBufferRef.current = '';
+        streamDisplayRef.current = "";
 
-      if (shouldPostProcessReply && resolvedFinalContent && resolvedFinalContent.trim()) {
-        if (
-          appSettings.desktopNotifications &&
-          typeof window !== 'undefined' &&
-          'Notification' in window &&
-          Notification.permission === 'granted' &&
-          document.hidden
-        ) {
-          try {
-            // eslint-disable-next-line no-new
-            new Notification('助手回复完成', {
-              body: resolvedFinalContent.slice(0, 120),
-            });
-          } catch {
-            // 忽略
+        if (shouldPostProcessReply && resolvedFinalContent && resolvedFinalContent.trim()) {
+          if (
+            appSettings.desktopNotifications &&
+            typeof window !== 'undefined' &&
+            'Notification' in window &&
+            Notification.permission === 'granted' &&
+            document.hidden
+          ) {
+            try {
+              // eslint-disable-next-line no-new
+              new Notification('助手回复完成', {
+                body: resolvedFinalContent.slice(0, 120),
+              });
+            } catch {
+              // 忽略
+            }
           }
-        }
-        if (appSettings.autoReadReplies) {
-          setSpeakingIdx(null);
-          speakTextWithSettings(finalContent);
+          if (appSettings.autoReadReplies) {
+            setSpeakingIdx(null);
+            speakTextWithSettings(finalContent);
+          }
         }
       }
 
-      abortControllerRef.current = null;
+      if (activeChatRequestRef.current?.id === requestState.id) {
+        activeChatRequestRef.current = null;
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -4519,6 +4614,15 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
       setOcrIngestModal({ isOpen: true, content });
   };
+
+  const resetAuditStateStable = useStableCallback(resetAuditState);
+  const handleAuditFileSelectStable = useStableCallback(handleAuditFileSelect);
+  const handleAuditErpActionStable = useStableCallback(handleAuditErpAction);
+  const handleMeetingUploadClickStable = useStableCallback(handleMeetingUploadClick);
+  const handleManualSaveStable = useStableCallback(handleManualSave);
+  const handleExportWordStable = useStableCallback(handleExportWord);
+  const handleGenerateSummaryStable = useStableCallback(handleGenerateSummary);
+  const handleOcrStoreStable = useStableCallback(handleOcrStore);
 
   const handleSubmitReportForm = () => {
       const listOrNone = (items) => (Array.isArray(items) && items.length ? items.join('、') : '无');
@@ -7264,12 +7368,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return renderWritingEntryHub();
   };
 
-  const getPanelStyles = () => {
+  const panelStyle = useMemo(() => {
       if (isMeetingMode) return { border: 'border-gray-200 dark:border-gray-800', headerBg: 'bg-gray-50/80 dark:bg-gray-900/60', headerText: 'text-gray-800 dark:text-gray-200', btnBg: 'bg-gray-900 hover:bg-black', textareaBg: 'bg-white/60 dark:bg-gray-900/60' };
       if (isAuditMode) return { border: 'border-teal-100 dark:border-teal-900/50', headerBg: 'bg-teal-50/50 dark:bg-teal-900/20', headerText: 'text-teal-800 dark:text-teal-300', btnBg: 'bg-teal-600 hover:bg-teal-700', textareaBg: 'bg-white/50 dark:bg-gray-900/50' };
       return { border: 'border-orange-100 dark:border-orange-900/50', headerBg: 'bg-orange-50/50 dark:bg-orange-900/20', headerText: 'text-orange-800 dark:text-orange-300', btnBg: 'bg-orange-600 hover:bg-orange-700', textareaBg: 'bg-white/50 dark:bg-gray-900/50' };
-  };
-  const panelStyle = getPanelStyles();
+  }, [isMeetingMode, isAuditMode]);
   const showEmptyState = chatHistory.length === 0 && !showContentPanel && !panelContent && !isUploadingFile && pendingFiles.length === 0;
   const greetingName = userProfile?.name && userProfile.name !== 'User' ? userProfile.name : '';
   const greetingText = greetingName ? `${greetingName}，你好` : '你好';
@@ -8251,10 +8354,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           isProcessing={isProcessing}
                           isOcrSaving={isOcrSaving}
                           isSavingContext={isSavingContext}
-                          handleManualSave={handleManualSave}
-                          handleExportWord={handleExportWord}
-                          handleGenerateSummary={handleGenerateSummary}
-                          onOcrStore={handleOcrStore}
+                          handleManualSave={handleManualSaveStable}
+                          handleExportWord={handleExportWordStable}
+                          handleGenerateSummary={handleGenerateSummaryStable}
+                          onOcrStore={handleOcrStoreStable}
                           ocrEngine={ocrEngine}
                           onOcrEngineChange={setOcrEngine}
                           auditState={auditState}
@@ -8265,12 +8368,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           auditNotice={auditNotice}
                           onAuditDocTypeChange={setAuditDocType}
                           onAuditModelBackendChange={setAuditModelBackend}
-                          onAuditFileSelect={handleAuditFileSelect}
-                          onAuditReset={resetAuditState}
-                          onAuditErpAction={handleAuditErpAction}
+                          onAuditFileSelect={handleAuditFileSelectStable}
+                          onAuditReset={resetAuditStateStable}
+                          onAuditErpAction={handleAuditErpActionStable}
                           isAuditErpActionLoading={isAuditErpActionLoading}
                           fullWidth={isAuditSinglePane}
-                          onMeetingUploadClick={handleMeetingUploadClick}
+                          onMeetingUploadClick={handleMeetingUploadClickStable}
                       />
                   </Suspense>
               )}
@@ -8488,7 +8591,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                             {isRAGMode && !showContentPanel && (
                                 <div className="mb-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
                                     <div className="inline-flex items-center gap-2 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-3 py-1.5 rounded-lg text-xs font-medium border border-blue-100 dark:border-blue-800 shadow-sm">
-                                        <BookOpen size={14} className="text-blue-600 dark:text-blue-400" /> <span>引用文档模式已开启</span>
+                                        <BookOpen size={14} className="text-blue-600 dark:text-blue-400" /> <span>知识库模式已开启</span>
                                         <div className="w-px h-3 bg-blue-200 dark:bg-blue-700 mx-1"></div>
                                         <button onClick={() => onModeChange('general')} className="hover:text-blue-900 dark:hover:text-blue-100 hover:bg-blue-100 dark:hover:bg-blue-800 rounded p-0.5 transition-colors" title="切换回通用问答"><X size={12} /></button>
                                     </div>
@@ -8618,7 +8721,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                                         {isRAGMode ? <BookOpen size={16} fill="currentColor" /> : <BookOpen size={16} />}
                                                     </div>
                                                     <div className="flex-1 flex items-center justify-between">
-                                                        引用文档
+                                                        知识库模式
                                                         {isRAGMode && <span className="text-[10px] bg-blue-100 dark:bg-blue-900 text-blue-600 px-1.5 py-0.5 rounded-full">开启</span>}
                                                     </div>
                                                 </button>

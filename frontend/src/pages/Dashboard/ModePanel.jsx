@@ -823,7 +823,7 @@ const AuditPanel = ({
   );
 };
 
-const ModePanel = ({
+const ModePanelComponent = ({
   panelStyle,
   isMeetingMode,
   isOCRMode,
@@ -1264,4 +1264,11 @@ const ModePanel = ({
     </div>
   );
 };
+
+ModePanelComponent.displayName = 'ModePanel';
+
+const ModePanel = React.memo(ModePanelComponent);
+
+ModePanel.displayName = 'ModePanel';
+
 export default ModePanel;
