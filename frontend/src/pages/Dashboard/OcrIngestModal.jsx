@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { X, Loader2, AlertTriangle, FileText, CheckCircle2 } from 'lucide-react';
-import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/apiClient';
+import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/config';
 
 const OcrIngestModal = ({ isOpen, onClose, content, userId, sessionId, llmBackend }) => {
   const [loading, setLoading] = useState(false);

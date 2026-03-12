@@ -3,7 +3,11 @@ import ThemeProvider from './context/ThemeContext';
 import GlobalStyles from './components/GlobalStyles';
 import LoadingScreen from './components/LoadingScreen';
 import ErrorBoundary from './components/ErrorBoundary';
-import { AUTH_TOKEN_KEY, AUTH_REFRESH_TOKEN_KEY } from './api/apiClient';
+import {
+  AUTH_REFRESH_TOKEN_KEY,
+  AUTH_REMEMBER_UNTIL_KEY,
+  AUTH_TOKEN_KEY,
+} from './api/config';
 
 const loadLandingPage = () => import('./pages/LandingPage');
 const loadCapabilitiesPage = () => import('./pages/CapabilitiesPage');
@@ -24,6 +28,14 @@ const SharedChatPage = React.lazy(loadSharedPage);
 const AdminPage = React.lazy(loadAdminPage);
 const LoginModal = React.lazy(loadLoginModal);
 const RegisterModal = React.lazy(loadRegisterModal);
+
+let loginModalWarmPromise;
+const warmLoginModal = () => {
+  if (!loginModalWarmPromise) {
+    loginModalWarmPromise = loadLoginModal();
+  }
+  return loginModalWarmPromise;
+};
 
 let supabaseClientPromise;
 const getSupabaseClient = async () => {
@@ -47,8 +59,6 @@ export default function App() {
   const [currentMode, setCurrentMode] = useState('general');
   const [isAuthReady, setIsAuthReady] = useState(false);
 
-  const REMEMBER_UNTIL_KEY = 'app_auth_remember_until';
-
   const normalizedPath = (window.location.pathname || '/').replace(/\/+$/, '') || '/';
   const isShareRoute = normalizedPath.startsWith('/share/');
   const isAdminRoute = normalizedPath.startsWith('/admin');
@@ -56,7 +66,7 @@ export default function App() {
   const isCapabilitiesRoute = normalizedPath === '/capabilities';
   const isQuickStartRoute = normalizedPath === '/quickstart';
   const shouldShowLoading = !isAuthReady;
-  const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
+  const rememberUntil = Number(localStorage.getItem(AUTH_REMEMBER_UNTIL_KEY) || 0);
   const hasStoredAuthHint = rememberUntil > 0 || !!localStorage.getItem(AUTH_TOKEN_KEY);
   const shouldInitializeAuthClient =
     !isShareRoute && (isAuthenticated || isAdminRoute || isDecisionRoute || hasStoredAuthHint);
@@ -74,14 +84,14 @@ export default function App() {
       if (isDisposed) return;
 
       const { data } = supabase.auth.onAuthStateChange((event, session) => {
-        const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
+        const rememberUntil = Number(localStorage.getItem(AUTH_REMEMBER_UNTIL_KEY) || 0);
         if (!rememberUntil) return;
         const localToken = String(localStorage.getItem(AUTH_TOKEN_KEY) || '');
         const isSmsSessionToken = localToken.startsWith('sms-token-');
 
         if (rememberUntil <= Date.now()) {
           void supabase.auth.signOut();
-          localStorage.removeItem(REMEMBER_UNTIL_KEY);
+          localStorage.removeItem(AUTH_REMEMBER_UNTIL_KEY);
           localStorage.removeItem(AUTH_TOKEN_KEY);
           localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
           setIsAuthenticated(false);
@@ -104,7 +114,7 @@ export default function App() {
         if (event === 'SIGNED_OUT') {
           localStorage.removeItem(AUTH_TOKEN_KEY);
           localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
-          localStorage.removeItem(REMEMBER_UNTIL_KEY);
+          localStorage.removeItem(AUTH_REMEMBER_UNTIL_KEY);
           setIsAuthenticated(false);
         }
       });
@@ -167,7 +177,7 @@ export default function App() {
           const supabase = await getSupabaseClient();
           if (rememberUntil <= Date.now()) {
             await supabase.auth.signOut();
-            localStorage.removeItem(REMEMBER_UNTIL_KEY);
+            localStorage.removeItem(AUTH_REMEMBER_UNTIL_KEY);
             localStorage.removeItem(AUTH_TOKEN_KEY);
             localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
           } else {
@@ -238,6 +248,19 @@ export default function App() {
   }, [shouldShowLoading]);
 
   useEffect(() => {
+    if (authModalView === 'closed') {
+      return undefined;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.body.style.overflow = previousOverflow || 'unset';
+    };
+  }, [authModalView]);
+
+  useEffect(() => {
     const updateAppHeight = () => {
       const height = window.innerHeight || document.documentElement.clientHeight;
       document.documentElement.style.setProperty('--app-height', `${height}px`);
@@ -253,8 +276,38 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!isAuthReady || isAuthenticated || isShareRoute || isAdminRoute || isDecisionRoute) {
+      return undefined;
+    }
+
+    let timeoutId = null;
+    let idleId = null;
+    let cancelled = false;
+
+    const warm = () => {
+      if (!cancelled) {
+        void warmLoginModal();
+      }
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(warm, { timeout: 1500 });
+    } else {
+      timeoutId = window.setTimeout(warm, 900);
+    }
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+      if (idleId && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [isAuthReady, isAuthenticated, isShareRoute, isAdminRoute, isDecisionRoute]);
+
   const openLoginModal = () => {
-    loadLoginModal();
+    void warmLoginModal();
     setAuthModalView('login');
   };
 
@@ -278,7 +331,7 @@ export default function App() {
   const handleLogout = () => {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
-    localStorage.removeItem(REMEMBER_UNTIL_KEY);
+    localStorage.removeItem(AUTH_REMEMBER_UNTIL_KEY);
     void getSupabaseClient().then((supabase) => supabase.auth.signOut());
     setIsAuthenticated(false);
     setCurrentMode('general');

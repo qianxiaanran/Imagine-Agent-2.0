@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { X, Lock, CheckCircle, AlertCircle, Loader2, KeyRound } from 'lucide-react';
-import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/apiClient';
+import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/config';
 
 const ChangePasswordModal = ({ isOpen, onClose }) => {
   const [oldPassword, setOldPassword] = useState(''); // ✨ 新增原密码状态

@@ -5,13 +5,72 @@ import tailwindcss from "@tailwindcss/vite";
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
-const resolveManualChunk = (id) => {
-  if (!id.includes("node_modules")) return undefined;
+const includesAny = (id, patterns) => patterns.some((pattern) => id.includes(pattern));
+
+const resolveManualChunk = (rawId) => {
+  const id = rawId.replace(/\\/g, "/");
+
+  if (includesAny(id, [
+    "/src/components/Button.jsx",
+    "/src/hooks/useReveal.js",
+  ])) {
+    return "route-public-shared";
+  }
+
+  if (includesAny(id, [
+    "/src/pages/Login/AuthHoverButton.jsx",
+    "/src/pages/Login/AuthModalShared.jsx",
+    "/src/pages/Login/AnimatedLoginCharacters.jsx",
+  ])) {
+    return "route-auth-shared";
+  }
+
+  if (includesAny(id, [
+    "/src/pages/Dashboard/WritingEntryHub.jsx",
+    "/src/pages/Dashboard/StandalonePptWidgets.jsx",
+  ])) {
+    return "route-dashboard-widgets";
+  }
+
+  if (id.includes("/src/pages/Admin/AuditAdminWorkspace.jsx")) {
+    return "route-admin-audit";
+  }
+
+  if (!id.includes("/node_modules/")) return undefined;
+
+  if (includesAny(id, ["/react-dom/", "/react/", "/scheduler/"])) {
+    return "react-core";
+  }
+
+  if (id.includes("@supabase")) {
+    return "supabase-sdk";
+  }
+
   if (id.includes("mermaid")) return "mermaid";
   if (
     id.includes("react-syntax-highlighter")
   ) {
     return "code-highlight";
+  }
+  if (
+    includesAny(id, [
+      "react-markdown",
+      "remark-gfm",
+      "remark-parse",
+      "remark-rehype",
+      "micromark",
+      "mdast-util-",
+      "hast-util-",
+      "unist-util-",
+      "vfile",
+      "bail",
+      "property-information",
+      "decode-named-character-reference",
+      "space-separated-tokens",
+      "comma-separated-tokens",
+    ])
+  ) {
+    return "markdown-core";
   }
   if (
     id.includes("remark-math")

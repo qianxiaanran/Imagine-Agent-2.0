@@ -1,85 +1,21 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Eye, EyeOff, MessageCircle, X } from 'lucide-react';
+import { ArrowLeft, Eye, EyeOff, MessageCircle } from 'lucide-react';
 import authApi from '../../api/auth';
-import { AUTH_REFRESH_TOKEN_KEY, AUTH_TOKEN_KEY } from '../../api/apiClient';
+import {
+  AUTH_REFRESH_TOKEN_KEY,
+  AUTH_REMEMBER_UNTIL_KEY,
+  AUTH_TOKEN_KEY,
+} from '../../api/config';
 import { supabase } from '../../api/supabaseClient';
-import AnimatedLoginCharacters from './AnimatedLoginCharacters';
 import AuthHoverButton from './AuthHoverButton';
-
-const fieldClassName = 'w-full rounded-2xl border border-slate-200/80 bg-white/90 px-4 py-3 text-[15px] text-slate-900 outline-none transition-all placeholder:text-slate-400 focus:border-slate-400 focus:ring-4 focus:ring-slate-200/50 dark:border-slate-700 dark:bg-slate-900/90 dark:text-white dark:placeholder:text-slate-500 dark:focus:border-slate-500 dark:focus:ring-slate-800/70';
-const secondaryButtonClassName = 'w-full rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition-all hover:-translate-y-0.5 hover:border-slate-400 hover:text-slate-900 hover:shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-500 dark:hover:text-white';
-const smallActionClassName = 'inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors';
-
-const Field = ({
-  type = 'text',
-  value,
-  onChange,
-  placeholder,
-  disabled = false,
-  trailing = null,
-  onFocus,
-  onBlur,
-  className = '',
-  wrapperClassName = '',
-}) => (
-  <div className={`relative ${wrapperClassName}`.trim()}>
-    <input
-      type={type}
-      value={value}
-      disabled={disabled}
-      placeholder={placeholder}
-      onChange={onChange}
-      onFocus={onFocus}
-      onBlur={onBlur}
-      className={`${fieldClassName} ${trailing ? 'pr-12' : ''} ${disabled ? 'cursor-not-allowed text-slate-500 dark:text-slate-400' : ''} ${className}`.trim()}
-    />
-    {trailing && <div className="absolute right-4 top-1/2 -translate-y-1/2">{trailing}</div>}
-  </div>
-);
-
-const SectionHeader = ({ eyebrow, title, description, backAction = null }) => (
-  <div className="mb-9">
-    {backAction}
-    <div className="text-[11px] font-semibold uppercase tracking-[0.26em] text-slate-400 dark:text-slate-500">
-      {eyebrow}
-    </div>
-    <h1 className="mt-3 text-3xl font-black tracking-tight text-slate-900 dark:text-white">{title}</h1>
-    <p className="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">{description}</p>
-  </div>
-);
-
-const InfoDialog = ({ open, onClose, title, children }) => {
-  if (!open) return null;
-
-  return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose}></div>
-      <div className="relative w-full max-w-sm rounded-[28px] border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-700 dark:bg-slate-900">
-        <div className="mb-3 flex items-start justify-between gap-3">
-          <h3 className="text-base font-semibold text-slate-900 dark:text-white">{title}</h3>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-slate-400 transition-colors hover:text-slate-700 dark:hover:text-slate-200"
-            aria-label="关闭"
-          >
-            ×
-          </button>
-        </div>
-        <div className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">{children}</div>
-        <div className="mt-5 flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
-          >
-            我知道了
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
+import {
+  AuthModalShell,
+  Field,
+  InfoDialog,
+  SectionHeader,
+  secondaryButtonClassName,
+  smallActionClassName,
+} from './AuthModalShared';
 
 const RememberChip = ({ active, onToggle }) => (
   <button
@@ -97,7 +33,6 @@ const RememberChip = ({ active, onToggle }) => (
 );
 
 const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => {
-  const REMEMBER_UNTIL_KEY = 'app_auth_remember_until';
   const REMEMBER_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
   const [view, setView] = useState('password');
@@ -140,7 +75,6 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
 
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside);
-      document.body.style.overflow = 'hidden';
       setView('password');
       setFormData({ account: '', password: '', code: '' });
       setError('');
@@ -154,7 +88,6 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      document.body.style.overflow = 'unset';
     };
   }, [isOpen, onClose]);
 
@@ -190,7 +123,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
 
       if (rememberLogin) {
         const rememberUntil = Date.now() + REMEMBER_WINDOW_MS;
-        localStorage.setItem(REMEMBER_UNTIL_KEY, String(rememberUntil));
+        localStorage.setItem(AUTH_REMEMBER_UNTIL_KEY, String(rememberUntil));
 
         if (result.refresh_token) {
           try {
@@ -203,10 +136,10 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
             console.warn('Remember login setSession failed:', e);
           }
         } else {
-          localStorage.removeItem(REMEMBER_UNTIL_KEY);
+          localStorage.removeItem(AUTH_REMEMBER_UNTIL_KEY);
         }
       } else {
-        localStorage.removeItem(REMEMBER_UNTIL_KEY);
+        localStorage.removeItem(AUTH_REMEMBER_UNTIL_KEY);
         localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
         void supabase.auth.signOut().catch((e) => console.warn('Supabase signOut failed:', e));
       }
@@ -299,9 +232,9 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
       if (result.token) localStorage.setItem(AUTH_TOKEN_KEY, result.token);
       localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
       if (rememberLogin) {
-        localStorage.setItem(REMEMBER_UNTIL_KEY, String(Date.now() + REMEMBER_WINDOW_MS));
+        localStorage.setItem(AUTH_REMEMBER_UNTIL_KEY, String(Date.now() + REMEMBER_WINDOW_MS));
       } else {
-        localStorage.removeItem(REMEMBER_UNTIL_KEY);
+        localStorage.removeItem(AUTH_REMEMBER_UNTIL_KEY);
       }
       onLoginSuccess();
     } catch (err) {
@@ -535,69 +468,24 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 md:p-6 animate-in fade-in duration-200">
-      <div className="absolute inset-0 bg-black/55 backdrop-blur-md" />
-      <div ref={modalRef} className="relative grid max-h-[92vh] w-full max-w-[1120px] overflow-hidden rounded-[32px] border border-white/50 bg-white shadow-[0_30px_120px_rgba(15,23,42,0.24)] animate-in zoom-in-95 duration-200 dark:border-slate-800 dark:bg-slate-950 lg:grid-cols-[1.04fr_0.96fr]">
-        <div className="relative hidden overflow-hidden bg-gradient-to-br from-slate-400 via-slate-500 to-slate-600 px-10 py-10 text-white dark:from-slate-200 dark:via-white dark:to-slate-200 dark:text-slate-900 lg:flex lg:flex-col lg:justify-between">
-          <div className="relative z-10">
-            <div className="inline-flex items-center gap-3 rounded-full border border-white/20 bg-white/10 px-4 py-2 text-sm font-semibold backdrop-blur-md dark:border-slate-900/10 dark:bg-slate-900/10">
-              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/20 dark:bg-slate-900/10">
-                <span className="h-5 w-5 rounded-full bg-white shadow-[0_0_24px_rgba(255,255,255,0.45)] dark:bg-slate-900 dark:shadow-[0_0_24px_rgba(15,23,42,0.18)]" />
-              </span>
-              imagine Agent 2.0
-            </div>
-            <div className="mt-10 max-w-md">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.28em] text-white/70 dark:text-slate-700">Smart Office Copilot</div>
-              <h2 className="mt-4 text-4xl font-black leading-tight">延续 CareerCompass 的登录氛围，同时保留你现在的登录流程。</h2>
-              <p className="mt-4 text-sm leading-7 text-white/78 dark:text-slate-700">左侧是动态角色和渐变氛围，右侧依然是你的账号密码、验证码登录和找回密码逻辑，只替换展示层。</p>
-            </div>
-          </div>
-          <div className="relative z-10 flex flex-1 items-end justify-center">
-            <AnimatedLoginCharacters isTyping={isTyping} showPassword={showPassword} passwordLength={formData.password.length} />
-          </div>
-          <div className="relative z-10 flex items-center gap-6 text-sm text-white/70 dark:text-slate-700">
-            <button type="button" onClick={handleOpenLegalTip} className="hover:text-white dark:hover:text-slate-900">Privacy Policy</button>
-            <button type="button" onClick={handleOpenLegalTip} className="hover:text-white dark:hover:text-slate-900">Terms of Service</button>
-          </div>
-          <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] bg-[size:22px_22px] opacity-70 dark:opacity-30" />
-          <div className="absolute right-12 top-20 h-56 w-56 rounded-full bg-white/15 blur-3xl dark:bg-white/35" />
-          <div className="absolute bottom-10 left-10 h-72 w-72 rounded-full bg-white/12 blur-3xl dark:bg-slate-300/30" />
-        </div>
+    <AuthModalShell
+      modalRef={modalRef}
+      onClose={onClose}
+      closeLabel="关闭登录弹窗"
+      isTyping={isTyping}
+      showPassword={showPassword}
+      passwordLength={formData.password.length}
+    >
+      {renderCurrentView()}
+      {view !== 'forgot_password' && commonFooter}
 
-        <div className="relative flex min-h-0 flex-col bg-white/95 dark:bg-slate-950/95">
-          <button
-            type="button"
-            onClick={onClose}
-            className="absolute right-5 top-5 z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white/85 text-slate-500 hover:text-slate-900 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-400 dark:hover:text-white"
-            aria-label="关闭登录弹窗"
-          >
-            <X size={18} />
-          </button>
-
-          <div className="flex-1 overflow-y-auto px-6 py-8 sm:px-10 sm:py-10">
-            <div className="mx-auto w-full max-w-[430px]">
-              <div className="mb-10 lg:hidden">
-                <div className="inline-flex items-center gap-3 rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-900 dark:border-slate-800 dark:bg-slate-900 dark:text-white">
-                  <span className="flex h-9 w-9 items-center justify-center rounded-2xl bg-slate-900 text-white dark:bg-white dark:text-slate-900">
-                    <span className="h-4 w-4 rounded-full bg-current" />
-                  </span>
-                  imagine Agent 2.0
-                </div>
-              </div>
-              {renderCurrentView()}
-              {view !== 'forgot_password' && commonFooter}
-            </div>
-          </div>
-
-          <InfoDialog open={isWeChatTipOpen} onClose={() => setIsWeChatTipOpen(false)} title="微信登录说明">
-            本来想做微信登录的，后期发现开发者认证太麻烦就没做嘿嘿，请使用手机号+验证码或账号密码登录。
-          </InfoDialog>
-          <InfoDialog open={isLegalTipOpen} onClose={() => setIsLegalTipOpen(false)} title="协议占位提示">
-            暂时还没想好，只是占个位嘿嘿
-          </InfoDialog>
-        </div>
-      </div>
-    </div>
+      <InfoDialog open={isWeChatTipOpen} onClose={() => setIsWeChatTipOpen(false)} title="微信登录说明">
+        本来想做微信登录的，后期发现开发者认证太麻烦就没做嘿嘿，请使用手机号+验证码或账号密码登录。
+      </InfoDialog>
+      <InfoDialog open={isLegalTipOpen} onClose={() => setIsLegalTipOpen(false)} title="协议占位提示">
+        暂时还没想好，只是占个位嘿嘿
+      </InfoDialog>
+    </AuthModalShell>
   );
 };
 

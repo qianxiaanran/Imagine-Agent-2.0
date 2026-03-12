@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { ArrowLeft, FileUp, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import adminApi from "../../api/admin";
 import userApi from "../../api/user";
 import presentationApi from "../../api/presentation";
-import AuditAdminWorkspace from "./AuditAdminWorkspace";
+
+const AuditAdminWorkspace = lazy(() => import("./AuditAdminWorkspace"));
 
 const tabs = [
   { key: "users", label: "用户与权限" },
@@ -39,6 +40,12 @@ const AdminTableSkeleton = ({ columns = 5, rows = 6 }) => (
         ))}
       </div>
     ))}
+  </div>
+);
+
+const AdminPanelFallback = ({ text = "加载中..." }) => (
+  <div className="rounded-2xl border border-dashed border-gray-200 bg-white/80 px-6 py-16 text-center text-sm text-gray-500 dark:border-slate-700 dark:bg-slate-900/70 dark:text-gray-400">
+    {text}
   </div>
 );
 
@@ -129,7 +136,11 @@ const AdminPage = () => {
         </div>
 
         {activeTab === "users" && <UsersTab currentUserId={profile?.id} />}
-        {activeTab === "audit" && <AuditAdminWorkspace />}
+        {activeTab === "audit" && (
+          <Suspense fallback={<AdminPanelFallback text="正在加载审单后台..." />}>
+            <AuditAdminWorkspace />
+          </Suspense>
+        )}
         {activeTab === "rules" && <RulesTab />}
         {activeTab === "kb" && <KbTab />}
         {activeTab === "templates" && <TemplatesTab />}

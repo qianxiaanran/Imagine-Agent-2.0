@@ -1,4 +1,4 @@
-import { API_BASE_URL, AUTH_TOKEN_KEY } from './apiClient';
+import { API_BASE_URL, AUTH_TOKEN_KEY } from './config';
 
 const chatApi = {
   // 修改为直接使用 fetch 以支持流式响应 (Streaming)

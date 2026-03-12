@@ -33,6 +33,7 @@ import {
   normalizeAppSettings,
   buildChatPersonalizationPayload
 } from '../../utils/appSettings';
+import LoadingScreen from '../../components/LoadingScreen';
 
 const SettingsModal = lazy(() => import('../../components/SettingsModal'));
 const VoiceRecorder = lazy(() => import('../../components/VoiceRecorder'));
@@ -1246,6 +1247,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const newChatHandlerRef = useRef(null);
   const hasHandledInitialRouteRef = useRef(false);
   const isApplyingRouteSessionRef = useRef(false);
+  const initialRouteSessionIdRef = useRef(
+    typeof window !== 'undefined' ? extractConversationSessionId(window.location.pathname) : null
+  );
+  const [isInitialRouteLoading, setIsInitialRouteLoading] = useState(() => Boolean(initialRouteSessionIdRef.current));
 
   const dropdownRef = useRef(null);
   const mobileDropdownRef = useRef(null);
@@ -2989,17 +2994,38 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     if (hasHandledInitialRouteRef.current) return;
     if (isProfileLoading || isSessionsLoading) return;
     const uid = userProfile?.id;
-    if (!uid || uid === 'anonymous') return;
+    if (!uid || uid === 'anonymous') {
+      hasHandledInitialRouteRef.current = true;
+      setIsInitialRouteLoading(false);
+      return;
+    }
 
     hasHandledInitialRouteRef.current = true;
-    const routeSessionId = extractConversationSessionId(window.location.pathname);
+    const routeSessionId = initialRouteSessionIdRef.current || extractConversationSessionId(window.location.pathname);
     if (!routeSessionId || routeSessionId === currentSessionId) return;
 
     isApplyingRouteSessionRef.current = true;
     Promise.resolve(sessionClickHandlerRef.current?.(routeSessionId)).finally(() => {
       isApplyingRouteSessionRef.current = false;
+      setIsInitialRouteLoading(false);
     });
-  }, [isProfileLoading, isSessionsLoading, userProfile?.id, currentSessionId]);
+  }, [isInitialRouteLoading, isProfileLoading, isSessionsLoading, userProfile?.id, currentSessionId]);
+
+  useEffect(() => {
+    if (!isInitialRouteLoading) return;
+    if (typeof window === 'undefined') {
+      setIsInitialRouteLoading(false);
+      return;
+    }
+    const routeSessionId = initialRouteSessionIdRef.current;
+    if (!routeSessionId) {
+      setIsInitialRouteLoading(false);
+      return;
+    }
+    if (currentSessionId && currentSessionId === routeSessionId) {
+      setIsInitialRouteLoading(false);
+    }
+  }, [isInitialRouteLoading, isProfileLoading, isSessionsLoading, userProfile?.id, currentSessionId]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -3082,6 +3108,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         console.error("Failed to save session meta", e);
     }
   }, [userProfile.id]);
+
+  const createClientSessionId = () => (
+      crypto.randomUUID ? crypto.randomUUID() : `sid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  );
 
   const ensureHistorySessionForCreative = useCallback(() => {
       let sid = currentSessionId;
@@ -3373,15 +3403,22 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   // -------------------------------------------------------------------------
   // 🚀 文件上传和处理逻辑
   // -------------------------------------------------------------------------
-  const applyFileContext = async (context, audioPathOverride = null) => {
+  const applyFileContext = async (context, audioPathOverride = null, options = {}) => {
       if (!context) return;
 
-      const newContent = (panelContent ? panelContent + '\n\n' : '') + context;
+      const replaceExisting = options?.replaceExisting === true;
+      const forcedSessionId = String(options?.sessionIdOverride || '').trim();
+      const baseContent = replaceExisting ? '' : panelContent;
+      const newContent = (baseContent ? baseContent + '\n\n' : '') + context;
       setPanelContent(newContent);
 
-      let targetSessionId = currentSessionId;
+      let targetSessionId = forcedSessionId || currentSessionIdRef.current || currentSessionId;
       if (!targetSessionId) {
-          targetSessionId = crypto.randomUUID ? crypto.randomUUID() : `sid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          targetSessionId = createClientSessionId();
+          currentSessionIdRef.current = targetSessionId;
+          setCurrentSessionId(targetSessionId);
+      } else if (forcedSessionId && forcedSessionId !== currentSessionId) {
+          currentSessionIdRef.current = targetSessionId;
           setCurrentSessionId(targetSessionId);
       }
 
@@ -3401,7 +3438,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           }
       }
 
-      if (!currentSessionId) {
+      if (!currentSessionId || (forcedSessionId && forcedSessionId !== currentSessionId)) {
           const uid = userProfile.id || 'anonymous';
           void refreshSessionList(uid);
       }
@@ -3930,6 +3967,26 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         if (invalid) { alert("OCR 模式仅支持图片或 PDF"); return; }
     }
 
+    const shouldStartFreshMeetingSession = isMeetingMode && files.some(isAudioFile);
+    const freshMeetingSessionId = shouldStartFreshMeetingSession ? createClientSessionId() : '';
+    if (shouldStartFreshMeetingSession) {
+        setChatHistory([]);
+        currentSessionIdRef.current = freshMeetingSessionId;
+        resetHistoryPaginationState();
+        clearHistoryExpandTask();
+        setHistoryRenderTarget(INITIAL_MESSAGE_COUNT);
+        setVisibleMessageCount(0);
+        setExpandedSources({});
+        setCurrentSessionId(freshMeetingSessionId);
+        setPanelContent('');
+        setAudioFileUrl(null);
+        setCurrentAudioPath(null);
+        setPendingFiles([]);
+        setIsMobileSidebarOpen(false);
+        setSpeakingIdx(null);
+        window.speechSynthesis.cancel();
+    }
+
     if (selectedModel === 0) {
         setPendingFiles(prev => [...prev, ...newWrappers]);
         await uploadAndVectorizeFiles(newWrappers);
@@ -3942,7 +3999,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         if (isOCRMode) {
             applyOcrContext(context, sessionId);
         } else {
-            await applyFileContext(context, audioPath);
+            await applyFileContext(context, audioPath, {
+                replaceExisting: shouldStartFreshMeetingSession,
+                sessionIdOverride: freshMeetingSessionId,
+            });
         }
     }
     // 清除输入
@@ -7784,6 +7844,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       </div>
     );
   };
+
+  if (isInitialRouteLoading) {
+    return <LoadingScreen text="正在恢复历史会话..." isVisible />;
+  }
 
   return (
     <div className="dashboard-unified-dark flex h-screen bg-white dark:bg-gray-950 font-sans text-gray-900 dark:text-gray-100 overflow-hidden animate-in fade-in duration-500 transition-colors">

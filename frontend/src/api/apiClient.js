@@ -1,8 +1,18 @@
+import {
+  API_BASE_URL,
+  AUTH_REFRESH_TOKEN_KEY,
+  AUTH_REMEMBER_UNTIL_KEY,
+  AUTH_TOKEN_KEY,
+} from './config';
+
+export {
+  API_BASE_URL,
+  AUTH_REFRESH_TOKEN_KEY,
+  AUTH_REMEMBER_UNTIL_KEY,
+  AUTH_TOKEN_KEY,
+} from './config';
+
 const USE_MOCK_DATA = false;
-export const API_BASE_URL = '';
-export const AUTH_TOKEN_KEY = 'app_auth_token';
-export const AUTH_REFRESH_TOKEN_KEY = 'app_auth_refresh_token';
-const REMEMBER_UNTIL_KEY = 'app_auth_remember_until';
 
 const mockResponses = {
   '/health': { status: 'ok', timestamp: new Date().toISOString() },
@@ -36,7 +46,7 @@ const parseResponseBody = async (response) => {
 };
 
 const rememberWindowValid = () => {
-  const rememberUntil = Number(localStorage.getItem(REMEMBER_UNTIL_KEY) || 0);
+  const rememberUntil = Number(localStorage.getItem(AUTH_REMEMBER_UNTIL_KEY) || 0);
   return rememberUntil > Date.now();
 };
 

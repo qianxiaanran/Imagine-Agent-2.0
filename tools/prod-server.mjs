@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import http from "node:http";
 import https from "node:https";
+import zlib from "node:zlib";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,27 +32,119 @@ const MIME_TYPES = {
   ".woff2": "font/woff2",
 };
 
-function setNoCacheForHtml(res, filePath) {
-  if (path.extname(filePath).toLowerCase() === ".html") {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
+const COMPRESSIBLE_EXTENSIONS = new Set([
+  ".html",
+  ".js",
+  ".css",
+  ".json",
+  ".svg",
+  ".txt",
+  ".map",
+]);
+const COMPRESSION_MIN_BYTES = 1024;
+const compressionCache = new Map();
+
+function buildEtag(stat) {
+  return `W/"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}"`;
+}
+
+function setCacheHeaders(res, filePath, stat) {
+  const ext = path.extname(filePath).toLowerCase();
+  res.setHeader("Content-Type", MIME_TYPES[ext] || "application/octet-stream");
+  res.setHeader("Last-Modified", stat.mtime.toUTCString());
+  res.setHeader("ETag", buildEtag(stat));
+  if (COMPRESSIBLE_EXTENSIONS.has(ext)) {
+    res.setHeader("Vary", "Accept-Encoding");
+  }
+
+  if (ext === ".html") {
+    res.setHeader("Cache-Control", "no-cache, max-age=0, must-revalidate");
   } else {
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
   }
 }
 
-function sendFile(res, filePath) {
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.statusCode = 500;
-      res.end("Internal Server Error");
-      return;
+function isRequestFresh(req, stat) {
+  const etag = buildEtag(stat);
+  const requestIfNoneMatch = req.headers["if-none-match"];
+  if (typeof requestIfNoneMatch === "string" && requestIfNoneMatch.trim() === etag) {
+    return true;
+  }
+
+  const requestIfModifiedSince = req.headers["if-modified-since"];
+  if (typeof requestIfModifiedSince === "string") {
+    const modifiedSince = Date.parse(requestIfModifiedSince);
+    if (!Number.isNaN(modifiedSince) && Math.trunc(stat.mtimeMs) <= modifiedSince) {
+      return true;
     }
-    const ext = path.extname(filePath).toLowerCase();
-    res.setHeader("Content-Type", MIME_TYPES[ext] || "application/octet-stream");
-    setNoCacheForHtml(res, filePath);
+  }
+
+  return false;
+}
+
+function getPreferredEncoding(req, filePath, stat) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!COMPRESSIBLE_EXTENSIONS.has(ext)) return null;
+  if ((stat?.size || 0) < COMPRESSION_MIN_BYTES) return null;
+
+  const acceptEncoding = String(req.headers["accept-encoding"] || "").toLowerCase();
+  if (acceptEncoding.includes("br")) return "br";
+  if (acceptEncoding.includes("gzip")) return "gzip";
+  return null;
+}
+
+function getCompressedPayload(filePath, stat, encoding) {
+  const cacheKey = `${filePath}:${stat.size}:${Math.trunc(stat.mtimeMs)}:${encoding}`;
+  const cached = compressionCache.get(cacheKey);
+  if (cached) return cached;
+
+  const source = fs.readFileSync(filePath);
+  const buffer = encoding === "br"
+    ? zlib.brotliCompressSync(source, {
+        params: {
+          [zlib.constants.BROTLI_PARAM_QUALITY]: 5,
+        },
+      })
+    : zlib.gzipSync(source, { level: 6 });
+
+  compressionCache.set(cacheKey, buffer);
+  return buffer;
+}
+
+function sendFile(req, res, filePath, stat) {
+  setCacheHeaders(res, filePath, stat);
+
+  if (isRequestFresh(req, stat)) {
+    res.statusCode = 304;
+    res.end();
+    return;
+  }
+
+  const preferredEncoding = getPreferredEncoding(req, filePath, stat);
+  if (preferredEncoding) {
+    const payload = getCompressedPayload(filePath, stat, preferredEncoding);
     res.statusCode = 200;
-    res.end(data);
+    res.setHeader("Content-Encoding", preferredEncoding);
+    res.setHeader("Content-Length", String(payload.length));
+    res.end(req.method === "HEAD" ? undefined : payload);
+    return;
+  }
+
+  res.statusCode = 200;
+  res.setHeader("Content-Length", String(stat.size));
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+
+  const stream = fs.createReadStream(filePath);
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.statusCode = 500;
+    }
+    res.end("Internal Server Error");
   });
+  stream.pipe(res);
 }
 
 function resolveSafePath(urlPath) {
@@ -116,14 +209,24 @@ const server = http.createServer((req, res) => {
 
   fs.stat(safePath, (err, stat) => {
     if (!err && stat.isFile()) {
-      sendFile(res, safePath);
+      sendFile(req, res, safePath, stat);
       return;
     }
 
     const indexPath = path.join(distRoot, "index.html");
-    sendFile(res, indexPath);
+    fs.stat(indexPath, (indexErr, indexStat) => {
+      if (indexErr || !indexStat.isFile()) {
+        res.statusCode = 500;
+        res.end("Internal Server Error");
+        return;
+      }
+      sendFile(req, res, indexPath, indexStat);
+    });
   });
 });
+
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[prod-server] listening on http://0.0.0.0:${PORT}`);
