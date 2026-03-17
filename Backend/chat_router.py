@@ -33,6 +33,7 @@ SEARCH_PROVIDER_ORDER = [
     for p in os.getenv("SEARCH_PROVIDER_ORDER", "bing,serpapi,serper,tavily,scrape").split(",")
     if p.strip()
 ]
+SEARCH_SCRAPE_PAGE_LIMIT = max(1, int(os.getenv("SEARCH_SCRAPE_PAGE_LIMIT", "3")))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
 OCR_SUMMARY_MAX_CONTEXT_CHARS = int(os.getenv("OCR_SUMMARY_MAX_CONTEXT_CHARS", "32000"))
 RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "2600"))
@@ -2118,13 +2119,11 @@ def tool_get_gold_price(query: str = "") -> List[dict]:
 
 
 # ------------------------------------------------------------
-# 搜索工具：首选官方API，回退到抓取
+# 搜索工具：直接搜索引擎结果页 + 正文抓取
 # ------------------------------------------------------------
 def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
     """
-    Smart web search routing:
-    1. Intent tools (weather/stock) when applicable
-    2. Serper API only
+    Direct web search via public search engine result pages.
     """
     # 先清理“写作指令/字数约束”噪声，提升检索命中。
     raw_query = str(query or "")
@@ -2133,25 +2132,9 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
     query = re.sub(r"[，,。.!！?？;；:：]+", " ", query)
     query = re.sub(r"\s{2,}", " ", query).strip() or raw_query
 
-    # --- 1. 首先尝试直接工具（天气/股票）---
     q_lower = query.lower()
-    if "天气" in q_lower or "weather" in q_lower or "气温" in q_lower:
-        city = _normalize_weather_city_name(query, default="北京")
-        weather_res = tool_get_weather(city)
-        # 用户要求天气仅用墨迹来源：无论是否命中，都不回退其他天气来源。
-        return weather_res
 
-    if any(k in q_lower for k in ["股价", "股票", "行情", "stock", "price"]):
-        stock_res = tool_get_stock(query)
-        if stock_res:
-            return stock_res
-
-    if any(k in q_lower for k in ["金价", "黄金", "现货金", "伦敦金", "comex gold", "gold"]):
-        gold_res = tool_get_gold_price(query)
-        if gold_res:
-            return gold_res
-
-    print(f"🔍 [Search] Trying provider=serper query={query}")
+    print(f"🔍 [Search] Trying provider=direct-html query={query}")
     try:
         freshness_keywords = ["现在", "当前", "实时", "最新", "today", "now", "今日", "刚刚", "近况"]
         prefer_fresh = any(k in q_lower for k in freshness_keywords)
@@ -2160,91 +2143,160 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
             now_stamp = datetime.now().strftime("%Y-%m-%d")
             effective_query = f"{query} {now_stamp} 最新"
 
-        provider_rows = _search_with_serper(effective_query, max_results=max_results * 2, prefer_fresh=prefer_fresh)
+        provider_rows = _perform_web_search_scraping(effective_query, max_results=max_results * 2)
         picked = _post_process_search_results(provider_rows, query, max_results=max_results)
         if picked:
-            print(f"✅ [Search] provider=serper results={len(picked)}")
+            print(f"✅ [Search] provider=direct-html results={len(picked)}")
             return picked
     except Exception as e:
-        print(f"⚠️ [Search] provider=serper failed: {e}")
+        print(f"⚠️ [Search] provider=direct-html failed: {e}")
 
-    print("⚠️ [Search] Serper returned no usable results.")
+    print("⚠️ [Search] Direct search returned no usable results.")
     return []
 
 
-def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
-    """Fallback HTML scraping search implementation."""
-    results = []
+def _direct_search_headers(referer: str) -> Dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": referer,
+        "Cache-Control": "no-cache",
+    }
+
+
+def _resolve_search_result_link(link: str, *, headers: Optional[Dict[str, str]] = None) -> str:
+    if not link or not str(link).strip():
+        return ""
+    candidate = str(link).strip()
+    if not candidate.startswith(("http://", "https://")):
+        return candidate
+
+    import requests
+
+    try:
+        resp = requests.get(candidate, headers=headers or {"User-Agent": "Mozilla/5.0"}, timeout=6, allow_redirects=True, stream=True)
+        final_url = str(resp.url or candidate).strip()
+        resp.close()
+        return final_url or candidate
+    except Exception:
+        return candidate
+
+
+def _search_with_bing_html(query: str, max_results: int) -> List[dict]:
     import requests
     from bs4 import BeautifulSoup
 
-    # ------------------ 引擎 1: Bing CN ------------------
-    try:
-        url = f"https://cn.bing.com/search?q={urllib.parse.quote(query)}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": "https://cn.bing.com/",
-            "Accept-Language": "zh-CN,zh;q=0.9"
-        }
-        resp = requests.get(url, headers=headers, timeout=6)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            list_items = soup.select('#b_results > li')
-            for item in list_items:
-                if len(results) >= max_results: break
-                if "b_ad" in item.get("class", []): continue
-                title_tag = item.select_one('h2 > a')
-                if not title_tag: continue
-                title = title_tag.get_text(strip=True)
-                link = title_tag.get('href')
-                if not link or link.startswith('/'): continue
-                snippet = ""
-                for selector in ['.b_caption p', '.b_snippet', '.caption', '.b_algoSlug']:
-                    s_tag = item.select_one(selector)
-                    if s_tag:
-                        snippet = s_tag.get_text(strip=True)
-                        break
-                if not snippet: snippet = item.get_text(strip=True)[:100] + "..."
-                results.append({"title": title, "link": link, "snippet": snippet})
-    except Exception:
-        pass
+    results: List[dict] = []
+    url = f"https://cn.bing.com/search?q={urllib.parse.quote(query)}&setlang=zh-hans&count={max(max_results, 10)}"
+    resp = requests.get(url, headers=_direct_search_headers("https://cn.bing.com/"), timeout=10)
+    if resp.status_code != 200:
+        print(f"⚠️ [Search/Bing HTML] Error {resp.status_code}")
+        return results
 
-    # ------------------ 引擎 2: Sogou Fallback ------------------
-    if not results:
-        try:
-            url_sogou = f"https://www.sogou.com/web?query={urllib.parse.quote(query)}"
-            headers_sogou = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-            resp = requests.get(url_sogou, headers=headers_sogou, timeout=8)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, 'html.parser')
-                items = soup.select('.results > div')
-                for item in items:
-                    if len(results) >= max_results: break
-                    title_tag = item.select_one('h3 a')
-                    if not title_tag: continue
-                    title = title_tag.get_text(strip=True)
-                    link = title_tag.get('href')
-                    if not link or link.startswith('/'):
-                        if link and link.startswith('/link?'):
-                            link = "https://www.sogou.com" + link
-                        else:
-                            continue
-                    snippet_div = item.select_one('.text-layout') or item.select_one('.ft') or item.select_one('p')
-                    snippet = snippet_div.get_text(strip=True) if snippet_div else "No snippet"
-                    results.append({"title": title, "link": link, "snippet": snippet})
-        except Exception:
-            pass
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for item in soup.select("#b_results > li.b_algo, #b_results > li.b_ans"):
+        if len(results) >= max_results:
+            break
+        classes = item.get("class", []) or []
+        if any(cls in {"b_ad", "b_mop"} for cls in classes):
+            continue
 
-    if not results:
+        title_tag = item.select_one("h2 > a") or item.select_one("a")
+        if not title_tag:
+            continue
+
+        title = title_tag.get_text(" ", strip=True)
+        link = str(title_tag.get("href") or "").strip()
+        if not title or not link or link.startswith(("/", "javascript:")):
+            continue
+
+        snippet = ""
+        for selector in (".b_caption p", ".b_lineclamp2", ".b_lineclamp3", ".news_dt", ".b_paractl"):
+            s_tag = item.select_one(selector)
+            if s_tag:
+                snippet = s_tag.get_text(" ", strip=True)
+                if snippet:
+                    break
+        if not snippet:
+            snippet = item.get_text(" ", strip=True)[:180]
+
         results.append({
-            "title": "No search results",
-            "link": "#",
-            "snippet": "Primary search engines returned no valid results. Try simpler keywords or check network.",
+            "title": title,
+            "link": link,
+            "snippet": snippet,
+            "provider": "bing-html",
         })
 
     return results
+
+
+def _search_with_sogou_html(query: str, max_results: int) -> List[dict]:
+    import requests
+    from bs4 import BeautifulSoup
+
+    results: List[dict] = []
+    headers = _direct_search_headers("https://www.sogou.com/")
+    url = f"https://www.sogou.com/web?query={urllib.parse.quote(query)}"
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code != 200:
+        print(f"⚠️ [Search/Sogou HTML] Error {resp.status_code}")
+        return results
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for item in soup.select(".results > div, .vrwrap, .rb"):
+        if len(results) >= max_results:
+            break
+
+        title_tag = item.select_one("h3 a") or item.select_one("a")
+        if not title_tag:
+            continue
+
+        title = title_tag.get_text(" ", strip=True)
+        link = str(title_tag.get("href") or "").strip()
+        if not title or not link:
+            continue
+
+        if link.startswith("/link?"):
+            link = _resolve_search_result_link(f"https://www.sogou.com{link}", headers=headers)
+        elif link.startswith("/"):
+            continue
+
+        snippet_tag = item.select_one(".text-layout") or item.select_one(".ft") or item.select_one("p")
+        snippet = snippet_tag.get_text(" ", strip=True) if snippet_tag else item.get_text(" ", strip=True)[:180]
+
+        results.append({
+            "title": title,
+            "link": link,
+            "snippet": snippet,
+            "provider": "sogou-html",
+        })
+
+    return results
+
+
+def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
+    """Direct HTML search against public search engines."""
+    providers = [
+        ("bing-html", _search_with_bing_html),
+        ("sogou-html", _search_with_sogou_html),
+    ]
+
+    for provider_name, provider_fn in providers:
+        try:
+            rows = provider_fn(query, max_results=max_results)
+            picked = _post_process_search_results(rows, query, max_results=max_results)
+            if picked:
+                print(f"✅ [Search] provider={provider_name} raw={len(rows)} picked={len(picked)}")
+                return picked
+        except Exception as e:
+            print(f"⚠️ [Search] provider={provider_name} failed: {e}")
+
+    return []
 
 
 # ------------------------------------------------------------
@@ -3126,30 +3178,11 @@ async def chat(
             contextual_user_query = _build_contextual_search_query(message, history_text)
 
             intent_probe = f"{message} {contextual_user_query}".strip()
-            message_domain = _detect_query_domain(message)
-            probe_domain = _detect_query_domain(intent_probe)
-            intent_domain = message_domain or probe_domain
-
-            is_weather_intent = intent_domain == "weather"
-            is_stock_intent = intent_domain == "stock"
-            is_gold_intent = intent_domain == "gold"
             is_realtime_query = _is_realtime_sensitive_query(message) or (
                 _is_explicit_followup_query(message) and _is_realtime_sensitive_query(intent_probe)
             )
             length_req = _extract_length_requirement(message)
-
-            if is_weather_intent:
-                city_probe = message if message_domain == "weather" else intent_probe
-                city = _extract_city(city_probe, history_text)
-                search_query = f"{city} 天气"
-            elif is_stock_intent:
-                search_query = contextual_user_query or message
-            elif is_gold_intent:
-                search_query = "黄金 实时价格"
-            else:
-                search_query = contextual_user_query or message
-
-            search_query = _sanitize_search_query(search_query)
+            search_query = _sanitize_search_query(contextual_user_query or message)
 
             yield json.dumps({"t": "c", "v": f"> 正在搜索：{search_query}\n\n"}, ensure_ascii=False) + "\n"
 
@@ -3164,71 +3197,136 @@ async def chat(
                 full_reply_clean = no_result_text
                 yield json.dumps({"t": "c", "v": no_result_text}, ensure_ascii=False) + "\n"
             else:
-                skip_llm_generation = False
+                fetch_urls = [
+                    str(item.get("link") or "").strip()
+                    for item in search_results[:SEARCH_SCRAPE_PAGE_LIMIT]
+                    if str(item.get("link") or "").strip()
+                ]
+                fetched_pages: List[Dict[str, Any]] = []
+                scrape_errors: List[Dict[str, str]] = []
+
+                if not SCRAPLING_AVAILABLE or not scrape_urls_for_chat:
+                    raise RuntimeError(f"Scrapling unavailable: {SCRAPLING_IMPORT_ERROR}")
+
+                if fetch_urls:
+                    yield json.dumps(
+                        {
+                            "t": "c",
+                            "v": f"> 已获取 {len(search_results)} 条搜索结果，正在抓取前 {len(fetch_urls)} 个网页正文...\n\n",
+                        },
+                        ensure_ascii=False,
+                    ) + "\n"
+                    scrape_result = await asyncio.to_thread(scrape_urls_for_chat, fetch_urls)
+                    fetched_pages = list(scrape_result.get("pages") or [])
+                    scrape_errors = list(scrape_result.get("errors") or [])
+
+                if _is_cancelled():
+                    return
+
+                search_lookup: Dict[str, Dict[str, Any]] = {}
+                for item in search_results:
+                    link_key = _canonicalize_link(str(item.get("link") or ""))
+                    if link_key and link_key not in search_lookup:
+                        search_lookup[link_key] = item
+
                 search_sources = []
-                for item in search_results[:5]:
-                    source_date = str(item.get("date") or "").strip()
-                    source_name = str(item.get("source") or "").strip()
-                    search_sources.append({
-                        "type": "web",
-                        "title": str(item.get("title") or "").strip(),
-                        "link": str(item.get("link") or "").strip(),
-                        "snippet": str(item.get("snippet") or "").strip(),
-                        "date": source_date,
-                        "source": source_name,
-                    })
+                if fetched_pages:
+                    for page in fetched_pages[:SEARCH_SCRAPE_PAGE_LIMIT]:
+                        final_url = str(page.get("final_url") or page.get("url") or "").strip()
+                        lookup = search_lookup.get(_canonicalize_link(final_url)) or search_lookup.get(
+                            _canonicalize_link(str(page.get("url") or ""))
+                        ) or {}
+                        search_sources.append({
+                            "type": "web",
+                            "title": str(page.get("title") or lookup.get("title") or final_url or "网页内容").strip(),
+                            "link": final_url,
+                            "snippet": str(page.get("snippet") or lookup.get("snippet") or "").strip(),
+                            "date": str(lookup.get("date") or "").strip(),
+                            "source": str(page.get("source") or lookup.get("source") or "").strip(),
+                        })
+                else:
+                    for item in search_results[:5]:
+                        search_sources.append({
+                            "type": "web",
+                            "title": str(item.get("title") or "").strip(),
+                            "link": str(item.get("link") or "").strip(),
+                            "snippet": str(item.get("snippet") or "").strip(),
+                            "date": str(item.get("date") or "").strip(),
+                            "source": str(item.get("source") or "").strip(),
+                        })
                 if search_sources:
                     yield json.dumps({"t": "m", "sid": session_id, "src": search_sources}, ensure_ascii=False) + "\n"
 
-                # 对“实时数值型短问”直接返回工具结果，避免 LLM 二次改写数值。
-                needs_analysis = any(k in (message or "") for k in ["分析", "原因", "预测", "趋势", "影响", "解读", "建议", "展望"])
-                if (is_weather_intent or is_stock_intent or is_gold_intent) and not needs_analysis:
-                    lines = ["以下为实时检索结果："]
-                    for i, item in enumerate(search_results[:3], start=1):
-                        title = str(item.get("title") or "").strip()
-                        snippet = str(item.get("snippet") or "").strip()
-                        source_name = str(item.get("source") or "").strip()
-                        source_date = str(item.get("date") or "").strip()
-                        link = str(item.get("link") or "").strip()
-                        meta = " | ".join([m for m in [source_name, source_date] if m])
-                        lines.append(f"{i}. {title}")
-                        if snippet:
-                            lines.append(f"   {snippet}")
-                        if meta:
-                            lines.append(f"   {meta}")
-                        if link:
-                            lines.append(f"   来源: {link}")
-                    full_reply_clean = "\n".join(lines).strip()
-                    for part in _split_text(full_reply_clean):
-                        if _is_cancelled():
-                            return
-                        yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
-                        await asyncio.sleep(0)
-                    if _is_cancelled():
-                        return
-                    skip_llm_generation = True
+                if not fetched_pages:
+                    failure_parts = ["搜索结果已获取，但未能抓取到可用网页正文。"]
+                    if scrape_errors:
+                        top_error = scrape_errors[0]
+                        failure_parts.append(
+                            f"失败链接：{top_error.get('url', '')}，原因：{top_error.get('error', '未知错误')}"
+                        )
+                    failure_text = "\n".join(part for part in failure_parts if part).strip()
+                    full_reply_clean = failure_text
+                    yield json.dumps({"t": "c", "v": failure_text}, ensure_ascii=False) + "\n"
+                else:
+                    page_context_limit = max(1200, min(2200, MAX_CONTEXT_CHARS // max(1, len(fetched_pages))))
+                    fetched_context_lines = []
+                    for i, page in enumerate(fetched_pages[:SEARCH_SCRAPE_PAGE_LIMIT], start=1):
+                        final_url = str(page.get("final_url") or page.get("url") or "").strip()
+                        lookup = search_lookup.get(_canonicalize_link(final_url)) or search_lookup.get(
+                            _canonicalize_link(str(page.get("url") or ""))
+                        ) or {}
+                        title = str(page.get("title") or lookup.get("title") or final_url or f"结果{i}").strip()
+                        source_name = str(page.get("source") or lookup.get("source") or "").strip()
+                        search_snippet = str(lookup.get("snippet") or "").strip()
+                        content = _truncate_context(str(page.get("content") or "").strip(), max_len=page_context_limit)
+                        meta_lines = []
+                        if source_name:
+                            meta_lines.append(f"来源域名: {source_name}")
+                        if search_snippet:
+                            meta_lines.append(f"搜索摘要: {search_snippet}")
+                        meta_block = "\n".join(meta_lines)
+                        fetched_context_lines.append(
+                            (
+                                f"[{i}] 标题: {title}\n"
+                                f"URL: {final_url}\n"
+                                f"{meta_block + chr(10) if meta_block else ''}"
+                                f"正文:\n{content}"
+                            ).strip()
+                        )
 
-                if not skip_llm_generation:
-                    context_lines = []
+                    scrape_error_lines = []
+                    for item in scrape_errors[:2]:
+                        error_url = str(item.get("url") or "").strip()
+                        error_msg = str(item.get("error") or "").strip()
+                        if error_url or error_msg:
+                            scrape_error_lines.append(f"- {error_url}: {error_msg}".strip())
+
+                    auxiliary_search_lines = []
                     for i, item in enumerate(search_results[:5], start=1):
                         title = str(item.get("title") or "").strip()
                         snippet = str(item.get("snippet") or "").strip()
                         link = str(item.get("link") or "").strip()
-                        source_date = str(item.get("date") or "").strip()
-                        source_name = str(item.get("source") or "").strip()
-                        extra_tags = []
-                        if source_name:
-                            extra_tags.append(f"来源机构: {source_name}")
-                        if source_date:
-                            extra_tags.append(f"发布时间: {source_date}")
-                        extra_line = ("\n" + " | ".join(extra_tags)) if extra_tags else ""
-                        context_lines.append(f"[{i}] {title}\n{snippet}\n来源: {link}{extra_line}")
+                        auxiliary_search_lines.append(
+                            f"候选结果{i}: {title}\n链接: {link}\n摘要: {snippet}"
+                        )
 
-                    search_context = "\n\n".join(context_lines)
+                    search_context = (
+                        "搜索结果摘要（辅助参考，不视为已验证事实）：\n"
+                        + "\n\n".join(auxiliary_search_lines)
+                        + "\n\n已抓取网页正文（主要证据）：\n"
+                        + "\n\n".join(fetched_context_lines)
+                    ).strip()
+                    if scrape_error_lines:
+                        search_context += (
+                            "\n\n以下候选链接抓取失败，不应当作已读取证据：\n"
+                            + "\n".join(scrape_error_lines)
+                        )
+
                     length_rule_text = _build_length_rule_text(length_req)
                     response_prompt = (
                         "你是企业联网检索助手。"
-                        "只能基于下方“检索结果”回答，不要使用未提供的事实。\n"
+                        "系统已经先通过搜索引擎检索，再抓取了部分结果页的网页正文。"
+                        "回答时必须优先依据“已抓取网页正文”，搜索摘要只能作为辅助线索，不能当作已验证事实。\n"
                         "回答规则：\n"
                         "1) 先给结论，再给2-5条关键依据；\n"
                         "2) 每条关键事实后标注来源编号，如[1][3]；\n"
@@ -3239,7 +3337,7 @@ async def chat(
                         f"字数要求: {length_rule_text or '未指定'}\n"
                         f"时效性要求: {'高（优先最新信息）' if is_realtime_query else '普通'}\n\n"
                         f"用户问题:\n{message}\n\n"
-                        f"检索结果:\n{search_context}\n\n"
+                        f"证据材料:\n{search_context}\n\n"
                         "请使用中文回答。"
                     )
                     if personalization_system_prompt:
@@ -3254,7 +3352,7 @@ async def chat(
                                 f"字数要求: {length_rule_text}\n"
                                 "要求：保留引用编号格式 [1][2]，不要编造新来源。\n\n"
                                 f"用户问题:\n{message}\n\n"
-                                f"检索结果:\n{search_context}\n\n"
+                                f"证据材料:\n{search_context}\n\n"
                                 f"上一版回答:\n{draft}\n\n"
                                 "请直接输出重写后的最终答案。"
                             )
