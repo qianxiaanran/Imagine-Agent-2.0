@@ -86,6 +86,28 @@ try:
 except Exception as e:
     print(f"⚠️ [ChatRouter] documents_processing 未就绪，RAG 直连模式不可用: {e}")
 
+extract_supported_urls = None
+scrape_urls_for_chat = None
+SCRAPLING_AVAILABLE = False
+SCRAPLING_IMPORT_ERROR = None
+try:
+    from webpage_scraper import (
+        SCRAPLING_AVAILABLE,
+        SCRAPLING_IMPORT_ERROR,
+        extract_supported_urls,
+        scrape_urls_for_chat,
+    )
+    if SCRAPLING_AVAILABLE:
+        print("[ChatRouter] Scrapling webpage scraper loaded")
+    else:
+        print(f"⚠️ [ChatRouter] Scrapling unavailable: {SCRAPLING_IMPORT_ERROR}")
+except Exception as e:
+    SCRAPLING_AVAILABLE = False
+    SCRAPLING_IMPORT_ERROR = e
+    extract_supported_urls = None
+    scrape_urls_for_chat = None
+    print(f"⚠️ [ChatRouter] webpage_scraper 加载失败: {e}")
+
 # ✨ [修改] 增加安全导入，防止因为缺少 langgraph 导致整个后端无法启动
 app_graph = None
 memory_summary = None
@@ -2761,6 +2783,142 @@ async def chat(
             yield json.dumps({"t": "c", "v": f"Error: {str(e)}"}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": return_mode, "end": True}, ensure_ascii=False) + "\n"
 
+    async def webpage_response_generator(page_urls: List[str]):
+        yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
+
+        full_reply = ""
+        push_chunk, flush_chunk = _make_text_buffer(immediate=True)
+        try:
+            urls_text = "、".join(page_urls[:3])
+            yield json.dumps({"t": "c", "v": f"> 正在抓取网页：{urls_text}\n\n"}, ensure_ascii=False) + "\n"
+
+            scrape_result = await asyncio.to_thread(scrape_urls_for_chat, page_urls)
+            pages = list(scrape_result.get("pages") or [])
+            scrape_errors = list(scrape_result.get("errors") or [])
+
+            if _is_cancelled():
+                return
+
+            if pages:
+                source_rows = []
+                for page in pages:
+                    final_url = str(page.get("final_url") or page.get("url") or "").strip()
+                    source_rows.append({
+                        "type": "web",
+                        "title": str(page.get("title") or final_url or "网页内容").strip(),
+                        "link": final_url,
+                        "snippet": str(page.get("snippet") or "").strip(),
+                        "source": str(page.get("source") or "").strip(),
+                    })
+                if source_rows:
+                    yield json.dumps({"t": "m", "sid": session_id, "src": source_rows}, ensure_ascii=False) + "\n"
+
+            if not pages:
+                failure_parts = ["未能抓取到可用网页内容。"]
+                if scrape_errors:
+                    top_error = scrape_errors[0]
+                    failure_parts.append(
+                        f"失败链接：{top_error.get('url', '')}，原因：{top_error.get('error', '未知错误')}"
+                    )
+                failure_text = "\n".join(part for part in failure_parts if part).strip()
+                full_reply = failure_text
+                yield json.dumps({"t": "c", "v": failure_text}, ensure_ascii=False) + "\n"
+            else:
+                yield json.dumps(
+                    {"t": "c", "v": f"> 已抓取 {len(pages)} 个网页，正在整理内容...\n\n"},
+                    ensure_ascii=False,
+                ) + "\n"
+
+                shared_ctx = await _get_shared_context_async("general", history_limit=FAST_CHAT_HISTORY_LIMIT)
+                webpage_blocks = []
+                for index, page in enumerate(pages, start=1):
+                    title = str(page.get("title") or page.get("final_url") or f"网页{index}").strip()
+                    final_url = str(page.get("final_url") or page.get("url") or "").strip()
+                    source_name = str(page.get("source") or "").strip()
+                    content = _truncate_context(str(page.get("content") or "").strip(), max_len=MAX_CONTEXT_CHARS)
+                    meta_line = f"来源域名: {source_name}\n" if source_name else ""
+                    webpage_blocks.append(
+                        f"[{index}] 标题: {title}\nURL: {final_url}\n{meta_line}正文:\n{content}"
+                    )
+
+                error_lines = []
+                for item in scrape_errors[:2]:
+                    error_url = str(item.get("url") or "").strip()
+                    error_msg = str(item.get("error") or "").strip()
+                    if error_url or error_msg:
+                        error_lines.append(f"- {error_url}: {error_msg}".strip())
+                partial_error_block = ""
+                if error_lines:
+                    partial_error_block = "以下链接未成功抓取，仅供你参考，不应编造成已读取内容：\n" + "\n".join(error_lines)
+
+                base_prompt = (
+                    "你是企业网页内容助手。"
+                    "用户在通用问答中提供了网页链接，系统已经抓取并提取了网页正文。"
+                    "回答时只能基于下方“网页抓取内容”和已有会话上下文，不要编造页面中不存在的事实。\n"
+                    "回答规则：\n"
+                    "1) 若用户只发链接或需求不明确，优先给出简洁摘要；\n"
+                    "2) 若用户提出明确任务（总结、提炼、翻译、抽取、改写、分析），直接完成；\n"
+                    "3) 如果抓取内容不足以支持结论，明确说明“信息不足”；\n"
+                    "4) 引用网页事实时尽量标注来源编号，如[1][2]；\n\n"
+                    f"用户原始请求：\n{message}\n\n"
+                    f"{partial_error_block}\n\n"
+                    "网页抓取内容：\n"
+                    + "\n\n".join(webpage_blocks)
+                ).strip()
+                system_prompt = _merge_system_prompt(
+                    "You are an enterprise assistant. Use the fetched webpage content as primary evidence.",
+                    personalization_system_prompt,
+                )
+                prompt = _wrap_prompt_with_shared_context(
+                    base_prompt,
+                    shared_ctx,
+                    user_message=message,
+                )
+
+                async for chunk in ask_llm_stream_async(
+                    prompt,
+                    system_prompt=system_prompt,
+                    model_type=model_backend,
+                    stop_checker=_is_cancelled,
+                ):
+                    if chunk:
+                        full_reply += chunk
+                        out = push_chunk(chunk)
+                        if out:
+                            yield json.dumps({"t": "c", "v": out}, ensure_ascii=False) + "\n"
+                            await asyncio.sleep(0)
+
+                out = flush_chunk()
+                if out:
+                    for part in _split_text(out):
+                        if _is_cancelled():
+                            return
+                        yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
+                        await asyncio.sleep(0)
+
+            if _is_cancelled():
+                return
+
+            if user_id != "anonymous":
+                try:
+                    await _save_history_turn_async(
+                        user_id,
+                        session_id,
+                        "web",
+                        message,
+                        full_reply,
+                    )
+                except Exception as e:
+                    print(f"Webpage reply history save failed: {e}")
+
+            if _is_cancelled():
+                return
+            yield json.dumps({"t": "m", "sid": session_id, "mode": "general", "end": True}, ensure_ascii=False) + "\n"
+        except Exception as e:
+            print(f" [Webpage Mode Error]: {e}")
+            yield json.dumps({"t": "c", "v": f"Error: {str(e)}"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"t": "m", "sid": session_id, "mode": "general", "end": True}, ensure_ascii=False) + "\n"
+
     def _is_doc_query(text: str) -> bool:
         t = (text or "").lower()
         keywords = ["doc", "document", "pdf", "ppt", "excel", "word", "attachment", "upload", "file", "wendang", "wenjian", "fujian", "shangchuan"]
@@ -3581,6 +3739,11 @@ async def chat(
     rag_route_blocked = "rag" in blocked_routes
     search_route_blocked = "search" in blocked_routes
     audit_route_blocked = "audit" in blocked_routes
+    message_urls = (
+        extract_supported_urls(message)
+        if auto_routing_enabled and SCRAPLING_AVAILABLE and extract_supported_urls
+        else []
+    )
 
     is_doc_query = _is_doc_query(message) if (auto_routing_enabled and not rag_route_blocked) else False
     is_db_query = False
@@ -3592,6 +3755,9 @@ async def chat(
 
     if auto_routing_enabled and (not db_route_blocked) and not is_db_query:
         is_db_query = _looks_like_db_request(message)
+
+    if auto_routing_enabled and message_urls:
+        return _stream(webpage_response_generator(message_urls))
 
     if auto_routing_enabled and FAST_CHAT_DIRECT and not context_content and not is_doc_query and not is_db_query:
         return _stream(fast_chat_response_generator())
