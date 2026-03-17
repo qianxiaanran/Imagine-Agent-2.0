@@ -10,8 +10,19 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
 const distRoot = path.join(repoRoot, "frontend", "dist");
 
-const PORT = Number(process.env.PORT || 8080);
-const API_TARGET = process.env.API_TARGET || "http://127.0.0.1:18011";
+function readEnv(...keys) {
+  for (const key of keys) {
+    const raw = process.env[key];
+    if (typeof raw !== "string") continue;
+    const value = raw.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+const PORT = Number(readEnv("PORT") || 8080);
+const HOST = readEnv("FRONTEND_HOST", "HOST") || "0.0.0.0";
+const API_TARGET = readEnv("API_TARGET") || "http://127.0.0.1:18011";
 const apiUrl = new URL(API_TARGET);
 
 const MIME_TYPES = {
@@ -228,7 +239,19 @@ const server = http.createServer((req, res) => {
 server.keepAliveTimeout = 65_000;
 server.headersTimeout = 66_000;
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[prod-server] listening on http://0.0.0.0:${PORT}`);
+server.on("error", (err) => {
+  console.error(`[prod-server] failed to listen on http://${HOST}:${PORT}`);
+  if (err?.code === "EADDRINUSE") {
+    console.error("[prod-server] The port is already in use. Set PORT to a free port and retry.");
+  } else if (err?.code === "EACCES") {
+    console.error("[prod-server] Permission denied while binding the socket. Try FRONTEND_HOST=127.0.0.1 or use a different PORT.");
+  } else if (err?.message) {
+    console.error(`[prod-server] ${err.message}`);
+  }
+  process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`[prod-server] listening on http://${HOST}:${PORT}`);
   console.log(`[prod-server] proxy /api -> ${API_TARGET}`);
 });

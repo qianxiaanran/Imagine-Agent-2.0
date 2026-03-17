@@ -107,6 +107,41 @@ const useReducedMotionPreference = () => {
   return reducedMotion;
 };
 
+const useMinWidthMatch = (minWidth) => {
+  const query = `(min-width: ${minWidth}px)`;
+  const [matches, setMatches] = useState(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia(query).matches
+      : false
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return undefined;
+    }
+
+    const mediaQuery = window.matchMedia(query);
+    const updateMatch = () => setMatches(mediaQuery.matches);
+
+    updateMatch();
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', updateMatch);
+    } else if (typeof mediaQuery.addListener === 'function') {
+      mediaQuery.addListener(updateMatch);
+    }
+
+    return () => {
+      if (typeof mediaQuery.removeEventListener === 'function') {
+        mediaQuery.removeEventListener('change', updateMatch);
+      } else if (typeof mediaQuery.removeListener === 'function') {
+        mediaQuery.removeListener(updateMatch);
+      }
+    };
+  }, [query]);
+
+  return matches;
+};
+
 const AuthVisualPanel = memo(function AuthVisualPanel({
   isTyping = false,
   showPassword = false,
@@ -140,6 +175,7 @@ export const AuthModalShell = ({
   children,
 }) => {
   const reducedMotion = useReducedMotionPreference();
+  const isLargeScreen = useMinWidthMatch(1024);
 
   return (
     <div className={`fixed inset-0 z-[100] flex items-center justify-center p-3 md:p-6 ${reducedMotion ? '' : 'animate-in fade-in duration-200'}`}>
@@ -152,12 +188,14 @@ export const AuthModalShell = ({
         className={`relative grid max-h-[92vh] w-full max-w-[1120px] overflow-hidden rounded-[32px] border border-white/50 bg-white shadow-[0_30px_120px_rgba(15,23,42,0.24)] dark:border-slate-800 dark:bg-slate-950 lg:grid-cols-[1.04fr_0.96fr] ${reducedMotion ? '' : 'animate-in zoom-in-95 duration-200'}`}
         style={{ contain: 'layout paint style', willChange: 'transform, opacity', transform: 'translateZ(0)' }}
       >
-        <AuthVisualPanel
-          isTyping={isTyping}
-          showPassword={showPassword}
-          passwordLength={passwordLength}
-          reducedMotion={reducedMotion}
-        />
+        {isLargeScreen && (
+          <AuthVisualPanel
+            isTyping={isTyping}
+            showPassword={showPassword}
+            passwordLength={passwordLength}
+            reducedMotion={reducedMotion}
+          />
+        )}
 
         <div className="relative flex min-h-0 flex-col bg-white/95 dark:bg-slate-950/95">
           <button

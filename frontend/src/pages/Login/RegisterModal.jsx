@@ -137,7 +137,7 @@ const RegisterModal = ({ isOpen, onClose, onSwitchToLogin, onRegisterSuccess }) 
       <SectionHeader
         eyebrow="Create Account"
         title="注册你的智能工作台"
-        description="使用手机号/邮箱和验证码创建 imagine Agent 2.0 账号。"
+        description="使用手机号创建 imagine Agent 2.0 账号。"
       />
 
       <div className="space-y-4">
@@ -204,6 +204,7 @@ const RegisterModal = ({ isOpen, onClose, onSwitchToLogin, onRegisterSuccess }) 
             text={isLoading ? '注册中...' : '注册'}
             onClick={handleRegister}
             disabled={!isFormFilled || isLoading}
+            animated={false}
             className="h-12 text-base"
           />
           <button type="button" className={secondaryButtonClassName} onClick={onSwitchToLogin}>

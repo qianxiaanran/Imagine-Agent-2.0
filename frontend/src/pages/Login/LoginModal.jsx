@@ -348,7 +348,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
           </button>
         </div>
         <div className="space-y-3 pt-2">
-          <AuthHoverButton type="button" text={isLoading ? '登录中...' : '登录'} onClick={handlePasswordLogin} disabled={isLoading} className="h-12 text-base" />
+          <AuthHoverButton type="button" text={isLoading ? '登录中...' : '登录'} onClick={handlePasswordLogin} disabled={isLoading} animated={false} className="h-12 text-base" />
           <button type="button" className={secondaryButtonClassName} onClick={() => { setView('code_step1'); setError(''); setShowRegisterShortcut(false); }}>
             使用验证码登录
           </button>
@@ -446,7 +446,7 @@ const LoginModal = ({ isOpen, onClose, onSwitchToRegister, onLoginSuccess }) => 
         {renderRegisterShortcut}
         <RememberChip active={rememberLogin} onToggle={() => setRememberLogin((prev) => !prev)} />
         <div className="space-y-3 pt-4">
-          <AuthHoverButton type="button" text={isLoading ? '登录中...' : '登录'} onClick={handleCodeLogin} disabled={!formData.code || isLoading} className="h-12 text-base" />
+          <AuthHoverButton type="button" text={isLoading ? '登录中...' : '登录'} onClick={handleCodeLogin} disabled={!formData.code || isLoading} animated={false} className="h-12 text-base" />
           <button type="button" className={secondaryButtonClassName} onClick={goPasswordView}>使用密码登录</button>
         </div>
         <div className="pt-2 text-center">

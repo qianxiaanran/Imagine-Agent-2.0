@@ -13,6 +13,7 @@ if not defined NPM_CONFIG_CACHE (
 
 set "FRONTEND_PORT=%~1"
 if not defined FRONTEND_PORT set "FRONTEND_PORT=8080"
+if not defined FRONTEND_HOST set "FRONTEND_HOST=0.0.0.0"
 set "BACKEND_PORT=%~2"
 if not defined BACKEND_PORT set "BACKEND_PORT=18011"
 set "API_TARGET=http://127.0.0.1:%BACKEND_PORT%"
@@ -132,14 +133,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "if (Get-NetTCPConnection -State Listen -LocalPort %FRONTEND_PORT% -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
   echo [2/2] Starting frontend prod server on %FRONTEND_PORT%...
-  start "Enterprise Frontend (%FRONTEND_PORT%)" cmd /k "cd /d ""%ROOT%"" && set PORT=%FRONTEND_PORT% && set API_TARGET=%API_TARGET% && node tools\prod-server.mjs"
+  start "Enterprise Frontend (%FRONTEND_PORT%)" cmd /k "cd /d ""%ROOT%"" && set PORT=%FRONTEND_PORT% && set FRONTEND_HOST=%FRONTEND_HOST% && set API_TARGET=%API_TARGET% && node tools\prod-server.mjs"
 ) else (
   echo [INFO] Frontend already listening on %FRONTEND_PORT%, skip start.
 )
 
 echo.
 echo Started.
-echo Frontend URL: http://127.0.0.1:%FRONTEND_PORT%
+echo Frontend URL: http://%FRONTEND_HOST%:%FRONTEND_PORT%
 echo Backend URL : http://127.0.0.1:%BACKEND_PORT%
 echo Ollama URL  : %OLLAMA_BASE_URL%
 echo Supabase API: http://127.0.0.1:54321
