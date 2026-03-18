@@ -91,7 +91,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), tailwindcss()],
 
     optimizeDeps: {
-      include: ["react", "react-dom", "lucide-react", "react-router-dom"],
+      include: ["react", "react-dom", "lucide-react"],
     },
 
     server: {
