@@ -1,0 +1,42 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - bing
+      - bing news
+      - wikipedia
+      - sogou
+
+general:
+  instance_name: "Imagine Agent SearXNG"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+  default_lang: ""
+
+server:
+  secret_key: "35c04362904c22da4ae786769fa577d7"
+  limiter: false
+  public_instance: false
+
+engines:
+  - name: bing
+    disabled: false
+    weight: 1.2
+  - name: duckduckgo
+    disabled: false
+    weight: 1.1
+  - name: wikipedia
+    disabled: false
+    display_type:
+      - list
+      - infobox
+    weight: 0.9
+  - name: sogou
+    disabled: false
+    weight: 1.15
+  - name: baidu
+    disabled: false
+    weight: 1.05

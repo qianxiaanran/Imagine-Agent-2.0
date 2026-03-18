@@ -158,7 +158,7 @@ def _clean_llm_json(raw: str) -> Dict[str, Any]:
 
 
 def _normalize_backend(value: str | None) -> str:
-    backend = str(value or "local").strip().lower()
+    backend = str(value or "cloud").strip().lower()
     if backend in {"cloud", "deepseek"}:
         return "cloud"
     return "local"
@@ -1017,7 +1017,7 @@ def warmup_decision_cache():
     Runs in background thread from main.py startup hook.
     """
     try:
-        backend = _normalize_backend(os.getenv("DECISION_WARMUP_AI_BACKEND", "local"))
+        backend = _normalize_backend(os.getenv("DECISION_WARMUP_AI_BACKEND", "cloud"))
         data = _get_cached_dashboard_data(force_refresh=True)
         _get_cached_ai_analysis(data, backend=backend, force_refresh=True)
         print(f"[Decision] warmup completed (backend={backend})")
@@ -1029,7 +1029,7 @@ def warmup_decision_cache():
 def get_decision_overview(
     refresh_ai: bool = Query(default=False, description="Whether to force refresh AI analysis"),
     refresh_data: bool = Query(default=False, description="Whether to force refresh dashboard aggregates"),
-    analysis_backend: str = Query(default="local", description="local | cloud"),
+    analysis_backend: str = Query(default="cloud", description="local | cloud"),
 ):
     backend = _normalize_backend(analysis_backend)
     try:
@@ -1057,7 +1057,7 @@ def get_decision_data(
 @router.get("/ai")
 def get_decision_ai(
     refresh_ai: bool = Query(default=False, description="Whether to force refresh AI analysis"),
-    analysis_backend: str = Query(default="local", description="local | cloud"),
+    analysis_backend: str = Query(default="cloud", description="local | cloud"),
     refresh_data: bool = Query(default=False, description="Whether to refresh dashboard data before AI analysis"),
 ):
     backend = _normalize_backend(analysis_backend)

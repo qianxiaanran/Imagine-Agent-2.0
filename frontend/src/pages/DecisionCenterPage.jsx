@@ -1024,11 +1024,11 @@ function DecisionCenterPage() {
   const [refreshingAi, setRefreshingAi] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [error, setError] = useState('');
-  const [backend, setBackend] = useState('local');
+  const [backend, setBackend] = useState('cloud');
   const dataRequestRef = useRef(null);
   const aiRequestRef = useRef(null);
   const overviewBootstrappedRef = useRef(false);
-  const currentAiBackendRef = useRef('local');
+  const currentAiBackendRef = useRef('cloud');
   const initialBackendRef = useRef(backend);
 
   const fetchDataSection = useCallback(async ({ refreshData = false, silent = false } = {}) => {
@@ -1246,10 +1246,10 @@ function DecisionCenterPage() {
               <button
                 type="button"
                 onClick={() => window.location.assign('/')}
-                className="mt-0.5 inline-flex items-center gap-1 rounded-full border border-slate-300/70 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-white/80 dark:hover:bg-slate-800 transition-colors"
+                className="mt-0.5 inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-slate-300/70 dark:border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-white/80 dark:hover:bg-slate-800 transition-colors"
               >
                 <ArrowLeft size={14} />
-                返回工作台
+                返回
               </button>
               <div>
                 <div className="inline-flex items-center gap-2 rounded-full border border-cyan-200/70 bg-white/70 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-cyan-700 dark:border-cyan-900/60 dark:bg-slate-900/70 dark:text-cyan-300">
@@ -1269,8 +1269,8 @@ function DecisionCenterPage() {
                 onChange={(event) => setBackend(event.target.value)}
                 className="rounded-full border border-slate-300 dark:border-slate-700 bg-white/90 dark:bg-slate-900 px-3 py-2 text-xs font-medium outline-none focus:ring-2 focus:ring-cyan-300/70"
               >
-                <option value="local">AI 分析: 本地模型</option>
                 <option value="cloud">AI 分析: 云端模型</option>
+                <option value="local">AI 分析: 本地模型</option>
               </select>
 
               <button

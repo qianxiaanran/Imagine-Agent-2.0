@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import re
+import socket
 import urllib.parse
 import os
 import hashlib
@@ -33,7 +35,20 @@ SEARCH_PROVIDER_ORDER = [
     for p in os.getenv("SEARCH_PROVIDER_ORDER", "bing,serpapi,serper,tavily,scrape").split(",")
     if p.strip()
 ]
-SEARCH_SCRAPE_PAGE_LIMIT = max(1, int(os.getenv("SEARCH_SCRAPE_PAGE_LIMIT", "3")))
+SEARXNG_BASE_URL = os.environ.get("SEARXNG_BASE_URL", "http://127.0.0.1:8888").strip().rstrip("/")
+SEARXNG_TIMEOUT_SECONDS = max(5, int(os.getenv("SEARXNG_TIMEOUT_SECONDS", "12")))
+SEARXNG_LANGUAGE = (os.getenv("SEARXNG_LANGUAGE", "") or "").strip()
+SEARXNG_SAFESEARCH = max(0, min(2, int(os.getenv("SEARXNG_SAFESEARCH", "0"))))
+SEARXNG_ENGINES = ",".join(
+    [
+        engine.strip()
+        for engine in os.getenv("SEARXNG_ENGINES", "bing,bing news,wikipedia,sogou").split(",")
+        if engine.strip()
+    ]
+)
+SEARCH_SCRAPE_PAGE_LIMIT = max(1, int(os.getenv("SEARCH_SCRAPE_PAGE_LIMIT", "2")))
+SEARCH_SCRAPE_PAGE_LIMIT_REALTIME = max(1, int(os.getenv("SEARCH_SCRAPE_PAGE_LIMIT_REALTIME", "1")))
+SEARCH_CONTEXT_PAGE_MAX_CHARS = max(700, int(os.getenv("SEARCH_CONTEXT_PAGE_MAX_CHARS", "1400")))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
 OCR_SUMMARY_MAX_CONTEXT_CHARS = int(os.getenv("OCR_SUMMARY_MAX_CONTEXT_CHARS", "32000"))
 RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "2600"))
@@ -464,35 +479,268 @@ def _build_cache_friendly_prompt(
 
 _QUERY_TERM_STOPWORDS = {
     "请问", "一个", "这个", "那个", "然后", "还有", "就是", "现在", "帮我", "我们",
+    "介绍", "简介", "讲讲", "说说", "什么是", "是什么",
     "what", "which", "about", "please", "thanks", "thank", "tell", "show", "give",
 }
+
+_PROFILE_INTENT_TOKENS = (
+    "介绍一下",
+    "介绍",
+    "简介",
+    "是什么",
+    "做什么",
+    "是干什么",
+    "是做什么",
+    "讲讲",
+    "说说",
+    "聊聊",
+    "了解一下",
+    "科普一下",
+)
+
+_PROFILE_NOISE_KEYWORDS = (
+    "待遇",
+    "工资",
+    "薪资",
+    "面试",
+    "招聘",
+    "应聘",
+    "学历",
+    "笔试",
+    "工作体验",
+    "值得去",
+)
+
+_GENERAL_SEARCH_PREFIX_PATTERNS = (
+    r"^(就|那就|那|请问|请|帮我|帮忙|麻烦你|麻烦|劳驾|给我|告诉我|我想知道|我想了解|我想问|想问下|想了解一下|想请教一下)\s*",
+    r"^(分析一下|分析|总结一下|总结|介绍一下|介绍|讲一下|讲讲|说一下|说说|聊聊|解释一下|解释|说明一下|说明|看看|看下|查一下|查下|搜一下|搜下)\s*",
+)
+
+_GENERAL_SEARCH_TRAILING_PATTERNS = (
+    r"\s*(一下|一下子|吧|呢|呀|啊|哈|啦|呗|吗|么)$",
+    r"\s*(谢谢|谢谢你|麻烦了)$",
+)
+
+_QUESTION_SPLIT_PATTERN = (
+    r"(为什么|为何|怎么|怎样|如何|是否|能否|有无|有没有|是什么|什么是|什么|哪些|哪个|哪家|哪位|谁|哪里|哪儿|几时|什么时候|多少|几个|多大|多高|多远|多长)"
+)
+
+_GENERIC_TERM_PREFIXES = ("做", "讲", "说", "聊", "查", "搜", "看", "问", "谈", "评")
+_SUBJECTIVE_QUERY_HINTS = ("评价", "体验", "感受", "觉得", "怎么看", "如何看待", "口碑", "值得", "建议", "推荐")
+_FRESH_SEARCH_HINTS = ("最新", "最近", "当前", "实时", "今日", "今天", "刚刚", "动态", "进展", "新闻", "资讯", "近况")
+_REASON_SEARCH_HINTS = ("原因", "为什么", "为何")
+_SEARCH_INTENT_TOKENS = (
+    "最新",
+    "最近",
+    "当前",
+    "实时",
+    "今日",
+    "今天",
+    "动态",
+    "进展",
+    "新闻",
+    "资讯",
+    "原因",
+    "为什么",
+    "为何",
+    "分析",
+    "总结",
+    "介绍",
+    "简介",
+    "讲解",
+    "讲讲",
+    "说说",
+    "说明",
+    "教程",
+    "方法",
+    "怎么",
+    "如何",
+    "怎样",
+    "区别",
+    "对比",
+    "背景",
+)
+_LOW_SIGNAL_RESULT_HOSTS = (
+    "zhidao.baidu.com",
+    "wenku.baidu.com",
+    "jingyan.baidu.com",
+    "baijiahao.baidu.com",
+    "tieba.baidu.com",
+    "sj.qq.com",
+    "coze.cn",
+    "code.coze.cn",
+    "yuanbao.tencent.com",
+    "ima.qq.com",
+    "design006.com",
+    "designnavs.com",
+    "atkoo.com",
+    "zmt.cn",
+)
+_LOW_SIGNAL_RESULT_PATTERNS = (
+    r"(电脑版官方正版|最新免费下载|图片免费下载|素材网站|作品下载平台|资源下载|导航站|下载中心|技能商店)",
+    r"(app下载|软件下载|官方下载|安装包|免费下载)",
+)
+_FRESH_LOW_VALUE_HOSTS = (
+    "linux.do",
+    "v2ex.com",
+    "zhihu.com",
+    "bilibili.com",
+    "reddit.com",
+)
+_NEWSY_RESULT_PATTERNS = (
+    r"(新闻|快讯|日报|发布|报告|观察|资讯|新华社|人民网|新华网|光明网|科技日报|IT之家|Readhub|界面新闻|36氪|新浪科技|机器之心|量子位)",
+)
+
+
+def _dedupe_preserve_order(values: List[str]) -> List[str]:
+    picked: List[str] = []
+    seen = set()
+    for value in values or []:
+        candidate = re.sub(r"\s{2,}", " ", str(value or "")).strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        picked.append(candidate)
+    return picked
 
 
 def _normalize_match_text(text: Optional[str]) -> str:
     return re.sub(r"\s+", "", str(text or "")).lower()
 
 
+def _light_clean_search_query(text: Optional[str]) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    q = re.sub(r"(至少|不少于|不低于|最多|不超过|不多于|不高于)?\s*\d{2,5}\s*字", " ", raw)
+    q = re.sub(r"[\"'`“”‘’]", " ", q)
+    prev = None
+    while q != prev:
+        prev = q
+        for pattern in _GENERAL_SEARCH_PREFIX_PATTERNS:
+            q = re.sub(pattern, "", q)
+    for pattern in _GENERAL_SEARCH_TRAILING_PATTERNS:
+        q = re.sub(pattern, "", q)
+    q = re.sub(r"[，,。.!！?？;；:：/\\|]+", " ", q)
+    q = re.sub(r"\s{2,}", " ", q).strip()
+    return q or raw
+
+
+def _choose_searxng_language(query: Optional[str]) -> str:
+    if SEARXNG_LANGUAGE:
+        return SEARXNG_LANGUAGE
+    return ""
+
+
+def _is_fresh_search_query(text: Optional[str]) -> bool:
+    raw = str(text or "")
+    return any(token in raw for token in _FRESH_SEARCH_HINTS)
+
+
+def _is_reason_search_query(text: Optional[str]) -> bool:
+    raw = str(text or "")
+    return any(token in raw for token in _REASON_SEARCH_HINTS)
+
+
+def _build_general_search_query(text: Optional[str]) -> str:
+    cleaned = _light_clean_search_query(text)
+    if not cleaned:
+        return ""
+
+    topic_terms = _extract_topic_terms(cleaned, max_terms=4)
+    if topic_terms:
+        if _is_fresh_search_query(cleaned):
+            return " ".join(_dedupe_preserve_order(topic_terms + ["最新", "动态"]))
+        if _is_reason_search_query(cleaned):
+            enriched_topics = [term for term in topic_terms if term not in {"汽车", "车"}]
+            if any(token in cleaned for token in ("汽车", "造车")):
+                enriched_topics.append("造车")
+            return " ".join(_dedupe_preserve_order(enriched_topics + ["原因"]))
+
+    keyword_query = cleaned
+    keyword_query = re.sub(r"(为什么|为何)", " 原因 ", keyword_query)
+    keyword_query = re.sub(r"(如何|怎么|怎样)", " ", keyword_query)
+    keyword_query = re.sub(_QUESTION_SPLIT_PATTERN, " ", keyword_query)
+    keyword_query = re.sub(
+        r"(最新|最近|当前|实时|官网|价格|原因|简介|背景|区别|对比|教程|方法|原理|趋势|进展|发布|评测|案例|分析)",
+        r" \1 ",
+        keyword_query,
+    )
+    keyword_query = re.sub(
+        r"(?:(?<=\s)|^)(做|讲|说|聊|查|搜|看|问|谈|评)(?=[\u4e00-\u9fff]{2,})",
+        " ",
+        keyword_query,
+    )
+    keyword_query = re.sub(r"[，,。.!！?？;；:：/\\|]+", " ", keyword_query)
+    keyword_query = re.sub(r"\s{2,}", " ", keyword_query).strip()
+    if len(keyword_query.split()) >= 2:
+        return keyword_query
+    return cleaned
+
+
+def _is_profile_query(text: Optional[str]) -> bool:
+    normalized = _normalize_match_text(text)
+    if not normalized:
+        return False
+    return any(token in normalized for token in _PROFILE_INTENT_TOKENS)
+
+
+def _extract_profile_subject(text: Optional[str]) -> str:
+    subject = str(text or "")
+    if not subject:
+        return ""
+
+    subject = re.sub(
+        r"(请|帮我|麻烦|就|那就|那|先|再|给我|简单|大概|详细|具体|顺便|先给我|先帮我)",
+        " ",
+        subject,
+    )
+    subject = re.sub(
+        r"(介绍一下|介绍|简介|是什么|是做什么的|做什么的|是干什么的|讲讲|说说|聊聊|了解一下|科普一下|一下)",
+        " ",
+        subject,
+    )
+    subject = re.sub(r"(的)?(基本情况|情况|信息|背景|资料|概况|介绍|简介)$", " ", subject)
+    subject = re.sub(r"[\"'`“”‘’（）()【】\\[\\]<>《》]", " ", subject)
+    subject = re.sub(r"[，,。.!！?？;；:：/\\\\|]+", " ", subject)
+    subject = re.sub(r"\s{2,}", " ", subject).strip()
+    return subject
+
+
 def _extract_query_terms(text: Optional[str], max_terms: int = 14) -> List[str]:
-    raw = str(text or "").lower()
+    raw = _light_clean_search_query(text).lower()
+    raw = re.sub(_QUESTION_SPLIT_PATTERN, " ", raw)
+    raw = re.sub(r"\b(why|how|what|which|when|where|who|can|could|would|should|please)\b", " ", raw)
+    raw = re.sub(r"\s{2,}", " ", raw).strip()
     terms: List[str] = []
 
     for zh_seq in re.findall(r"[\u4e00-\u9fff]{2,}", raw):
         seq = zh_seq.strip()
+        seq = re.sub(r"^(就|那就|那|请|帮我|帮|麻烦|先|再|给我)", "", seq)
+        seq = re.sub(r"(一下|一下子|吧|呢|呀|啊|吗|么)$", "", seq)
         if not seq:
             continue
+        if seq not in _QUERY_TERM_STOPWORDS:
+            terms.append(seq)
+        for prefix in _GENERIC_TERM_PREFIXES:
+            if seq.startswith(prefix) and len(seq) >= 3:
+                candidate = seq[len(prefix):].strip()
+                if candidate and candidate not in _QUERY_TERM_STOPWORDS:
+                    terms.append(candidate)
         if len(seq) <= 4:
             if seq not in _QUERY_TERM_STOPWORDS:
                 terms.append(seq)
             continue
 
-        # 对于长中文短语，请使用 n-gram，这样仍然可以检测到主题重叠。
-        for n in (4, 3, 2):
+        # 仅在较长短语上补充少量 n-gram，避免把普通问句切成大量噪声碎片。
+        for n in (4, 3):
             for i in range(0, len(seq) - n + 1):
                 t = seq[i:i + n]
                 if t and t not in _QUERY_TERM_STOPWORDS:
                     terms.append(t)
 
-    for t in re.findall(r"[a-z0-9_]{3,}", raw):
+    for t in re.findall(r"[a-z0-9_+-]{2,}", raw):
         if t and t not in _QUERY_TERM_STOPWORDS:
             terms.append(t)
 
@@ -506,6 +754,60 @@ def _extract_query_terms(text: Optional[str], max_terms: int = 14) -> List[str]:
         if len(uniq) >= max_terms:
             break
     return uniq
+
+
+def _extract_topic_terms(text: Optional[str], max_terms: int = 6) -> List[str]:
+    cleaned = _light_clean_search_query(text)
+    if not cleaned:
+        return []
+
+    work = re.sub(r"(为什么|为何)", " 原因 ", cleaned)
+    work = re.sub(_QUESTION_SPLIT_PATTERN, " ", work)
+    for token in sorted(_SEARCH_INTENT_TOKENS, key=len, reverse=True):
+        work = work.replace(token, " ")
+    work = re.sub(
+        r"(?:(?<=\s)|^)(做|讲|说|聊|查|搜|看|问|谈|评)(?=[\u4e00-\u9fff]{2,})",
+        " ",
+        work,
+    )
+    work = re.sub(r"[，,。.!！?？;；:：/\\|]+", " ", work)
+    work = re.sub(r"\s{2,}", " ", work).strip().lower()
+
+    topic_terms: List[str] = []
+    seen = set()
+
+    def add_term(value: str) -> None:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return
+        candidate = re.sub(r"^(就|那就|那|请|帮我|帮|麻烦|先|再|给我)", "", candidate)
+        candidate = re.sub(r"(一下|一下子|吧|呢|呀|啊|吗|么)$", "", candidate)
+        if not candidate or candidate in _QUERY_TERM_STOPWORDS:
+            return
+        normalized = _normalize_match_text(candidate)
+        if not normalized or normalized in seen or len(normalized) <= 1:
+            return
+        seen.add(normalized)
+        topic_terms.append(candidate)
+
+    for zh_seq in re.findall(r"[\u4e00-\u9fff]{2,20}", work):
+        seq = zh_seq.strip()
+        for prefix in _GENERIC_TERM_PREFIXES:
+            if seq.startswith(prefix) and len(seq) >= 3:
+                add_term(seq[len(prefix):].strip())
+        add_term(seq)
+        if len(topic_terms) >= max_terms:
+            break
+
+    if len(topic_terms) < max_terms:
+        for token in re.findall(r"[a-z0-9_+-]{2,}", work):
+            add_term(token)
+            if len(topic_terms) >= max_terms:
+                break
+
+    if topic_terms:
+        return topic_terms[:max_terms]
+    return _extract_query_terms(cleaned, max_terms=max_terms)
 
 
 def _normalize_weather_city_name(text: Optional[str], default: str = "") -> str:
@@ -548,6 +850,99 @@ def _normalize_weather_city_name(text: Optional[str], default: str = "") -> str:
         return en_parts[0]
 
     return city or default
+
+
+_WEATHER_DAY_ALIASES = {
+    "今天": "今天",
+    "今日": "今天",
+    "明天": "明天",
+    "后天": "后天",
+    "昨天": "昨天",
+    "昨日": "昨天",
+}
+
+_EXCHANGE_CURRENCY_ALIASES = [
+    ("CNY", "人民币", ("人民币", "cny", "rmb", "中国人民币")),
+    ("JPY", "日元", ("日元", "日币", "jpy")),
+    ("USD", "美元", ("美元", "usd", "美金", "美刀")),
+    ("EUR", "欧元", ("欧元", "eur")),
+    ("GBP", "英镑", ("英镑", "gbp")),
+    ("HKD", "港币", ("港币", "港元", "hkd")),
+    ("KRW", "韩元", ("韩元", "krw")),
+    ("TWD", "新台币", ("新台币", "台币", "twd")),
+    ("AUD", "澳元", ("澳元", "aud")),
+    ("CAD", "加元", ("加元", "cad")),
+    ("SGD", "新加坡元", ("新加坡元", "sgd")),
+    ("CHF", "瑞士法郎", ("瑞士法郎", "chf")),
+    ("THB", "泰铢", ("泰铢", "thb")),
+]
+
+
+def _detect_weather_target_day(text: Optional[str], default: str = "今天") -> str:
+    raw = str(text or "")
+    for token, normalized in _WEATHER_DAY_ALIASES.items():
+        if token in raw:
+            return normalized
+    return default
+
+
+def _looks_like_exchange_rate_query(text: Optional[str]) -> bool:
+    raw = str(text or "")
+    lowered = raw.lower()
+    if any(token in lowered for token in ("汇率", "exchange rate", "currency converter", "货币转换", "兑换")):
+        return True
+    return bool(re.search(r"\b[a-z]{3}\s*(?:/|-|to|兑|对)\s*[a-z]{3}\b", lowered))
+
+
+def _extract_exchange_rate_pair(text: Optional[str]) -> Optional[Tuple[str, str, str, str]]:
+    raw = str(text or "")
+    if not raw:
+        return None
+
+    code_to_name = {code: name for code, name, _ in _EXCHANGE_CURRENCY_ALIASES}
+    explicit = re.search(r"\b([A-Z]{3})\s*(?:/|-|to|兑|对)\s*([A-Z]{3})\b", raw, flags=re.IGNORECASE)
+    if explicit:
+        base_code = explicit.group(1).upper()
+        quote_code = explicit.group(2).upper()
+        if base_code in code_to_name and quote_code in code_to_name:
+            return base_code, quote_code, code_to_name[base_code], code_to_name[quote_code]
+
+    lowered = raw.lower()
+    hits: List[Tuple[int, int, str, str]] = []
+    for code, display_name, aliases in _EXCHANGE_CURRENCY_ALIASES:
+        best_pos: Optional[int] = None
+        best_len = 0
+        for alias in aliases:
+            pos = lowered.find(alias.lower())
+            if pos >= 0 and (best_pos is None or pos < best_pos):
+                best_pos = pos
+                best_len = len(alias)
+        if best_pos is not None:
+            hits.append((best_pos, best_len, code, display_name))
+
+    hits.sort(key=lambda item: (item[0], -item[1]))
+    ordered: List[Tuple[str, str]] = []
+    seen = set()
+    for _, _, code, display_name in hits:
+        if code in seen:
+            continue
+        seen.add(code)
+        ordered.append((code, display_name))
+        if len(ordered) >= 2:
+            break
+
+    if len(ordered) >= 2:
+        return ordered[0][0], ordered[1][0], ordered[0][1], ordered[1][1]
+    return None
+
+
+def _format_decimal_text(value: str) -> str:
+    try:
+        number = float(str(value).replace(",", "").strip())
+    except Exception:
+        return str(value).strip()
+    decimals = 6 if abs(number) < 1 else 4
+    return f"{number:.{decimals}f}".rstrip("0").rstrip(".")
 
 
 def _is_context_related(query: Optional[str], candidate_text: Optional[str], min_hits: int = 1) -> bool:
@@ -1417,25 +1812,260 @@ HIGH_VALUE_DOMAINS = [
 
 LOW_VALUE_DOMAINS = [
     "zhidao.baidu.com", "wenku.baidu.com",  # 很多时候需要付费或质量参差不齐
+    "jingyan.baidu.com",
     "csdn.net",  # 广告多，重复内容多 (视情况调整权重)
     "bilibili.com"  # 视频站对文本问答贡献通常较小，除非是专栏
 ]
+SLOW_FETCH_DOMAINS = [
+    "zhihu.com",
+    "x.com",
+    "twitter.com",
+    "instagram.com",
+    "linkedin.com",
+    "reddit.com",
+]
+FAST_FETCH_PREFERRED_DOMAINS = [
+    "openai.com",
+    "weather.com.cn",
+    "tianqi.com",
+    "2345.com",
+    "weather.cma.cn",
+    "nmc.cn",
+    "xe.com",
+    "wise.com",
+    "exchange-rates.org",
+    "currencyrate.today",
+    "shishihuilv.com",
+    "money-converter.org",
+    "finance.sina.com.cn",
+    "xinhuanet.com",
+    "people.com.cn",
+    "reuters.com",
+    "wikipedia.org",
+]
+EXCHANGE_RATE_PREFERRED_DOMAINS = [
+    "xe.com",
+    "wise.com",
+    "exchange-rates.org",
+    "currencyrate.today",
+    "shishihuilv.com",
+    "money-converter.org",
+    "finance.sina.com.cn",
+]
+
+_SEARCH_HOST_RESOLUTION_CACHE: Dict[str, bool] = {}
+_WEATHER_CITY_URL_CACHE: Dict[str, str] = {}
 
 
-def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
+def _result_text_fields(result: dict) -> Tuple[str, str, str]:
+    title = str(result.get("title") or "")
+    snippet = str(result.get("snippet") or "")
+    link = str(result.get("link") or "")
+    return title, snippet, link
+
+
+def _count_term_hits_in_text(text: str, terms: List[str]) -> int:
+    normalized_text = _normalize_match_text(text)
+    hits = 0
+    for term in terms:
+        normalized_term = _normalize_match_text(term)
+        if normalized_term and normalized_term in normalized_text:
+            hits += 1
+    return hits
+
+
+def _topic_match_hit_count(result: dict, query_text: str, include_link: bool = True) -> int:
+    topic_terms = _extract_topic_terms(query_text, max_terms=4)
+    if not topic_terms:
+        return 0
+    title, snippet, link = _result_text_fields(result)
+    hay = f"{title} {snippet} {link}" if include_link else f"{title} {snippet}"
+    return _count_term_hits_in_text(hay, topic_terms)
+
+
+def _is_low_signal_result(result: dict, query_text: str = "") -> bool:
+    title, snippet, link = _result_text_fields(result)
+    host = (urllib.parse.urlparse(link).netloc or "").lower().strip()
+    if any(dom in host for dom in _LOW_SIGNAL_RESULT_HOSTS):
+        if not any(token in query_text for token in ("下载", "安装", "素材", "设计", "导航", "平台", "官网")):
+            return True
+    if _is_fresh_search_query(query_text) and any(dom in host for dom in _FRESH_LOW_VALUE_HOSTS):
+        if not any(re.search(pattern, f"{title} {snippet}", flags=re.IGNORECASE) for pattern in _NEWSY_RESULT_PATTERNS):
+            return True
+    hay = f"{title} {snippet}"
+    if any(re.search(pattern, hay, flags=re.IGNORECASE) for pattern in _LOW_SIGNAL_RESULT_PATTERNS):
+        if not any(token in query_text for token in ("下载", "安装", "素材", "设计", "导航", "平台", "官网")):
+            return True
+    return False
+
+
+def _is_topically_relevant_search_result(result: dict, query_text: str) -> bool:
+    topic_terms = _extract_topic_terms(query_text, max_terms=4)
+    if not topic_terms:
+        return True
+
+    title, snippet, link = _result_text_fields(result)
+    title_snippet_hits = _count_term_hits_in_text(f"{title} {snippet}", topic_terms)
+    full_hits = _count_term_hits_in_text(f"{title} {snippet} {link}", topic_terms)
+    if _is_reason_search_query(query_text):
+        if not re.search(r"(原因|为何|为什么|背后|动因|逻辑|布局|战略|解析|解读|造车)", f"{title} {snippet}", flags=re.IGNORECASE):
+            return False
+
+    if len(topic_terms) == 1:
+        return title_snippet_hits >= 1 or full_hits >= 1
+    return title_snippet_hits >= 2 or full_hits >= 2
+
+
+def _score_search_results_quality(results: List[dict], query_text: str) -> float:
+    if not results:
+        return 0.0
+
+    score = 0.0
+    for idx, row in enumerate(results[:4]):
+        weight = max(1.0, 4.0 - idx)
+        if _is_low_signal_result(row, query_text):
+            score -= 6.0 * weight
+            continue
+        score += float(row.get("_score", 0.0)) * (0.18 * weight)
+        if _is_topically_relevant_search_result(row, query_text):
+            score += 8.0 * weight
+            score += 2.0 * min(3, _topic_match_hit_count(row, query_text, include_link=False))
+        else:
+            score -= 8.0 * weight
+    return score
+
+
+def _build_search_query_variants(query: str, prefer_fresh: bool = False) -> List[str]:
+    raw = str(query or "").strip()
+    if not raw:
+        return []
+
+    cleaned = _light_clean_search_query(raw)
+    topic_terms = _extract_topic_terms(cleaned, max_terms=4)
+    variants = _dedupe_preserve_order([raw, cleaned])
+
+    if topic_terms:
+        if _is_reason_search_query(cleaned):
+            enriched_topics = [term for term in topic_terms if term not in {"汽车", "车"}]
+            if any(token in cleaned for token in ("汽车", "造车")):
+                enriched_topics.append("造车")
+            variants.extend(
+                _dedupe_preserve_order(
+                    [
+                        " ".join(_dedupe_preserve_order(enriched_topics + ["原因"])),
+                    ]
+                )
+            )
+        if prefer_fresh or _is_fresh_search_query(cleaned):
+            variants.extend(
+                _dedupe_preserve_order(
+                    [
+                        " ".join(_dedupe_preserve_order(topic_terms + ["最新", "动态"])),
+                        " ".join(_dedupe_preserve_order(topic_terms + ["最新", "进展"])),
+                    ]
+                )
+            )
+
+    return _dedupe_preserve_order(variants)
+
+
+def _build_searxng_engine_groups(query: str = "", prefer_fresh: bool = False) -> List[str]:
+    engines = [engine.strip() for engine in SEARXNG_ENGINES.split(",") if engine.strip()]
+    if not engines:
+        return [""]
+
+    groups: List[str] = []
+    seen = set()
+
+    def add(group: List[str]) -> None:
+        normalized = [item.strip() for item in group if item and item.strip()]
+        if not normalized:
+            return
+        key = ",".join(normalized)
+        if key in seen:
+            return
+        seen.add(key)
+        groups.append(key)
+
+    preferred: List[str] = []
+    if prefer_fresh or _is_fresh_search_query(query):
+        preferred.extend([engine for engine in ("bing", "bing news", "wikipedia", "sogou") if engine in engines])
+    else:
+        preferred.extend([engine for engine in ("bing", "wikipedia", "sogou", "bing news") if engine in engines])
+    preferred.extend([engine for engine in engines if engine not in preferred])
+
+    add(preferred or engines)
+    add(engines)
+    for removable in ("duckduckgo", "baidu", "sogou", "wikipedia", "bing news"):
+        if removable in engines:
+            add([item for item in engines if item != removable])
+    if "bing" in engines and "sogou" in engines:
+        add(["bing", "sogou", "wikipedia"])
+        add(["bing", "sogou"])
+    if "bing" in engines and "bing news" in engines:
+        add(["bing", "bing news", "wikipedia"])
+        add(["bing", "bing news"])
+    if "bing" in engines:
+        add(["bing", "wikipedia"])
+        add(["bing"])
+    if "sogou" in engines:
+        add(["sogou"])
+    if "baidu" in engines:
+        add(["baidu"])
+    return groups
+
+
+def _calculate_result_score(result: dict, query_keywords: List[str], query_text: str = "") -> float:
     """Calculate a relevance score for one search result."""
     score = 0.0
     title = result.get("title", "").lower()
     snippet = result.get("snippet", "").lower()
     link = result.get("link", "").lower()
+    normalized_hay = _normalize_match_text(f"{title} {snippet} {link}")
+    cleaned_query = _light_clean_search_query(query_text)
+    normalized_query = _normalize_match_text(cleaned_query)
+    matched_terms = 0
+    title_hits = 0
+    is_fresh_query = _is_fresh_search_query(query_text)
+    is_reason_query = _is_reason_search_query(query_text)
+    topic_terms = _extract_topic_terms(query_text, max_terms=4)
+    topical_hits = _count_term_hits_in_text(f"{title} {snippet}", topic_terms) if topic_terms else 0
 
     # 1. 标题关键词加权
     for kw in query_keywords:
         kw = kw.lower()
-        if kw in title:
+        normalized_kw = _normalize_match_text(kw)
+        if not normalized_kw:
+            continue
+        if normalized_kw in _normalize_match_text(title):
             score += 3.0  # 标题包含关键词权重高
-        if kw in snippet:
+            matched_terms += 1
+            title_hits += 1
+            continue
+        if normalized_kw in _normalize_match_text(snippet):
             score += 1.0  # 摘要包含关键词
+            matched_terms += 1
+            continue
+        if normalized_kw in normalized_hay:
+            score += 0.6
+            matched_terms += 1
+
+    if matched_terms == 0:
+        score -= 6.0
+    else:
+        score += min(6.0, matched_terms * 1.4)
+    if title_hits >= 2:
+        score += 3.0
+    if normalized_query and len(normalized_query) >= 4 and normalized_query in normalized_hay:
+        score += 6.0
+
+    if topic_terms:
+        if topical_hits == 0:
+            score -= 12.0
+        elif len(topic_terms) >= 2 and topical_hits == 1:
+            score -= 5.0
+        else:
+            score += min(6.0, topical_hits * 2.5)
 
     # 2. 域名可信度提升
     domain_boost = False
@@ -1449,7 +2079,23 @@ def _calculate_result_score(result: dict, query_keywords: List[str]) -> float:
     if not domain_boost:
         for domain in LOW_VALUE_DOMAINS:
             if domain in link:
-                score -= 2.0
+                score -= 6.0
+    if _is_low_signal_result(result, query_text):
+        score -= 12.0
+    if "zhihu.com" in link and not any(token in query_text for token in _SUBJECTIVE_QUERY_HINTS):
+        score -= 4.0
+    if is_fresh_query:
+        if any(dom in link for dom in _FRESH_LOW_VALUE_HOSTS):
+            score -= 10.0
+        if any(dom in link for dom in ("baike.baidu.com", "wikipedia.org", "zhidao.baidu.com", "wenku.baidu.com", "zhihu.com")):
+            score -= 5.0
+        if any(re.search(pattern, f"{title} {snippet}", flags=re.IGNORECASE) for pattern in _NEWSY_RESULT_PATTERNS):
+            score += 4.0
+    if is_reason_query:
+        if re.search(r"(推荐|选购|参数对比|评测|开箱|配置|购买|值得买|平板|手机推荐)", f"{title} {snippet}", flags=re.IGNORECASE):
+            score -= 6.0
+        if re.search(r"(原因|为何|为什么|造车|战略|布局|解析|背后|动因)", f"{title} {snippet}", flags=re.IGNORECASE):
+            score += 4.0
 
     # 4. 非常短的片段惩罚
     if len(snippet) < 20:
@@ -1472,7 +2118,7 @@ def _rank_search_results(results: List[dict], query: str, min_score: float = 3.0
 
     scored_results = []
     for r in results:
-        score = _calculate_result_score(r, keywords)
+        score = _calculate_result_score(r, keywords, query)
         # 保持中间相关性分数
         r["_score"] = score
         if score >= min_score:
@@ -1500,7 +2146,474 @@ def _normalize_search_item(item: dict) -> Optional[dict]:
         val = item.get(key)
         if val is not None and str(val).strip():
             normalized[key] = str(val).strip()
+    if not _is_valid_search_result_link(link):
+        return None
     return normalized
+
+
+def _is_valid_search_result_link(link: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(link or "").strip())
+    except Exception:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    path = (parsed.path or "").strip().lower()
+    if not host:
+        return False
+
+    if host in {"www.baidu.com", "baidu.com", "m.baidu.com"} and path in {"", "/", "/index.htm", "/cache", "/cache/"}:
+        return False
+    if host in {"www.sogou.com", "sogou.com"} and path in {"", "/", "/web"}:
+        return False
+    if host in {"www.sogou.com", "sogou.com"} and path.startswith("/antispider"):
+        return False
+    if host == "m.sogou.com" and path.startswith("/h5/pages/video-recommend"):
+        return False
+    if host in {"www.bing.com", "bing.com", "cn.bing.com"} and path in {"", "/", "/search"}:
+        return False
+
+    cached = _SEARCH_HOST_RESOLUTION_CACHE.get(host)
+    if cached is not None:
+        return cached
+
+    try:
+        resolved_hosts = {
+            info[4][0]
+            for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            if info and info[4]
+        }
+        if not resolved_hosts:
+            _SEARCH_HOST_RESOLUTION_CACHE[host] = False
+            return False
+        for resolved in resolved_hosts:
+            ip = ipaddress.ip_address(resolved)
+            if not ip.is_global:
+                _SEARCH_HOST_RESOLUTION_CACHE[host] = False
+                return False
+    except Exception:
+        _SEARCH_HOST_RESOLUTION_CACHE[host] = False
+        return False
+
+    _SEARCH_HOST_RESOLUTION_CACHE[host] = True
+    return True
+
+
+def _rewrite_search_query_for_searxng(query: str, history_text: str = "") -> str:
+    raw_query = str(query or "")
+    cleaned = re.sub(r"[\"'`]+", " ", raw_query)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip() or raw_query.strip()
+    if not cleaned:
+        return cleaned
+
+    lowered = cleaned.lower()
+    if _is_profile_query(raw_query):
+        subject = _extract_profile_subject(raw_query)
+        if subject:
+            return f"{subject} 简介"
+
+    if any(k in lowered for k in ["天气", "气温", "温度", "weather", "forecast"]):
+        target_day = _detect_weather_target_day(f"{cleaned} {history_text}".strip(), default="")
+        city = _normalize_weather_city_name(f"{cleaned} {history_text}".strip(), default="")
+        city = _normalize_weather_city_name(city, default="")
+        if city:
+            parts = [city]
+            if target_day:
+                parts.append(target_day)
+            parts.extend(["天气", "预报"])
+            return " ".join(parts)
+
+    if _looks_like_exchange_rate_query(cleaned):
+        pair = _extract_exchange_rate_pair(cleaned)
+        if pair:
+            base_code, quote_code, _, _ = pair
+            return f"{base_code} {quote_code} 汇率"
+
+    return cleaned
+
+
+def _build_weather_fallback_items(query_text: str) -> List[dict]:
+    city = _normalize_weather_city_name(query_text, default="")
+    if not city:
+        return []
+
+    cached_url = _WEATHER_CITY_URL_CACHE.get(city)
+    if not cached_url:
+        try:
+            import requests
+
+            resp = requests.get(
+                "https://toy1.weather.com.cn/search",
+                params={"cityname": city},
+                headers={
+                    "Referer": "https://www.weather.com.cn/",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/123.0.0.0 Safari/537.36"
+                    ),
+                },
+                timeout=max(6, SEARXNG_TIMEOUT_SECONDS),
+            )
+            if resp.status_code == 200:
+                body = resp.text or ""
+                start = body.find("[")
+                end = body.rfind("]")
+                if start >= 0 and end > start:
+                    payload = json.loads(body[start:end + 1])
+                    if isinstance(payload, list):
+                        picked_code = ""
+                        for item in payload:
+                            ref = str((item or {}).get("ref") or "").strip()
+                            if not ref:
+                                continue
+                            parts = ref.split("~")
+                            city_code = parts[0].strip() if parts else ""
+                            city_label = parts[2].strip() if len(parts) > 2 else ""
+                            province_label = parts[-1].strip() if parts else ""
+                            if city_label == city or province_label == city:
+                                picked_code = city_code
+                                break
+                            if not picked_code:
+                                picked_code = city_code
+                        if picked_code:
+                            cached_url = f"https://www.weather.com.cn/weather/{picked_code}.shtml"
+                            _WEATHER_CITY_URL_CACHE[city] = cached_url
+        except Exception as e:
+            print(f"⚠️ [Search] weather fallback lookup failed: {e}")
+
+    if not cached_url:
+        return []
+
+    return [{
+        "title": f"{city}天气预报",
+        "link": cached_url,
+        "snippet": f"{city}天气预报与未来几天天气趋势",
+        "source": "weather.com.cn",
+        "provider": "weather-fallback",
+    }]
+
+
+def _build_exchange_fallback_items(query_text: str) -> List[dict]:
+    pair = _extract_exchange_rate_pair(query_text)
+    if not pair:
+        return []
+
+    base_code, quote_code, _, _ = pair
+    return [
+        {
+            "title": f"{base_code}/{quote_code} 汇率 - XE",
+            "link": f"https://www.xe.com/zh-CN/currencyconverter/convert/?Amount=1&From={base_code}&To={quote_code}",
+            "snippet": f"{base_code} 兑 {quote_code} 实时汇率",
+            "source": "xe.com",
+            "provider": "exchange-fallback",
+        },
+        {
+            "title": f"{base_code}/{quote_code} 汇率 - Exchange Rates",
+            "link": f"https://www.exchange-rates.org/zh/converter/{base_code.lower()}-{quote_code.lower()}",
+            "snippet": f"{base_code} 兑 {quote_code} 汇率换算",
+            "source": "exchange-rates.org",
+            "provider": "exchange-fallback",
+        },
+        {
+            "title": f"{base_code}/{quote_code} 汇率 - Wise",
+            "link": f"https://wise.com/zh-cn/currency-converter/{base_code.lower()}-to-{quote_code.lower()}-rate",
+            "snippet": f"{base_code} 兑 {quote_code} 中间市场汇率",
+            "source": "wise.com",
+            "provider": "exchange-fallback",
+        },
+    ]
+
+
+def _build_domain_fallback_fetch_items(query_text: str, domain: str) -> List[dict]:
+    if domain == "weather":
+        return _build_weather_fallback_items(query_text)
+    if domain == "exchange":
+        return _build_exchange_fallback_items(query_text)
+    if domain == "profile":
+        subject = _extract_profile_subject(query_text)
+        if not subject:
+            return []
+
+        variants: List[str] = []
+
+        def _add_variant(val: str) -> None:
+            candidate = re.sub(r"\s{2,}", " ", str(val or "")).strip()
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+
+        _add_variant(subject)
+        if subject.endswith("公司"):
+            _add_variant(f"{subject[:-2]}集团")
+        elif subject.endswith("集团"):
+            _add_variant(f"{subject[:-2]}公司")
+        elif len(subject) <= 10:
+            _add_variant(f"{subject}公司")
+            _add_variant(f"{subject}集团")
+
+        items: List[dict] = []
+        for variant in variants[:4]:
+            quoted = urllib.parse.quote(variant, safe="")
+            items.append(
+                {
+                    "title": f"{variant} - 百度百科",
+                    "link": f"https://baike.baidu.com/item/{quoted}",
+                    "snippet": f"{variant} 的百科介绍页面",
+                    "provider": "profile-fallback",
+                }
+            )
+            items.append(
+                {
+                    "title": f"{variant} - 维基百科",
+                    "link": f"https://zh.wikipedia.org/wiki/{quoted}",
+                    "snippet": f"{variant} 的维基百科页面",
+                    "provider": "profile-fallback",
+                }
+            )
+        return items
+    return []
+
+
+def _pick_search_fetch_items(results: List[dict], query: str, limit: int, domain: str = "") -> List[dict]:
+    if not results:
+        return []
+
+    query_terms = _extract_query_terms(query, max_terms=8)
+    scored: List[Tuple[float, int, dict]] = []
+    for idx, item in enumerate(results):
+        link = str(item.get("link") or "").strip()
+        if not link:
+            continue
+        host = (urllib.parse.urlparse(link).netloc or "").lower().strip()
+        title = str(item.get("title") or "")
+        snippet = str(item.get("snippet") or "")
+        hay = _normalize_match_text(f"{title} {snippet} {host}")
+        score = float(item.get("_score", 0.0)) + max(0.0, 20.0 - idx * 2.5)
+        if any(dom in host for dom in FAST_FETCH_PREFERRED_DOMAINS):
+            score += 18.0
+        if any(dom in host for dom in SLOW_FETCH_DOMAINS):
+            score -= 24.0
+        if domain == "weather":
+            if any(dom in host for dom in ("weather.com.cn", "tianqi.com", "2345.com", "weather.cma.cn", "nmc.cn")):
+                score += 32.0
+            else:
+                score -= 12.0
+        if domain == "exchange":
+            if any(dom in host for dom in EXCHANGE_RATE_PREFERRED_DOMAINS):
+                score += 36.0
+            elif any(dom in host for dom in ("jingyan.baidu.com", "zhidao.baidu.com", "wenku.baidu.com")):
+                score -= 40.0
+            else:
+                score -= 8.0
+        if domain == "profile":
+            if any(dom in host for dom in ("baike.baidu.com", "wikipedia.org")):
+                score += 38.0
+            if any(dom in host for dom in ("zhihu.com", "zhidao.baidu.com", "wenku.baidu.com", "jingyan.baidu.com")):
+                score -= 18.0
+            if any(noise in hay for noise in _PROFILE_NOISE_KEYWORDS):
+                score -= 24.0
+        for term in query_terms[:4]:
+            tn = _normalize_match_text(term)
+            if tn and tn in hay:
+                score += 2.0
+        scored.append((score, idx, item))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picked: List[dict] = []
+    seen = set()
+    for _, _, item in scored:
+        key = _canonicalize_link(str(item.get("link") or ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        picked.append(item)
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def _build_direct_weather_answer(city_name: str, pages: List[Dict[str, Any]]) -> str:
+    target_day = _detect_weather_target_day(city_name, default="今天")
+    weather_values: Dict[str, str] = {}
+    citations: Dict[str, int] = {}
+
+    for idx, page in enumerate(pages[:2], start=1):
+        for raw_line in str(page.get("content") or "").splitlines():
+            line = str(raw_line or "").strip()
+            if not line or ":" not in line:
+                continue
+            key, value = [part.strip() for part in line.split(":", 1)]
+            if not key or not value:
+                continue
+            normalized_key = ""
+            if key == "更新时间":
+                normalized_key = "更新时间"
+            else:
+                normalized = key.replace("今日", "今天")
+                if normalized.startswith(target_day):
+                    normalized_key = normalized[len(target_day):].strip()
+                elif target_day == "今天":
+                    if normalized == "今天天气":
+                        normalized_key = "天气"
+                    elif normalized in {"天气", "当前温度", "最高/最低气温", "风力"}:
+                        normalized_key = normalized
+            if normalized_key and normalized_key not in weather_values:
+                weather_values[normalized_key] = value
+                citations[normalized_key] = idx
+
+    if not weather_values:
+        return ""
+
+    city = _normalize_weather_city_name(city_name, default="当地")
+    parts = [f"{city}{target_day}"]
+    if weather_values.get("天气"):
+        parts.append(f"天气{weather_values['天气']}[{citations.get('天气', 1)}]")
+    if weather_values.get("当前温度"):
+        parts.append(f"当前温度{weather_values['当前温度']}[{citations.get('当前温度', 1)}]")
+    if weather_values.get("最高/最低气温"):
+        parts.append(f"最高/最低气温{weather_values['最高/最低气温']}[{citations.get('最高/最低气温', 1)}]")
+    if weather_values.get("风力"):
+        parts.append(f"风力{weather_values['风力']}[{citations.get('风力', 1)}]")
+    if weather_values.get("更新时间"):
+        parts.append(f"更新时间{weather_values['更新时间']}[{citations.get('更新时间', 1)}]")
+
+    summary = "，".join(parts).strip("，")
+    if not summary.endswith("。"):
+        summary += "。"
+    return summary
+
+
+def _build_direct_exchange_answer(query_text: str, pages: List[Dict[str, Any]]) -> str:
+    pair = _extract_exchange_rate_pair(query_text)
+    if not pair:
+        return ""
+
+    base_code, quote_code, base_name, quote_name = pair
+    direct_rate = ""
+    reverse_rate = ""
+    direct_citation = 1
+    reverse_citation = 1
+    updated_at = ""
+    update_citation = 1
+
+    for idx, page in enumerate(pages[:2], start=1):
+        for raw_line in str(page.get("content") or "").splitlines():
+            line = str(raw_line or "").strip()
+            if not line or ":" not in line:
+                continue
+            key, value = [part.strip() for part in line.split(":", 1)]
+            if key == "更新时间" and value and not updated_at:
+                updated_at = value
+                update_citation = idx
+                continue
+
+            pair_match = re.fullmatch(r"1 ([A-Z]{3})", key)
+            value_match = re.match(r"([0-9][0-9.,]*)\s*([A-Z]{3})", value)
+            if not pair_match or not value_match:
+                continue
+
+            src_code = pair_match.group(1).upper()
+            rate_text = value_match.group(1).replace(",", "")
+            dst_code = value_match.group(2).upper()
+
+            if src_code == base_code and dst_code == quote_code and not direct_rate:
+                direct_rate = rate_text
+                direct_citation = idx
+            elif src_code == quote_code and dst_code == base_code and not reverse_rate:
+                reverse_rate = rate_text
+                reverse_citation = idx
+
+    if not direct_rate and reverse_rate:
+        try:
+            direct_rate = str(1 / float(reverse_rate))
+            direct_citation = reverse_citation
+        except Exception:
+            direct_rate = ""
+    if not reverse_rate and direct_rate:
+        try:
+            reverse_rate = str(1 / float(direct_rate))
+            reverse_citation = direct_citation
+        except Exception:
+            reverse_rate = ""
+
+    if not direct_rate:
+        return ""
+
+    parts = [
+        f"按当前抓取到的汇率，1{base_name}约等于{_format_decimal_text(direct_rate)}{quote_name}[{direct_citation}]"
+    ]
+    if reverse_rate:
+        parts.append(
+            f"1{quote_name}约等于{_format_decimal_text(reverse_rate)}{base_name}[{reverse_citation}]"
+        )
+    if updated_at:
+        parts.append(f"更新时间{updated_at}[{update_citation}]")
+
+    summary = "，".join(parts).strip("，")
+    if not summary.endswith("。"):
+        summary += "。"
+    return summary
+
+
+def _build_direct_market_tool_answer(result: Dict[str, Any], domain: str = "") -> str:
+    if not result:
+        return ""
+
+    subject = str(result.get("title") or "").replace(" 实时报价", "").strip() or "当前行情"
+    snippet = str(result.get("snippet") or "").strip()
+    if not snippet:
+        return ""
+
+    facts: Dict[str, str] = {}
+    for raw_part in snippet.split("|"):
+        part = str(raw_part or "").strip()
+        if not part or ":" not in part:
+            continue
+        key, value = [seg.strip() for seg in part.split(":", 1)]
+        if key and value and key not in facts:
+            facts[key] = value
+
+    if not facts:
+        return ""
+
+    parts: List[str] = []
+    if domain == "stock":
+        if facts.get("最新价"):
+            parts.append(f"{subject}当前最新价{facts['最新价']}[1]")
+        if facts.get("涨跌"):
+            parts.append(f"涨跌{facts['涨跌']}[1]")
+        if facts.get("今开"):
+            parts.append(f"今开{facts['今开']}[1]")
+        if facts.get("高/低"):
+            parts.append(f"高/低{facts['高/低']}[1]")
+        if facts.get("时间"):
+            parts.append(f"时间{facts['时间']}[1]")
+    elif domain == "gold":
+        if facts.get("最新报价"):
+            parts.append(f"{subject}当前最新报价{facts['最新报价']}[1]")
+        if facts.get("前收"):
+            parts.append(f"前收{facts['前收']}[1]")
+        if facts.get("高/低"):
+            parts.append(f"高/低{facts['高/低']}[1]")
+        if facts.get("时间"):
+            parts.append(f"时间{facts['时间']}[1]")
+    else:
+        if facts.get("最新价"):
+            parts.append(f"{subject}当前最新价{facts['最新价']}[1]")
+        elif facts.get("最新报价"):
+            parts.append(f"{subject}当前最新报价{facts['最新报价']}[1]")
+        for key in ("涨跌", "今开", "高/低", "时间"):
+            if facts.get(key):
+                parts.append(f"{key}{facts[key]}[1]")
+
+    if not parts:
+        return ""
+
+    summary = "，".join(parts).strip("，")
+    if not summary.endswith("。"):
+        summary += "。"
+    return summary
 
 
 def _canonicalize_link(link: str) -> str:
@@ -1531,19 +2644,15 @@ def _post_process_search_results(results: List[dict], query: str, max_results: i
     if not normalized:
         return []
 
-    # 先做一轮“核心词命中”过滤，减少主题偏移。
-    core_terms = [t for t in _extract_query_terms(query, max_terms=8) if len(str(t)) >= 2][:4]
-    if core_terms:
-        strict_hits = []
-        for row in normalized:
-            hay = _normalize_match_text(
-                f"{row.get('title', '')} {row.get('snippet', '')} {row.get('link', '')}"
-            )
-            if any(_normalize_match_text(t) in hay for t in core_terms):
-                strict_hits.append(row)
-        # 严格命中太少时不强制，避免把结果清空。
-        if len(strict_hits) >= 2:
-            normalized = strict_hits
+    filtered = [row for row in normalized if not _is_low_signal_result(row, query)]
+    if filtered:
+        normalized = filtered
+
+    topic_terms = _extract_topic_terms(query, max_terms=4)
+    if topic_terms:
+        strict_topic_hits = [row for row in normalized if _is_topically_relevant_search_result(row, query)]
+        if strict_topic_hits:
+            normalized = strict_topic_hits
 
     ranked = _rank_search_results(normalized, query, min_score=1.0)
     if ranked:
@@ -1561,6 +2670,79 @@ def _post_process_search_results(results: List[dict], query: str, max_results: i
                 break
         return merged[:max_results]
     return normalized[:max_results]
+
+
+def _search_with_searxng(query: str, max_results: int, prefer_fresh: bool = False) -> List[dict]:
+    import requests
+
+    if not SEARXNG_BASE_URL:
+        return []
+
+    chosen_language = _choose_searxng_language(query)
+    endpoint = f"{SEARXNG_BASE_URL}/search"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/123.0.0.0 Safari/537.36"
+        ),
+    }
+    if chosen_language:
+        headers["Accept-Language"] = chosen_language
+
+    parse_limit = max(24, max_results * 4)
+    for engine_group in _build_searxng_engine_groups(query, prefer_fresh=prefer_fresh):
+        params: Dict[str, Any] = {
+            "q": query,
+            "format": "json",
+            "safesearch": SEARXNG_SAFESEARCH,
+            "pageno": 1,
+        }
+        if chosen_language:
+            params["language"] = chosen_language
+        if engine_group:
+            params["engines"] = engine_group
+        if prefer_fresh:
+            params["time_range"] = "day"
+            params["categories"] = "general,news"
+
+        try:
+            resp = requests.get(endpoint, params=params, headers=headers, timeout=SEARXNG_TIMEOUT_SECONDS)
+        except Exception as e:
+            print(f"⚠️ [SearXNG] engines={engine_group or '(default)'} request failed: {e}")
+            continue
+        if resp.status_code != 200:
+            print(f"⚠️ [SearXNG] Error {resp.status_code}: {resp.text[:240]}")
+            continue
+
+        payload = resp.json() or {}
+        rows = payload.get("results", []) or []
+        unresponsive = payload.get("unresponsive_engines") or []
+        parsed: List[dict] = []
+        for row in rows:
+            if len(parsed) >= parse_limit:
+                break
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            link = str(row.get("url") or "").strip()
+            snippet = re.sub(r"\s+", " ", str(row.get("content") or row.get("snippet") or "")).strip()
+            if not title or not link:
+                continue
+            parsed.append({
+                "title": title,
+                "link": link,
+                "snippet": snippet,
+                "source": str(row.get("engine") or "").strip(),
+                "date": str(row.get("publishedDate") or row.get("publishedDateText") or row.get("pubdate") or "").strip(),
+                "provider": "searxng",
+            })
+        if parsed:
+            return parsed
+        if unresponsive:
+            print(f"⚠️ [SearXNG] engines={engine_group or '(default)'} unresponsive={unresponsive}")
+    return []
 
 
 def _search_with_bing_api(query: str, max_results: int) -> List[dict]:
@@ -1833,6 +3015,7 @@ def tool_get_stock(query: str) -> List[dict]:
     print(f"📈 [Stock Tool] Analyzing query: {query}")
     try:
         headers = {"Referer": "https://finance.sina.com.cn/", "User-Agent": "Mozilla/5.0"}
+        stock_like_markets = {"11", "12", "31", "41", "71", "73", "103"}
         raw_query = str(query or "").strip()
         cleaned_query = re.sub(
             r"(现在|当前|今日|最新|实时|公司|股价|股票|行情|价格|是多少|多少|呢|请问|想知道|查一下|看一下|一下|一下子)",
@@ -1847,6 +3030,32 @@ def tool_get_stock(query: str) -> List[dict]:
         direct_code = ""
         direct_name = cleaned_query
         direct_market = ""
+        query_has_chinese = bool(re.search(r"[\u4e00-\u9fff]", raw_query))
+        market_hint_text = raw_query.lower()
+        fullwidth_ascii_map = str.maketrans({
+            "－": "-",
+            "Ｗ": "W",
+            "Ｒ": "R",
+        })
+        normalized_cleaned_query = cleaned_query.translate(fullwidth_ascii_map)
+
+        def _parse_num(value: Any) -> float:
+            try:
+                return float(str(value or "").replace(",", "").strip())
+            except Exception:
+                return 0.0
+
+        def _quote_has_usable_price(code: str, values: List[str]) -> bool:
+            if code.startswith(("sh", "sz")) and len(values) > 31:
+                return _parse_num(values[3]) > 0
+            if code.startswith(("rt_hk", "hk")) and len(values) > 18:
+                numeric_fields = [_parse_num(values[idx]) for idx in (2, 3, 4, 5, 6)]
+                return any(v > 0 for v in numeric_fields)
+            if code.startswith("gb_") and len(values) > 7:
+                numeric_fields = [_parse_num(values[idx]) for idx in (1, 4, 5, 6)]
+                return any(v > 0 for v in numeric_fields)
+            numeric_fields = [_parse_num(v) for v in values[:8]]
+            return any(v > 0 for v in numeric_fields)
 
         code_match = re.search(r"\b(?:sh|sz|hk)?\d{5,6}\b", raw_query.lower())
         us_match = re.search(r"\b[A-Za-z]{1,6}\b", raw_query)
@@ -1857,7 +3066,11 @@ def tool_get_stock(query: str) -> List[dict]:
                     direct_code = ("sh" if direct_code.startswith("6") else "sz") + direct_code
                 elif len(direct_code) == 5:
                     direct_code = "hk" + direct_code
-        elif us_match and len(raw_query.strip()) <= 16:
+        elif (
+            us_match
+            and len(raw_query.strip()) <= 16
+            and not re.search(r"[\u4e00-\u9fff].*-[A-Za-z]\b", raw_query)
+        ):
             token = us_match.group(0).lower()
             if token not in {"price", "stock", "quote", "today", "now"}:
                 direct_code = f"gb_{token}"
@@ -1915,6 +3128,7 @@ def tool_get_stock(query: str) -> List[dict]:
                 raw_code = str(cols[3] if len(cols) > 3 else cols[2]).strip()
                 primary_name = str(cols[0] if len(cols) > 0 else "").strip()
                 display_name = str(cols[4] if len(cols) > 4 else primary_name).strip() or primary_name
+                normalized_display = f"{primary_name} {display_name}".translate(fullwidth_ascii_map)
                 code = _normalize_stock_code(raw_code, market)
                 if not code:
                     continue
@@ -1931,6 +3145,28 @@ def tool_get_stock(query: str) -> List[dict]:
                     score -= 45
                 if "etf" in (primary_name + display_name).lower() and "etf" not in cleaned_query.lower():
                     score -= 20
+                if market not in stock_like_markets:
+                    score -= 60
+                if not any(token in cleaned_query.lower() for token in ["wr", "权证", "窝轮", "牛熊", "认购", "认沽"]):
+                    if re.search(r"(wr\b|权证|窝轮|牛熊|认购|认沽|ＷＲ|轮证)", f"{primary_name} {display_name}", flags=re.IGNORECASE):
+                        score -= 40
+                if re.search(r"(?i)-w\b", normalized_cleaned_query):
+                    if re.search(r"(?i)-wr\b", normalized_display):
+                        score -= 120
+                    elif re.search(r"(?i)-w\b", normalized_display):
+                        score += 28
+                if query_has_chinese:
+                    if any(hint in market_hint_text for hint in ["港股", "hk", "h股", "恒生"]):
+                        if market == "31":
+                            score += 20
+                    elif any(hint in market_hint_text for hint in ["美股", "us", "纳斯达克", "纽交所", "adr"]):
+                        if market in {"41", "103"}:
+                            score += 20
+                    else:
+                        if market in {"11", "12", "31"}:
+                            score += 12
+                        elif market in {"41", "103"}:
+                            score -= 18
                 if market in {"11", "12", "31", "41", "71", "73", "103"}:
                     score += 6
 
@@ -1943,29 +3179,55 @@ def tool_get_stock(query: str) -> List[dict]:
         if not candidates:
             return results
 
-        best = max(candidates, key=lambda x: float(x.get("score", 0)))
-        stock_code = str(best.get("code") or "").strip()
-        stock_name = str(best.get("name") or stock_code).strip()
-        if not stock_code:
-            return results
-
-        query_codes = [stock_code]
-        if stock_code.startswith("hk"):
-            query_codes.append(f"rt_{stock_code}")
-
-        content = ""
-        for c in query_codes:
-            hq_url = f"http://hq.sinajs.cn/list={c}"
-            hq_resp = requests.get(hq_url, headers=headers, timeout=6)
-            if hq_resp.status_code != 200:
+        deduped_candidates: Dict[str, Dict[str, Any]] = {}
+        for candidate in candidates:
+            code = str(candidate.get("code") or "").strip()
+            if not code:
                 continue
-            val_match = re.search(r'="(.*?)"', hq_resp.text)
-            if val_match and val_match.group(1).strip():
-                content = val_match.group(1).strip()
+            prev = deduped_candidates.get(code)
+            if prev is None or float(candidate.get("score", 0)) > float(prev.get("score", 0)):
+                deduped_candidates[code] = candidate
+
+        ranked_candidates = sorted(
+            deduped_candidates.values(),
+            key=lambda item: float(item.get("score", 0)),
+            reverse=True,
+        )
+
+        stock_code = ""
+        stock_name = ""
+        content = ""
+        for candidate in ranked_candidates[:8]:
+            candidate_code = str(candidate.get("code") or "").strip()
+            candidate_name = str(candidate.get("name") or candidate_code).strip()
+            if not candidate_code:
+                continue
+
+            query_codes = [candidate_code]
+            if candidate_code.startswith("hk"):
+                query_codes.append(f"rt_{candidate_code}")
+
+            for c in query_codes:
+                hq_url = f"http://hq.sinajs.cn/list={c}"
+                hq_resp = requests.get(hq_url, headers=headers, timeout=6)
+                if hq_resp.status_code != 200:
+                    continue
+                val_match = re.search(r'="(.*?)"', hq_resp.text)
+                if not val_match or not val_match.group(1).strip():
+                    continue
+                candidate_content = val_match.group(1).strip()
+                candidate_vals = candidate_content.split(",")
+                if not _quote_has_usable_price(c, candidate_vals):
+                    continue
+                content = candidate_content
                 stock_code = c
+                stock_name = candidate_name
                 break
 
-        if not content:
+            if content:
+                break
+
+        if not content or not stock_code:
             return results
 
         vals = content.split(",")
@@ -2123,35 +3385,64 @@ def tool_get_gold_price(query: str = "") -> List[dict]:
 # ------------------------------------------------------------
 def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
     """
-    Direct web search via public search engine result pages.
+    Web search via SearXNG JSON API.
     """
-    # 先清理“写作指令/字数约束”噪声，提升检索命中。
-    raw_query = str(query or "")
-    query = re.sub(r"(至少|不少于|不低于|最多|不超过|不多于|不高于)?\s*\d{2,5}\s*字", " ", raw_query)
-    query = re.sub(r"(请|帮我|麻烦)?(介绍一下|介绍|总结一下|总结|写一篇|写一段|分析一下|分析)", " ", query)
-    query = re.sub(r"[，,。.!！?？;；:：]+", " ", query)
-    query = re.sub(r"\s{2,}", " ", query).strip() or raw_query
+    query = str(query or "").strip()
+    if not query:
+        return []
 
     q_lower = query.lower()
+    prefer_fresh = any(k in q_lower for k in ["现在", "当前", "实时", "最新", "today", "now", "今日", "刚刚", "近况"])
+    defer_searxng_return = prefer_fresh or _is_reason_search_query(query)
+    query_variants = _build_search_query_variants(query, prefer_fresh=prefer_fresh)
+    best_searxng_results: List[dict] = []
+    best_searxng_score = float("-inf")
 
-    print(f"🔍 [Search] Trying provider=direct-html query={query}")
-    try:
-        freshness_keywords = ["现在", "当前", "实时", "最新", "today", "now", "今日", "刚刚", "近况"]
-        prefer_fresh = any(k in q_lower for k in freshness_keywords)
-        effective_query = query
-        if prefer_fresh:
-            now_stamp = datetime.now().strftime("%Y-%m-%d")
-            effective_query = f"{query} {now_stamp} 最新"
+    print(f"🔍 [Search] Trying provider=searxng query={query}")
+    for query_variant in query_variants:
+        try:
+            effective_query = query_variant
+            if prefer_fresh:
+                now_stamp = datetime.now().strftime("%Y-%m-%d")
+                effective_query = f"{query_variant} {now_stamp} 最新"
 
-        provider_rows = _perform_web_search_scraping(effective_query, max_results=max_results * 2)
-        picked = _post_process_search_results(provider_rows, query, max_results=max_results)
-        if picked:
-            print(f"✅ [Search] provider=direct-html results={len(picked)}")
-            return picked
-    except Exception as e:
-        print(f"⚠️ [Search] provider=direct-html failed: {e}")
+            provider_rows = _search_with_searxng(effective_query, max_results=max_results * 2, prefer_fresh=prefer_fresh)
+            picked = _post_process_search_results(provider_rows, query_variant, max_results=max_results)
+            quality = _score_search_results_quality(picked, query_variant)
+            if picked and quality > best_searxng_score:
+                best_searxng_results = picked
+                best_searxng_score = quality
+            if picked and quality >= 24.0 and (not defer_searxng_return or quality >= 90.0):
+                print(f"✅ [Search] provider=searxng query={query_variant} results={len(picked)} score={quality:.1f}")
+                return picked
+        except Exception as e:
+            print(f"⚠️ [Search] provider=searxng query={query_variant} failed: {e}")
 
-    print("⚠️ [Search] Direct search returned no usable results.")
+    if best_searxng_results:
+        print(f"⚠️ [Search] SearXNG results weak, trying HTML fallback. best_score={best_searxng_score:.1f}")
+
+    best_fallback_results: List[dict] = []
+    best_fallback_score = float("-inf")
+    for query_variant in query_variants:
+        try:
+            fallback_rows = _perform_web_search_scraping(query_variant, max_results=max_results * 2)
+            picked = _post_process_search_results(fallback_rows, query_variant, max_results=max_results)
+            quality = _score_search_results_quality(picked, query_variant)
+            if picked and quality > best_fallback_score:
+                best_fallback_results = picked
+                best_fallback_score = quality
+            if picked and quality >= 12.0:
+                print(f"✅ [Search] provider=html-fallback query={query_variant} results={len(picked)} score={quality:.1f}")
+                return picked
+        except Exception as e:
+            print(f"⚠️ [Search] provider=html-fallback query={query_variant} failed: {e}")
+
+    if best_fallback_results and best_fallback_score >= best_searxng_score:
+        return best_fallback_results
+    if best_searxng_results:
+        return best_searxng_results
+
+    print("⚠️ [Search] No usable results from SearXNG or HTML fallback.")
     return []
 
 
@@ -2179,9 +3470,15 @@ def _resolve_search_result_link(link: str, *, headers: Optional[Dict[str, str]] 
     import requests
 
     try:
-        resp = requests.get(candidate, headers=headers or {"User-Agent": "Mozilla/5.0"}, timeout=6, allow_redirects=True, stream=True)
+        resp = requests.get(candidate, headers=headers or {"User-Agent": "Mozilla/5.0"}, timeout=6, allow_redirects=True)
         final_url = str(resp.url or candidate).strip()
-        resp.close()
+        body = resp.text or ""
+        if final_url == candidate and body:
+            js_redirect = re.search(r'window\.location\.replace\("([^"]+)"\)', body, flags=re.IGNORECASE)
+            meta_redirect = re.search(r"URL='([^']+)'", body, flags=re.IGNORECASE)
+            redirected = (js_redirect.group(1) if js_redirect else "") or (meta_redirect.group(1) if meta_redirect else "")
+            if redirected.startswith(("http://", "https://")):
+                final_url = redirected
         return final_url or candidate
     except Exception:
         return candidate
@@ -2263,6 +3560,8 @@ def _search_with_sogou_html(query: str, max_results: int) -> List[dict]:
 
         if link.startswith("/link?"):
             link = _resolve_search_result_link(f"https://www.sogou.com{link}", headers=headers)
+        elif link.startswith("https://www.sogou.com/link?") or link.startswith("http://www.sogou.com/link?"):
+            link = _resolve_search_result_link(link, headers=headers)
         elif link.startswith("/"):
             continue
 
@@ -2281,22 +3580,34 @@ def _search_with_sogou_html(query: str, max_results: int) -> List[dict]:
 
 def _perform_web_search_scraping(query: str, max_results: int) -> List[dict]:
     """Direct HTML search against public search engines."""
-    providers = [
-        ("bing-html", _search_with_bing_html),
-        ("sogou-html", _search_with_sogou_html),
-    ]
+    providers = (
+        [
+            ("sogou-html", _search_with_sogou_html),
+            ("bing-html", _search_with_bing_html),
+        ]
+        if re.search(r"[\u4e00-\u9fff]", query or "")
+        else [
+            ("bing-html", _search_with_bing_html),
+            ("sogou-html", _search_with_sogou_html),
+        ]
+    )
 
+    best_results: List[dict] = []
+    best_score = float("-inf")
     for provider_name, provider_fn in providers:
         try:
             rows = provider_fn(query, max_results=max_results)
             picked = _post_process_search_results(rows, query, max_results=max_results)
+            quality = _score_search_results_quality(picked, query)
+            if picked and quality > best_score:
+                best_results = picked
+                best_score = quality
             if picked:
-                print(f"✅ [Search] provider={provider_name} raw={len(rows)} picked={len(picked)}")
-                return picked
+                print(f"✅ [Search] provider={provider_name} raw={len(rows)} picked={len(picked)} score={quality:.1f}")
         except Exception as e:
             print(f"⚠️ [Search] provider={provider_name} failed: {e}")
 
-    return []
+    return best_results
 
 
 # ------------------------------------------------------------
@@ -2992,6 +4303,9 @@ async def chat(
         t = (text or "").lower()
         return any(k in t for k in ["金价", "黄金", "伦敦金", "现货金", "comex gold", "gold"])
 
+    def _is_exchange_query(text: str) -> bool:
+        return _looks_like_exchange_rate_query(text)
+
     def _is_realtime_sensitive_query(text: str) -> bool:
         t = (text or "").lower()
         freshness_words = ["现在", "当前", "实时", "最新", "today", "now", "今日", "刚刚", "最新价格", "现价"]
@@ -3087,6 +4401,8 @@ async def chat(
         # 移除常见生成约束（字数、语气类）避免污染检索词。
         q = re.sub(r"(至少|不少于|不低于|最多|不超过|不多于|不高于)?\s*\d{2,5}\s*字", " ", q)
         q = re.sub(r"(请|帮我|麻烦)?(介绍一下|介绍|总结一下|总结|写一篇|写一段|分析一下|分析)", " ", q)
+        q = re.sub(r"^(就|那就|那|请|帮我|麻烦|先|再|给我)\s*", "", q)
+        q = re.sub(r"\s*(一下|一下子|吧|呢|呀|啊)$", "", q)
         q = re.sub(r"[，,。.!！?？;；:：]+", " ", q)
         q = re.sub(r"\s{2,}", " ", q).strip()
         return q or str(text or "")
@@ -3107,10 +4423,14 @@ async def chat(
     def _detect_query_domain(text: str) -> str:
         if _is_weather_query(text):
             return "weather"
+        if _is_exchange_query(text):
+            return "exchange"
         if _is_stock_query(text):
             return "stock"
         if _is_gold_query(text):
             return "gold"
+        if _is_profile_query(text):
+            return "profile"
         return ""
 
     def _is_explicit_followup_query(text: str) -> bool:
@@ -3182,24 +4502,99 @@ async def chat(
                 _is_explicit_followup_query(message) and _is_realtime_sensitive_query(intent_probe)
             )
             length_req = _extract_length_requirement(message)
-            search_query = _sanitize_search_query(contextual_user_query or message)
+            raw_search_query = str(message or "").strip()
+            rewrite_seed = message if _is_profile_query(message) else (contextual_user_query or message)
+            search_domain = (
+                _detect_query_domain(message)
+                or _detect_query_domain(rewrite_seed)
+            )
+            if search_domain:
+                search_query = _rewrite_search_query_for_searxng(rewrite_seed, history_text)
+            elif _is_explicit_followup_query(message):
+                search_query = _build_general_search_query(contextual_user_query or raw_search_query)
+            else:
+                search_query = _build_general_search_query(raw_search_query or str(contextual_user_query or "").strip())
+            search_domain = search_domain or _detect_query_domain(search_query)
+            scrape_page_limit = SEARCH_SCRAPE_PAGE_LIMIT_REALTIME if (is_realtime_query or search_domain == "weather") else SEARCH_SCRAPE_PAGE_LIMIT
+
+            if search_domain in {"stock", "gold"}:
+                tool_query = contextual_user_query or message
+                progress_text = "> 正在查询实时股价：{query}\n\n" if search_domain == "stock" else "> 正在查询实时金价：{query}\n\n"
+                yield json.dumps({"t": "c", "v": progress_text.format(query=tool_query)}, ensure_ascii=False) + "\n"
+
+                market_sources = await asyncio.to_thread(
+                    tool_get_stock if search_domain == "stock" else tool_get_gold_price,
+                    tool_query,
+                )
+
+                if _is_cancelled():
+                    return
+
+                if market_sources:
+                    yield json.dumps({"t": "m", "sid": session_id, "src": market_sources}, ensure_ascii=False) + "\n"
+                    direct_market_answer = _build_direct_market_tool_answer(market_sources[0], domain=search_domain)
+                    if direct_market_answer:
+                        full_reply_clean = direct_market_answer
+                        for part in _split_text(full_reply_clean):
+                            if _is_cancelled():
+                                return
+                            yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
+                            await asyncio.sleep(0)
+                        if _is_cancelled():
+                            return
+                        if user_id != "anonymous":
+                            try:
+                                await _save_history_turn_async(
+                                    user_id,
+                                    session_id,
+                                    "search",
+                                    message,
+                                    full_reply_clean,
+                                )
+                            except Exception as e:
+                                print(f"[Search] history save failed: {e}")
+                        if _is_cancelled():
+                            return
+                        yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
+                        return
 
             yield json.dumps({"t": "c", "v": f"> 正在搜索：{search_query}\n\n"}, ensure_ascii=False) + "\n"
 
             raw_results = await asyncio.to_thread(perform_web_search, search_query)
             search_results = _post_process_search_results(raw_results, search_query, max_results=6)
+            fallback_fetch_candidates = _build_domain_fallback_fetch_items(search_query, search_domain)
 
             if _is_cancelled():
                 return
 
-            if not search_results:
+            if not search_results and not fallback_fetch_candidates:
                 no_result_text = "未检索到可靠结果。请换个关键词再试。"
                 full_reply_clean = no_result_text
                 yield json.dumps({"t": "c", "v": no_result_text}, ensure_ascii=False) + "\n"
             else:
+                fetch_candidates = _pick_search_fetch_items(
+                    search_results,
+                    search_query,
+                    limit=scrape_page_limit,
+                    domain=search_domain,
+                )
+                if fallback_fetch_candidates:
+                    merged_candidates = list(fallback_fetch_candidates) + list(fetch_candidates)
+                    deduped_candidates = []
+                    seen_candidate_links = set()
+                    for item in merged_candidates:
+                        link = str(item.get("link") or "").strip()
+                        link_key = _canonicalize_link(link)
+                        if not link_key or link_key in seen_candidate_links:
+                            continue
+                        seen_candidate_links.add(link_key)
+                        deduped_candidates.append(item)
+                        if len(deduped_candidates) >= scrape_page_limit:
+                            break
+                    fetch_candidates = deduped_candidates
                 fetch_urls = [
                     str(item.get("link") or "").strip()
-                    for item in search_results[:SEARCH_SCRAPE_PAGE_LIMIT]
+                    for item in fetch_candidates
                     if str(item.get("link") or "").strip()
                 ]
                 fetched_pages: List[Dict[str, Any]] = []
@@ -3219,6 +4614,13 @@ async def chat(
                     scrape_result = await asyncio.to_thread(scrape_urls_for_chat, fetch_urls)
                     fetched_pages = list(scrape_result.get("pages") or [])
                     scrape_errors = list(scrape_result.get("errors") or [])
+                    filtered_pages: List[Dict[str, Any]] = []
+                    for page in fetched_pages:
+                        final_url = str(page.get("final_url") or page.get("url") or "").strip()
+                        if not _is_valid_search_result_link(final_url):
+                            continue
+                        filtered_pages.append(page)
+                    fetched_pages = filtered_pages
 
                 if _is_cancelled():
                     return
@@ -3231,7 +4633,7 @@ async def chat(
 
                 search_sources = []
                 if fetched_pages:
-                    for page in fetched_pages[:SEARCH_SCRAPE_PAGE_LIMIT]:
+                    for page in fetched_pages[:scrape_page_limit]:
                         final_url = str(page.get("final_url") or page.get("url") or "").strip()
                         lookup = search_lookup.get(_canonicalize_link(final_url)) or search_lookup.get(
                             _canonicalize_link(str(page.get("url") or ""))
@@ -3268,9 +4670,62 @@ async def chat(
                     full_reply_clean = failure_text
                     yield json.dumps({"t": "c", "v": failure_text}, ensure_ascii=False) + "\n"
                 else:
-                    page_context_limit = max(1200, min(2200, MAX_CONTEXT_CHARS // max(1, len(fetched_pages))))
+                    if search_domain == "weather":
+                        weather_direct_answer = _build_direct_weather_answer(search_query, fetched_pages)
+                        if weather_direct_answer:
+                            full_reply_clean = weather_direct_answer
+                            for part in _split_text(full_reply_clean):
+                                if _is_cancelled():
+                                    return
+                                yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
+                                await asyncio.sleep(0)
+                            if _is_cancelled():
+                                return
+                            if user_id != "anonymous":
+                                try:
+                                    await _save_history_turn_async(
+                                        user_id,
+                                        session_id,
+                                        "search",
+                                        message,
+                                        full_reply_clean,
+                                    )
+                                except Exception as e:
+                                    print(f"[Search] history save failed: {e}")
+                            if _is_cancelled():
+                                return
+                            yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
+                            return
+                    elif search_domain == "exchange":
+                        exchange_direct_answer = _build_direct_exchange_answer(search_query, fetched_pages)
+                        if exchange_direct_answer:
+                            full_reply_clean = exchange_direct_answer
+                            for part in _split_text(full_reply_clean):
+                                if _is_cancelled():
+                                    return
+                                yield json.dumps({"t": "c", "v": part}, ensure_ascii=False) + "\n"
+                                await asyncio.sleep(0)
+                            if _is_cancelled():
+                                return
+                            if user_id != "anonymous":
+                                try:
+                                    await _save_history_turn_async(
+                                        user_id,
+                                        session_id,
+                                        "search",
+                                        message,
+                                        full_reply_clean,
+                                    )
+                                except Exception as e:
+                                    print(f"[Search] history save failed: {e}")
+                            if _is_cancelled():
+                                return
+                            yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
+                            return
+
+                    page_context_limit = max(700, min(SEARCH_CONTEXT_PAGE_MAX_CHARS, MAX_CONTEXT_CHARS // max(1, len(fetched_pages))))
                     fetched_context_lines = []
-                    for i, page in enumerate(fetched_pages[:SEARCH_SCRAPE_PAGE_LIMIT], start=1):
+                    for i, page in enumerate(fetched_pages[:scrape_page_limit], start=1):
                         final_url = str(page.get("final_url") or page.get("url") or "").strip()
                         lookup = search_lookup.get(_canonicalize_link(final_url)) or search_lookup.get(
                             _canonicalize_link(str(page.get("url") or ""))
@@ -3302,20 +4757,26 @@ async def chat(
                             scrape_error_lines.append(f"- {error_url}: {error_msg}".strip())
 
                     auxiliary_search_lines = []
-                    for i, item in enumerate(search_results[:5], start=1):
-                        title = str(item.get("title") or "").strip()
-                        snippet = str(item.get("snippet") or "").strip()
-                        link = str(item.get("link") or "").strip()
-                        auxiliary_search_lines.append(
-                            f"候选结果{i}: {title}\n链接: {link}\n摘要: {snippet}"
-                        )
+                    if search_domain != "profile":
+                        for i, item in enumerate(search_results[:5], start=1):
+                            title = str(item.get("title") or "").strip()
+                            snippet = str(item.get("snippet") or "").strip()
+                            link = str(item.get("link") or "").strip()
+                            auxiliary_search_lines.append(
+                                f"候选结果{i}: {title}\n链接: {link}\n摘要: {snippet}"
+                            )
 
-                    search_context = (
-                        "搜索结果摘要（辅助参考，不视为已验证事实）：\n"
-                        + "\n\n".join(auxiliary_search_lines)
-                        + "\n\n已抓取网页正文（主要证据）：\n"
-                        + "\n\n".join(fetched_context_lines)
-                    ).strip()
+                    if auxiliary_search_lines:
+                        search_context = (
+                            "搜索结果摘要（辅助参考，不视为已验证事实）：\n"
+                            + "\n\n".join(auxiliary_search_lines)
+                            + "\n\n已抓取网页正文（主要证据）：\n"
+                            + "\n\n".join(fetched_context_lines)
+                        ).strip()
+                    else:
+                        search_context = (
+                            "已抓取网页正文（主要证据）：\n" + "\n\n".join(fetched_context_lines)
+                        ).strip()
                     if scrape_error_lines:
                         search_context += (
                             "\n\n以下候选链接抓取失败，不应当作已读取证据：\n"
@@ -3323,6 +4784,31 @@ async def chat(
                         )
 
                     length_rule_text = _build_length_rule_text(length_req)
+                    domain_specific_rules = ""
+                    if search_domain == "weather":
+                        domain_specific_rules = (
+                            "天气类问题的补充规则：\n"
+                            "6) 如果证据中存在具体数值，必须直接给出天气现象、当前温度、最高/最低气温、风向风力、更新时间；\n"
+                            "7) 如果用户问的是明天/后天，不能拿今天的数据替代，只有证据里明确出现对应日期时才能回答；\n"
+                            "8) 不要只说“可以访问以下网站获取”，而是直接输出提取到的天气数据；\n"
+                            "9) 多来源数值略有差异时，优先中国天气网/中央气象台，其次天气网/2345，并简要说明来源。\n"
+                        )
+                    elif search_domain == "exchange":
+                        domain_specific_rules = (
+                            "汇率类问题的补充规则：\n"
+                            "6) 如果证据中存在具体汇率，必须直接给出数值和更新时间；\n"
+                            "7) 如果页面给的是反向币对，例如 JPY/CNY，而用户问的是 CNY/JPY，需要先换算再回答；\n"
+                            "8) 历史教程、经验贴、操作说明不能当作当前汇率证据；\n"
+                            "9) 优先使用 XE、Wise、Sina 外汇、Exchange-Rates 等实时汇率页面。\n"
+                        )
+                    elif search_domain == "profile":
+                        domain_specific_rules = (
+                            "介绍/简介类问题的补充规则：\n"
+                            "6) 优先概括实体是什么、成立时间、总部地点、创始人/主体、主营业务等基础信息；\n"
+                            "7) 不要把招聘、待遇、测评、购买建议、论坛讨论当作主体介绍；\n"
+                            "8) 如果抓到的是百科或官网页面，优先引用这些来源；\n"
+                            "9) 用户只是要求介绍时，不要擅自扩展到股价、招聘、面试、产品推荐等无关内容。\n"
+                        )
                     response_prompt = (
                         "你是企业联网检索助手。"
                         "系统已经先通过搜索引擎检索，再抓取了部分结果页的网页正文。"
@@ -3333,6 +4819,7 @@ async def chat(
                         "3) 若证据不足或互相冲突，明确写“信息不足/信息冲突”；\n"
                         "4) 不要编造来源，不要输出与问题无关内容；\n"
                         "5) 必须完整满足用户原问题里的硬性要求（字数、格式、语气、输出结构）。\n"
+                        f"{domain_specific_rules}"
                         f"当前本地时间: {now_local}\n"
                         f"字数要求: {length_rule_text or '未指定'}\n"
                         f"时效性要求: {'高（优先最新信息）' if is_realtime_query else '普通'}\n\n"

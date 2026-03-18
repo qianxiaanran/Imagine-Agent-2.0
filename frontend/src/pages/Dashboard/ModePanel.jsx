@@ -172,6 +172,95 @@ const AudioPlayer = ({ src }) => {
   );
 };
 
+const MeetingTranscribingPlaceholder = () => {
+  const bars = [12, 20, 16, 28, 18, 22, 13];
+
+  return (
+    <div className="h-full min-h-[260px] flex items-center justify-center px-6">
+      <style>{`
+        @keyframes meetingScanLine {
+          0% { transform: translateY(-2px); opacity: 0; }
+          10% { opacity: 0.92; }
+          50% { opacity: 1; }
+          90% { opacity: 0.92; }
+          100% { transform: translateY(116px); opacity: 0; }
+        }
+        @keyframes meetingPanelPulse {
+          0%, 100% { transform: scale(1); opacity: 0.9; }
+          50% { transform: scale(1.015); opacity: 1; }
+        }
+        @keyframes meetingWaveRise {
+          0%, 100% { transform: scaleY(0.42); opacity: 0.38; }
+          50% { transform: scaleY(1); opacity: 0.92; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .meeting-wave-bar,
+          .meeting-scan-line,
+          .meeting-panel-core {
+            animation: none !important;
+            transform: none !important;
+          }
+        }
+      `}</style>
+      <div className="flex flex-col items-center gap-4">
+        <div className="relative h-44 w-44">
+          <span className="absolute -top-1 -left-1 h-5 w-5 border-t-2 border-l-2 border-slate-900 dark:border-slate-200" />
+          <span className="absolute -top-1 -right-1 h-5 w-5 border-t-2 border-r-2 border-slate-900 dark:border-slate-200" />
+          <span className="absolute -bottom-1 -left-1 h-5 w-5 border-b-2 border-l-2 border-slate-900 dark:border-slate-200" />
+          <span className="absolute -bottom-1 -right-1 h-5 w-5 border-b-2 border-r-2 border-slate-900 dark:border-slate-200" />
+
+          <div
+            className="meeting-panel-core absolute inset-6 overflow-hidden rounded-2xl border border-sky-200 dark:border-sky-800/70 bg-gradient-to-br from-sky-50 via-indigo-100 to-sky-200 dark:from-sky-950/40 dark:via-indigo-950/30 dark:to-sky-900/40 shadow-md"
+            style={{ animation: 'meetingPanelPulse 2.2s ease-in-out infinite' }}
+          >
+            <div className="absolute left-4 right-4 top-4 flex items-center gap-2.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-white/88 text-slate-700 shadow-sm dark:bg-slate-900/85 dark:text-slate-200">
+                <Mic size={14} />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="h-2 w-16 rounded-full bg-white/90 dark:bg-slate-200/90" />
+                <div className="mt-1.5 h-1.5 w-24 rounded-full bg-white/70 dark:bg-slate-300/60" />
+              </div>
+            </div>
+
+            <div className="absolute left-4 right-4 top-[62px] flex h-10 items-end gap-1.5">
+              {bars.map((height, index) => (
+                <span
+                  key={`meeting-wave-${index}`}
+                  className="meeting-wave-bar rounded-full bg-white/90 dark:bg-slate-200/90"
+                  style={{
+                    width: '6px',
+                    height: `${height}px`,
+                    transformOrigin: 'center bottom',
+                    animation: `meetingWaveRise 1.35s ease-in-out ${index * 0.09}s infinite`,
+                  }}
+                />
+              ))}
+            </div>
+
+            <div className="absolute left-4 right-5 bottom-9 h-2 rounded-full bg-white/85 dark:bg-slate-200/85" />
+            <div className="absolute left-4 right-10 bottom-5 h-2 rounded-full bg-white/72 dark:bg-slate-300/70" />
+          </div>
+
+          <div className="absolute left-6 right-6 top-6 bottom-6 overflow-hidden rounded-2xl">
+            <div
+              className="meeting-scan-line absolute left-0 right-0 h-2 bg-gradient-to-r from-sky-300/0 via-sky-500/85 to-sky-300/0 blur-[1px]"
+              style={{ animation: 'meetingScanLine 1.9s ease-in-out infinite' }}
+            />
+          </div>
+        </div>
+
+        <div className="text-center">
+          <div className="text-sm font-medium text-slate-700 dark:text-slate-200">正在解析语音...</div>
+          <div className="mt-1 text-xs leading-6 text-slate-500 dark:text-slate-400">
+            转写完成后会自动填入逐字稿区域。
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const escapeRegExp = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const HighlightedText = ({ text, highlight }) => {
@@ -932,6 +1021,7 @@ const ModePanelComponent = ({
   const widthClass = fullWidth ? "md:w-full md:border-r-0" : "md:w-1/2 md:border-r";
   const isOcrPreview = isOCRMode && ocrViewMode === "preview";
   const hasPanelContent = Boolean((panelContent || "").trim());
+  const showMeetingTranscribingState = isMeetingMode && isUploadingFile && !hasPanelContent;
   const meetingStatusText = isUploadingFile
     ? "正在解析语音，请稍候..."
     : (hasPanelContent ? "转写已就绪，可直接生成纪要" : "请先上传录音文件");
@@ -1083,6 +1173,8 @@ const ModePanelComponent = ({
                             <MarkdownRenderer content={panelContent} />
                           </Suspense>
                         </div>
+                      ) : showMeetingTranscribingState ? (
+                        <MeetingTranscribingPlaceholder />
                       ) : (
                         <div className="text-sm text-gray-400 dark:text-gray-500">暂无内容，请先上传音频并完成转写。</div>
                       )}
@@ -1122,6 +1214,8 @@ const ModePanelComponent = ({
                           </div>
                         </div>
                       ))
+                    ) : showMeetingTranscribingState ? (
+                      <MeetingTranscribingPlaceholder />
                     ) : (
                       <div className="h-full min-h-[240px] flex items-center justify-center text-center px-6">
                         <div>
