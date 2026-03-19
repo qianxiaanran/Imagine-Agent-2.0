@@ -149,7 +149,7 @@ const AuthVisualPanel = memo(function AuthVisualPanel({
   reducedMotion = false,
 }) {
   return (
-  <div className="relative hidden overflow-hidden bg-gradient-to-br from-slate-400 via-slate-500 to-slate-600 dark:from-slate-200 dark:via-white dark:to-slate-200 lg:flex">
+  <div className="relative hidden overflow-hidden bg-gradient-to-br from-slate-300 via-slate-400 to-slate-500 dark:from-[#050816] dark:via-[#0b1224] dark:to-[#121a30] lg:flex">
     <div className="relative z-10 flex flex-1 items-end justify-center px-6 py-8">
       <AnimatedLoginCharacters
         isTyping={isTyping}
@@ -158,9 +158,10 @@ const AuthVisualPanel = memo(function AuthVisualPanel({
         reducedMotion={reducedMotion}
       />
     </div>
-    <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] bg-[size:22px_22px] opacity-70 dark:opacity-30" />
-    <div className="absolute right-12 top-20 h-56 w-56 rounded-full bg-white/15 blur-3xl dark:bg-white/35" />
-    <div className="absolute bottom-10 left-10 h-72 w-72 rounded-full bg-white/12 blur-3xl dark:bg-slate-300/30" />
+    <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.06)_1px,transparent_1px)] bg-[size:22px_22px] opacity-70 dark:opacity-20" />
+    <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_18%,rgba(89,160,255,0.22),transparent_34%),radial-gradient(circle_at_82%_24%,rgba(98,231,183,0.12),transparent_28%),radial-gradient(circle_at_50%_88%,rgba(255,255,255,0.06),transparent_36%)] dark:opacity-100" />
+    <div className="absolute right-12 top-20 h-56 w-56 rounded-full bg-white/15 blur-3xl dark:bg-sky-400/12" />
+    <div className="absolute bottom-10 left-10 h-72 w-72 rounded-full bg-white/12 blur-3xl dark:bg-indigo-300/10" />
   </div>
   );
 });

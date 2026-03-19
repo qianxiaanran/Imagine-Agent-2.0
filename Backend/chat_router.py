@@ -13,9 +13,10 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Header, Query, Request
+from fastapi import APIRouter, HTTPException, Header, Query, Request, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 # -----------------------------------------------------------------------------
 # 🔧 配置区域：请在这里填入你的 API Key
@@ -69,10 +70,14 @@ CONTEXT_COMPACTION_TRIGGER_CHARS = int(os.getenv("CONTEXT_COMPACTION_TRIGGER_CHA
 CONTEXT_COMPACTION_MIN_INTERVAL = int(os.getenv("CONTEXT_COMPACTION_MIN_INTERVAL", "4"))
 HISTORY_TAIL_MIN_RECORDS = int(os.getenv("HISTORY_TAIL_MIN_RECORDS", "10"))
 STREAM_UNTHROTTLED = os.getenv("STREAM_UNTHROTTLED", "true").lower() != "false"
+FEEDBACK_CONTEXT_FETCH_LIMIT = max(6, int(os.getenv("FEEDBACK_CONTEXT_FETCH_LIMIT", "32")))
+FEEDBACK_CONTEXT_MAX_EXAMPLES = max(1, int(os.getenv("FEEDBACK_CONTEXT_MAX_EXAMPLES", "4")))
+FEEDBACK_CONTEXT_ENTRY_MAX_CHARS = max(80, int(os.getenv("FEEDBACK_CONTEXT_ENTRY_MAX_CHARS", "220")))
 # -----------------------------------------------------------------------------
 
-from supabase_client import require_supabase
+from supabase_client import require_supabase, engine
 from history_manager import (
+    add_history_turn_to_supabase,
     delete_session,
     get_history,
     get_history_limited,
@@ -81,6 +86,7 @@ from history_manager import (
     rename_session,
 )
 from deepseek_llm import ask_llm_stream_async, ask_llm
+from admin_utils import require_active_user
 
 # 引入我们新构建的模块（仅在 LangGraph 路径需要）
 from context_hub import ContextHub
@@ -174,6 +180,483 @@ class ChatRequest(BaseModel):
 class RenameRequest(BaseModel):
     title: str
 
+
+class ChatFeedbackRequest(BaseModel):
+    session_id: str = Field(..., description="会话 ID")
+    history_id: Optional[int] = Field(default=None, description="助手消息的 history.id")
+    message_key: Optional[str] = Field(default=None, description="前端稳定消息键")
+    feedback_type: Optional[str] = Field(default=None, description="up / down；为空表示清除反馈")
+    user_message: Optional[str] = Field(default=None, description="配套用户提问")
+    assistant_message: Optional[str] = Field(default=None, description="助手回复文本")
+    mode: Optional[str] = Field(default=None, description="当前模式")
+    model_backend: Optional[str] = Field(default=None, description="local / cloud")
+    model_id: Optional[str] = Field(default=None, description="前端模型 ID")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# ------------------------------------------------------------
+# 反馈持久化与运行时学习
+# ------------------------------------------------------------
+_CHAT_FEEDBACK_SCHEMA_READY = False
+
+
+def _ensure_chat_feedback_schema() -> None:
+    global _CHAT_FEEDBACK_SCHEMA_READY
+    if _CHAT_FEEDBACK_SCHEMA_READY:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.chat_feedback (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        session_id TEXT NOT NULL,
+                        history_id BIGINT NULL,
+                        message_key TEXT NOT NULL,
+                        feedback_type TEXT NOT NULL,
+                        feedback_score SMALLINT NOT NULL,
+                        user_message TEXT NULL,
+                        assistant_message TEXT NULL,
+                        mode TEXT NULL,
+                        model_backend TEXT NULL,
+                        model_id TEXT NULL,
+                        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        CONSTRAINT chat_feedback_feedback_type_check
+                            CHECK (feedback_type IN ('up', 'down'))
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_feedback_user_message_key
+                    ON public.chat_feedback (user_id, message_key)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_chat_feedback_user_session_created
+                    ON public.chat_feedback (user_id, session_id, updated_at DESC)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_chat_feedback_user_mode_created
+                    ON public.chat_feedback (user_id, mode, updated_at DESC)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_chat_feedback_history_id
+                    ON public.chat_feedback (history_id)
+                    """
+                )
+            )
+        _CHAT_FEEDBACK_SCHEMA_READY = True
+    except Exception as e:
+        print(f"[Feedback] ensure schema failed: {e}")
+
+
+def _normalize_feedback_type(value: Optional[str]) -> Optional[str]:
+    raw = str(value or "").strip().lower()
+    if raw in {"up", "like", "thumbs_up", "positive", "helpful"}:
+        return "up"
+    if raw in {"down", "dislike", "thumbs_down", "negative", "unhelpful"}:
+        return "down"
+    return None
+
+
+def _build_feedback_message_key(
+        history_id: Optional[int] = None,
+        message_key: Optional[str] = None,
+        session_id: Optional[str] = None,
+        assistant_message: Optional[str] = None,
+) -> str:
+    if history_id not in (None, ""):
+        try:
+            return f"h:{int(history_id)}"
+        except Exception:
+            pass
+
+    provided = str(message_key or "").strip()
+    if provided:
+        return provided[:160]
+
+    seed = f"{session_id or ''}|{assistant_message or ''}"
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()
+    return f"fallback:{digest}"
+
+
+def _truncate_feedback_text(value: Optional[str], max_len: int = 8000) -> str:
+    return _truncate_context(_sanitize_history_content(value or ""), max_len=max_len)
+
+
+def _resolve_feedback_history_context(
+        user_id: str,
+        session_id: str,
+        history_id: Optional[int],
+        assistant_message: Optional[str],
+        user_message: Optional[str],
+) -> Dict[str, Any]:
+    resolved: Dict[str, Any] = {
+        "history_id": None,
+        "session_id": str(session_id or "").strip(),
+        "assistant_message": _truncate_feedback_text(assistant_message),
+        "user_message": _truncate_feedback_text(user_message),
+        "mode": "",
+    }
+    if not user_id or not resolved["session_id"]:
+        return resolved
+
+    _ensure_chat_feedback_schema()
+
+    try:
+        with engine.begin() as conn:
+            assistant_row = None
+            if history_id not in (None, ""):
+                assistant_row = conn.execute(
+                    text(
+                        """
+                        SELECT id, session_id, role, content, func_type
+                        FROM public.history
+                        WHERE id = :history_id
+                          AND user_id = :user_id
+                        LIMIT 1
+                        """
+                    ),
+                    {"history_id": int(history_id), "user_id": str(user_id)},
+                ).mappings().first()
+                if assistant_row and str(assistant_row.get("role") or "").strip().lower() != "assistant":
+                    assistant_row = None
+
+            if assistant_row is None and resolved["assistant_message"]:
+                assistant_row = conn.execute(
+                    text(
+                        """
+                        SELECT id, session_id, role, content, func_type
+                        FROM public.history
+                        WHERE user_id = :user_id
+                          AND session_id = :session_id
+                          AND role = 'assistant'
+                          AND content = :assistant_message
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "user_id": str(user_id),
+                        "session_id": resolved["session_id"],
+                        "assistant_message": resolved["assistant_message"],
+                    },
+                ).mappings().first()
+
+            if assistant_row:
+                resolved["history_id"] = int(assistant_row.get("id"))
+                resolved["session_id"] = str(assistant_row.get("session_id") or resolved["session_id"])
+                resolved["assistant_message"] = _truncate_feedback_text(assistant_row.get("content"))
+                resolved["mode"] = str(assistant_row.get("func_type") or "").strip().lower()
+
+                previous_user = conn.execute(
+                    text(
+                        """
+                        SELECT id, content
+                        FROM public.history
+                        WHERE user_id = :user_id
+                          AND session_id = :session_id
+                          AND role = 'user'
+                          AND id < :assistant_history_id
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "user_id": str(user_id),
+                        "session_id": resolved["session_id"],
+                        "assistant_history_id": int(assistant_row.get("id")),
+                    },
+                ).mappings().first()
+                if previous_user:
+                    resolved["user_message"] = _truncate_feedback_text(previous_user.get("content"))
+    except Exception as e:
+        print(f"[Feedback] resolve history context failed: {e}")
+
+    return resolved
+
+
+def _save_chat_feedback(
+        *,
+        user_id: str,
+        session_id: str,
+        history_id: Optional[int],
+        message_key: str,
+        feedback_type: str,
+        user_message: Optional[str],
+        assistant_message: Optional[str],
+        mode: Optional[str],
+        model_backend: Optional[str],
+        model_id: Optional[str],
+        metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    _ensure_chat_feedback_schema()
+    feedback_score = 1 if feedback_type == "up" else -1
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO public.chat_feedback (
+                    user_id,
+                    session_id,
+                    history_id,
+                    message_key,
+                    feedback_type,
+                    feedback_score,
+                    user_message,
+                    assistant_message,
+                    mode,
+                    model_backend,
+                    model_id,
+                    metadata_json,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :user_id,
+                    :session_id,
+                    :history_id,
+                    :message_key,
+                    :feedback_type,
+                    :feedback_score,
+                    :user_message,
+                    :assistant_message,
+                    :mode,
+                    :model_backend,
+                    :model_id,
+                    CAST(:metadata_json AS jsonb),
+                    NOW(),
+                    NOW()
+                )
+                ON CONFLICT (user_id, message_key) DO UPDATE SET
+                    session_id = EXCLUDED.session_id,
+                    history_id = EXCLUDED.history_id,
+                    feedback_type = EXCLUDED.feedback_type,
+                    feedback_score = EXCLUDED.feedback_score,
+                    user_message = EXCLUDED.user_message,
+                    assistant_message = EXCLUDED.assistant_message,
+                    mode = EXCLUDED.mode,
+                    model_backend = EXCLUDED.model_backend,
+                    model_id = EXCLUDED.model_id,
+                    metadata_json = EXCLUDED.metadata_json,
+                    updated_at = NOW()
+                RETURNING id, message_key, feedback_type, feedback_score, history_id, session_id, updated_at
+                """
+            ),
+            {
+                "user_id": str(user_id),
+                "session_id": str(session_id),
+                "history_id": int(history_id) if history_id not in (None, "") else None,
+                "message_key": str(message_key),
+                "feedback_type": feedback_type,
+                "feedback_score": feedback_score,
+                "user_message": _truncate_feedback_text(user_message),
+                "assistant_message": _truncate_feedback_text(assistant_message),
+                "mode": str(mode or "").strip().lower() or None,
+                "model_backend": str(model_backend or "").strip().lower() or None,
+                "model_id": str(model_id or "").strip() or None,
+                "metadata_json": json.dumps(metadata or {}, ensure_ascii=False),
+            },
+        ).mappings().first()
+    return dict(row or {})
+
+
+def _clear_chat_feedback(user_id: str, message_key: str) -> bool:
+    _ensure_chat_feedback_schema()
+    try:
+        with engine.begin() as conn:
+            deleted = conn.execute(
+                text(
+                    """
+                    DELETE FROM public.chat_feedback
+                    WHERE user_id = :user_id
+                      AND message_key = :message_key
+                    """
+                ),
+                {"user_id": str(user_id), "message_key": str(message_key)},
+            )
+        return bool((deleted.rowcount or 0) > 0)
+    except Exception as e:
+        print(f"[Feedback] clear failed: {e}")
+        return False
+
+
+def _get_session_feedback_map(user_id: str, session_id: str) -> Dict[str, str]:
+    _ensure_chat_feedback_schema()
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT message_key, history_id, feedback_type
+                    FROM public.chat_feedback
+                    WHERE user_id = :user_id
+                      AND session_id = :session_id
+                    ORDER BY updated_at DESC
+                    """
+                ),
+                {"user_id": str(user_id), "session_id": str(session_id)},
+            ).mappings().all()
+        feedback_map: Dict[str, str] = {}
+        for row in rows:
+            feedback_type = _normalize_feedback_type(row.get("feedback_type"))
+            if not feedback_type:
+                continue
+            history_id = row.get("history_id")
+            if history_id not in (None, ""):
+                feedback_map[f"h:{int(history_id)}"] = feedback_type
+            message_key = str(row.get("message_key") or "").strip()
+            if message_key:
+                feedback_map[message_key] = feedback_type
+        return feedback_map
+    except Exception as e:
+        print(f"[Feedback] get session map failed: {e}")
+        return {}
+
+
+def _score_feedback_context_row(
+        row: Dict[str, Any],
+        *,
+        session_id: str,
+        mode: str,
+        query_terms: List[str],
+) -> int:
+    score = 0
+    row_mode = str(row.get("mode") or "").strip().lower()
+    row_session_id = str(row.get("session_id") or "").strip()
+    if row_mode and row_mode == mode:
+        score += 4
+    if row_session_id and row_session_id == session_id:
+        score += 3
+    corpus = _normalize_match_text(
+        f"{row.get('user_message') or ''}\n{row.get('assistant_message') or ''}"
+    )
+    for term in query_terms:
+        if term and term in corpus:
+            score += 2
+    return score
+
+
+def _build_feedback_learning_context(
+        user_id: str,
+        session_id: str,
+        mode: str,
+        query: Optional[str],
+) -> str:
+    if not user_id or user_id == "anonymous":
+        return ""
+
+    _ensure_chat_feedback_schema()
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT session_id, history_id, feedback_type, user_message, assistant_message, mode, updated_at
+                    FROM public.chat_feedback
+                    WHERE user_id = :user_id
+                    ORDER BY updated_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {"user_id": str(user_id), "limit": FEEDBACK_CONTEXT_FETCH_LIMIT},
+            ).mappings().all()
+    except Exception as e:
+        print(f"[Feedback] load learning context failed: {e}")
+        return ""
+
+    if not rows:
+        return ""
+
+    normalized_mode = str(mode or "").strip().lower()
+    query_terms = _extract_query_terms(query, max_terms=8)
+    positives: List[Dict[str, Any]] = []
+    negatives: List[Dict[str, Any]] = []
+
+    scored_rows = []
+    for raw_row in rows:
+        row = dict(raw_row)
+        row["score"] = _score_feedback_context_row(
+            row,
+            session_id=str(session_id or "").strip(),
+            mode=normalized_mode,
+            query_terms=query_terms,
+        )
+        scored_rows.append(row)
+
+    scored_rows.sort(
+        key=lambda item: (
+            int(item.get("score") or 0),
+            str(item.get("updated_at") or ""),
+        ),
+        reverse=True,
+    )
+
+    for row in scored_rows:
+        feedback_type = _normalize_feedback_type(row.get("feedback_type"))
+        if not feedback_type:
+            continue
+        payload = {
+            "user_message": _truncate_context(str(row.get("user_message") or "").strip(), max_len=FEEDBACK_CONTEXT_ENTRY_MAX_CHARS),
+            "assistant_message": _truncate_context(str(row.get("assistant_message") or "").strip(), max_len=FEEDBACK_CONTEXT_ENTRY_MAX_CHARS),
+            "mode": str(row.get("mode") or "").strip().lower(),
+        }
+        if not payload["assistant_message"]:
+            continue
+        if feedback_type == "up" and len(positives) < FEEDBACK_CONTEXT_MAX_EXAMPLES:
+            positives.append(payload)
+        elif feedback_type == "down" and len(negatives) < FEEDBACK_CONTEXT_MAX_EXAMPLES:
+            negatives.append(payload)
+        if len(positives) >= FEEDBACK_CONTEXT_MAX_EXAMPLES and len(negatives) >= FEEDBACK_CONTEXT_MAX_EXAMPLES:
+            break
+
+    if not positives and not negatives:
+        return ""
+
+    lines = [
+        "【用户反馈学习】",
+        "以下是该用户历史上明确点赞/点踩过的回答样例。",
+        "请吸收这些偏好：延续被点赞回答的表达方式，避免重复被点踩回答的问题。",
+        "不要逐字复述历史回答，只提炼风格、结构、详略和可靠性偏好。",
+    ]
+
+    if positives:
+        lines.append("点赞样例：")
+        for item in positives:
+            parts = []
+            if item["user_message"]:
+                parts.append(f"问题：{item['user_message']}")
+            parts.append(f"回答片段：{item['assistant_message']}")
+            lines.append("- " + " | ".join(parts))
+
+    if negatives:
+        lines.append("点踩样例：")
+        for item in negatives:
+            parts = []
+            if item["user_message"]:
+                parts.append(f"问题：{item['user_message']}")
+            parts.append(f"应避免的回答片段：{item['assistant_message']}")
+            lines.append("- " + " | ".join(parts))
+
+    return "\n".join(lines)
 
 # ------------------------------------------------------------
 # 助手：清理历史内容
@@ -1080,27 +1563,16 @@ def _save_history_turn(
         func_type: str,
         user_message: str,
         assistant_message: str,
-) -> None:
+) -> Optional[Dict[str, Optional[int]]]:
     if user_id == "anonymous":
-        return
-    rows = [
-        {
-            "user_id": user_id,
-            "session_id": session_id,
-            "role": "user",
-            "content": user_message,
-            "func_type": func_type,
-        },
-        {
-            "user_id": user_id,
-            "session_id": session_id,
-            "role": "assistant",
-            "content": assistant_message,
-            "func_type": func_type,
-        },
-    ]
-    sb = require_supabase()
-    sb.table("history").insert(rows).execute()
+        return None
+    return add_history_turn_to_supabase(
+        user_id=user_id,
+        session_id=session_id,
+        func_type=func_type,
+        user_content=user_message,
+        assistant_content=assistant_message,
+    )
 
 
 async def _save_history_turn_async(
@@ -1109,10 +1581,10 @@ async def _save_history_turn_async(
         func_type: str,
         user_message: str,
         assistant_message: str,
-) -> None:
+) -> Optional[Dict[str, Optional[int]]]:
     if user_id == "anonymous":
-        return
-    await asyncio.to_thread(
+        return None
+    return await asyncio.to_thread(
         _save_history_turn,
         user_id,
         session_id,
@@ -3769,6 +4241,32 @@ async def chat(
     def _stream(gen, media_type: str = "application/x-ndjson"):
         return StreamingResponse(_disconnect_aware_stream(gen), media_type=media_type, headers=stream_headers)
 
+    async def _persist_turn_for_feedback(
+            func_type: str,
+            user_message: str,
+            assistant_message: str,
+    ) -> Optional[Dict[str, int]]:
+        if user_id == "anonymous":
+            return None
+        saved = await _save_history_turn_async(
+            user_id,
+            session_id,
+            func_type,
+            user_message,
+            assistant_message,
+        )
+        if not isinstance(saved, dict):
+            return None
+
+        history_ids: Dict[str, int] = {}
+        user_history_id = saved.get("user_id")
+        assistant_history_id = saved.get("assistant_id")
+        if user_history_id not in (None, ""):
+            history_ids["user"] = int(user_history_id)
+        if assistant_history_id not in (None, ""):
+            history_ids["assistant"] = int(assistant_history_id)
+        return history_ids or None
+
     def _should_flush(
             buf: str,
             min_chars: int = 8,
@@ -3865,11 +4363,10 @@ async def chat(
             yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "c", "v": IDENTITY_FIXED_REPLY}, ensure_ascii=False) + "\n"
 
+            history_ids = None
             if user_id != "anonymous":
                 try:
-                    await _save_history_turn_async(
-                        user_id,
-                        session_id,
+                    history_ids = await _persist_turn_for_feedback(
                         "identity",
                         message,
                         IDENTITY_FIXED_REPLY,
@@ -3877,6 +4374,8 @@ async def chat(
                 except Exception as e:
                     print(f"Identity reply history save failed: {e}")
 
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": mode, "end": True}, ensure_ascii=False) + "\n"
 
         return _stream(fixed_identity_response_generator())
@@ -4056,6 +4555,26 @@ async def chat(
             )
         return bundle
 
+    def _augment_shared_context_with_feedback(
+            shared_ctx: Dict[str, str],
+            target_mode: Optional[str],
+            user_message: Optional[str] = None,
+    ) -> Dict[str, str]:
+        feedback_context = _build_feedback_learning_context(
+            user_id=user_id,
+            session_id=session_id,
+            mode=_normalize_mode(target_mode or mode),
+            query=user_message if user_message is not None else message,
+        )
+        if not feedback_context:
+            return shared_ctx
+        merged = dict(shared_ctx or {})
+        existing_summary = str(merged.get("summary_context") or "").strip()
+        merged["summary_context"] = (
+            f"{feedback_context}\n\n{existing_summary}" if existing_summary else feedback_context
+        )
+        return merged
+
     def _wrap_prompt_with_shared_context(
             base_prompt: str,
             shared_ctx: Dict[str, str],
@@ -4085,6 +4604,7 @@ async def chat(
         try:
             active_mode = (return_mode or func_type or mode or "chat")
             shared_ctx = await _get_shared_context_async(active_mode, history_limit=FAST_CHAT_HISTORY_LIMIT)
+            shared_ctx = _augment_shared_context_with_feedback(shared_ctx, active_mode, user_message=message)
             execution_guard_prompt = (
                 "You are an enterprise office assistant. Execute tasks directly when intent is clear.\n"
                 "1) If the user asks for direct drafting, produce output immediately without repeated clarification.\n"
@@ -4129,11 +4649,10 @@ async def chat(
             if _is_cancelled():
                 return
 
+            history_ids = None
             if user_id != "anonymous":
                 try:
-                    await _save_history_turn_async(
-                        user_id,
-                        session_id,
+                    history_ids = await _persist_turn_for_feedback(
                         func_type,
                         message,
                         full_reply,
@@ -4143,6 +4662,8 @@ async def chat(
 
             if _is_cancelled():
                 return
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": return_mode, "end": True}, ensure_ascii=False) + "\n"
         except Exception as e:
             print(f" [Chat Mode Error]: {e}")
@@ -4196,6 +4717,7 @@ async def chat(
                 ) + "\n"
 
                 shared_ctx = await _get_shared_context_async("general", history_limit=FAST_CHAT_HISTORY_LIMIT)
+                shared_ctx = _augment_shared_context_with_feedback(shared_ctx, "general", user_message=message)
                 webpage_blocks = []
                 for index, page in enumerate(pages, start=1):
                     title = str(page.get("title") or page.get("final_url") or f"网页{index}").strip()
@@ -4265,11 +4787,10 @@ async def chat(
             if _is_cancelled():
                 return
 
+            history_ids = None
             if user_id != "anonymous":
                 try:
-                    await _save_history_turn_async(
-                        user_id,
-                        session_id,
+                    history_ids = await _persist_turn_for_feedback(
                         "web",
                         message,
                         full_reply,
@@ -4279,6 +4800,8 @@ async def chat(
 
             if _is_cancelled():
                 return
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "general", "end": True}, ensure_ascii=False) + "\n"
         except Exception as e:
             print(f" [Webpage Mode Error]: {e}")
@@ -4496,6 +5019,7 @@ async def chat(
 
         try:
             shared_ctx = await _get_shared_context_async("search", history_limit=FAST_CHAT_HISTORY_LIMIT)
+            shared_ctx = _augment_shared_context_with_feedback(shared_ctx, "search", user_message=message)
             history_text = shared_ctx.get("history_text", "")
             now_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             contextual_user_query = _build_contextual_search_query(message, history_text)
@@ -4545,11 +5069,10 @@ async def chat(
                             await asyncio.sleep(0)
                         if _is_cancelled():
                             return
+                        history_ids = None
                         if user_id != "anonymous":
                             try:
-                                await _save_history_turn_async(
-                                    user_id,
-                                    session_id,
+                                history_ids = await _persist_turn_for_feedback(
                                     "search",
                                     message,
                                     full_reply_clean,
@@ -4558,6 +5081,8 @@ async def chat(
                                 print(f"[Search] history save failed: {e}")
                         if _is_cancelled():
                             return
+                        if history_ids:
+                            yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
                         yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
                         return
 
@@ -4684,11 +5209,10 @@ async def chat(
                                 await asyncio.sleep(0)
                             if _is_cancelled():
                                 return
+                            history_ids = None
                             if user_id != "anonymous":
                                 try:
-                                    await _save_history_turn_async(
-                                        user_id,
-                                        session_id,
+                                    history_ids = await _persist_turn_for_feedback(
                                         "search",
                                         message,
                                         full_reply_clean,
@@ -4697,6 +5221,8 @@ async def chat(
                                     print(f"[Search] history save failed: {e}")
                             if _is_cancelled():
                                 return
+                            if history_ids:
+                                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
                             yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
                             return
                     elif search_domain == "exchange":
@@ -4710,11 +5236,10 @@ async def chat(
                                 await asyncio.sleep(0)
                             if _is_cancelled():
                                 return
+                            history_ids = None
                             if user_id != "anonymous":
                                 try:
-                                    await _save_history_turn_async(
-                                        user_id,
-                                        session_id,
+                                    history_ids = await _persist_turn_for_feedback(
                                         "search",
                                         message,
                                         full_reply_clean,
@@ -4723,6 +5248,8 @@ async def chat(
                                     print(f"[Search] history save failed: {e}")
                             if _is_cancelled():
                                 return
+                            if history_ids:
+                                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
                             yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
                             return
 
@@ -4878,11 +5405,10 @@ async def chat(
             if _is_cancelled():
                 return
 
+            history_ids = None
             if user_id != "anonymous":
                 try:
-                    await _save_history_turn_async(
-                        user_id,
-                        session_id,
+                    history_ids = await _persist_turn_for_feedback(
                         "search",
                         message,
                         full_reply_clean,
@@ -4892,6 +5418,8 @@ async def chat(
 
             if _is_cancelled():
                 return
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "search", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
@@ -4906,6 +5434,7 @@ async def chat(
         full_reply = ""
         try:
             shared_ctx = await _get_shared_context_async("database", history_limit=FAST_CHAT_HISTORY_LIMIT)
+            shared_ctx = _augment_shared_context_with_feedback(shared_ctx, "database", user_message=message)
             # 来源：先发数据库信息，后续收到​​​​​​ SQL 事件后会追加
             db_sources: List[Dict[str, Any]] = [{
                 "type": "database",
@@ -4961,11 +5490,10 @@ async def chat(
                 return
 
             # 保留对话历史记录
+            history_ids = None
             if user_id != "anonymous":
                 try:
-                    await _save_history_turn_async(
-                        user_id,
-                        session_id,
+                    history_ids = await _persist_turn_for_feedback(
                         "database",
                         message,
                         full_reply,
@@ -4975,6 +5503,8 @@ async def chat(
 
             if _is_cancelled():
                 return
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "database", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
@@ -5002,6 +5532,7 @@ async def chat(
         # 这里直接传 raw message 即可
         try:
             shared_ctx = await _get_shared_context_async("audit", history_limit=FAST_CHAT_HISTORY_LIMIT)
+            shared_ctx = _augment_shared_context_with_feedback(shared_ctx, "audit", user_message=message)
             audit_message = message
             ctx_parts: List[str] = []
             if shared_ctx.get("session_state"):
@@ -5038,10 +5569,9 @@ async def chat(
             # 持续审计运行以实现可追溯性
             if _is_cancelled():
                 return
+            history_ids = None
             if user_id != "anonymous":
-                await _save_history_turn_async(
-                    user_id,
-                    session_id,
+                history_ids = await _persist_turn_for_feedback(
                     "audit",
                     message,
                     full_reply,
@@ -5049,6 +5579,8 @@ async def chat(
 
             if _is_cancelled():
                 return
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "audit", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
@@ -5076,6 +5608,7 @@ async def chat(
 
         try:
             shared_ctx = await _get_shared_context_async("rag", history_limit=FAST_CHAT_HISTORY_LIMIT)
+            shared_ctx = _augment_shared_context_with_feedback(shared_ctx, "rag", user_message=message)
             # 当用户显式附加源文件时，将 RAG 与过时的聊天历史记录隔离。
             explicit_source_mode = bool(requested_source_files)
             if explicit_source_mode:
@@ -5164,11 +5697,10 @@ async def chat(
             if _is_cancelled():
                 return
 
+            history_ids = None
             if user_id != "anonymous":
                 try:
-                    await _save_history_turn_async(
-                        user_id,
-                        session_id,
+                    history_ids = await _persist_turn_for_feedback(
                         "rag",
                         message,
                         full_reply,
@@ -5178,6 +5710,8 @@ async def chat(
 
             if _is_cancelled():
                 return
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps({"t": "m", "sid": session_id, "mode": "rag", "end": True}, ensure_ascii=False) + "\n"
 
         except Exception as e:
@@ -5246,6 +5780,7 @@ async def chat(
                 mode,
                 history_limit=FAST_CHAT_HISTORY_LIMIT,
             )
+            shared_ctx = _augment_shared_context_with_feedback(shared_ctx, mode, user_message=message)
             final_prompt = _wrap_prompt_with_shared_context(
                 final_prompt,
                 shared_ctx,
@@ -5294,11 +5829,10 @@ async def chat(
                 return
 
             # === 保留历史记录（用户+助手）===
+            history_ids = None
             if user_id != "anonymous":
                 try:
-                    await _save_history_turn_async(
-                        user_id,
-                        session_id,
+                    history_ids = await _persist_turn_for_feedback(
                         final_intent,
                         message,
                         full_reply_clean,
@@ -5309,6 +5843,8 @@ async def chat(
             # 图阶段回退处理
             if _is_cancelled():
                 return
+            if history_ids:
+                yield json.dumps({"t": "m", "sid": session_id, "history_ids": history_ids}, ensure_ascii=False) + "\n"
             yield json.dumps(
                 {"t": "m", "sid": session_id, "mode": final_intent, "end": True},
                 ensure_ascii=False
@@ -5416,4 +5952,80 @@ def rename_session_api(session_id: str, user_id: str, req: RenameRequest):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to rename session")
     return {"status": "ok", "message": "Session renamed", "title": req.title}
+
+
+@router.get("/chat/feedback/{session_id}")
+def get_chat_feedback_api(session_id: str, ctx: Dict[str, Any] = Depends(require_active_user)):
+    safe_session_id = str(session_id or "").strip()
+    if not safe_session_id:
+        raise HTTPException(status_code=422, detail="session_id 不能为空")
+    return {
+        "status": "ok",
+        "session_id": safe_session_id,
+        "feedback": _get_session_feedback_map(str(ctx["user_id"]), safe_session_id),
+    }
+
+
+@router.post("/chat/feedback")
+def submit_chat_feedback_api(req: ChatFeedbackRequest, ctx: Dict[str, Any] = Depends(require_active_user)):
+    safe_session_id = str(req.session_id or "").strip()
+    if not safe_session_id:
+        raise HTTPException(status_code=422, detail="session_id 不能为空")
+
+    requested_feedback = str(req.feedback_type or "").strip()
+    normalized_feedback = _normalize_feedback_type(req.feedback_type)
+    if requested_feedback and normalized_feedback is None:
+        raise HTTPException(status_code=422, detail="feedback_type 仅支持 up / down")
+
+    user_id = str(ctx["user_id"])
+    resolved = _resolve_feedback_history_context(
+        user_id=user_id,
+        session_id=safe_session_id,
+        history_id=req.history_id,
+        assistant_message=req.assistant_message,
+        user_message=req.user_message,
+    )
+    safe_message_key = _build_feedback_message_key(
+        history_id=resolved.get("history_id"),
+        message_key=req.message_key,
+        session_id=resolved.get("session_id") or safe_session_id,
+        assistant_message=resolved.get("assistant_message") or req.assistant_message,
+    )
+
+    if normalized_feedback is None:
+        deleted = _clear_chat_feedback(user_id, safe_message_key)
+        return {
+            "status": "ok",
+            "cleared": True,
+            "deleted": deleted,
+            "message_key": safe_message_key,
+            "history_id": resolved.get("history_id"),
+        }
+
+    saved = _save_chat_feedback(
+        user_id=user_id,
+        session_id=str(resolved.get("session_id") or safe_session_id),
+        history_id=resolved.get("history_id"),
+        message_key=safe_message_key,
+        feedback_type=normalized_feedback,
+        user_message=resolved.get("user_message") or req.user_message,
+        assistant_message=resolved.get("assistant_message") or req.assistant_message,
+        mode=req.mode or resolved.get("mode"),
+        model_backend=req.model_backend,
+        model_id=req.model_id,
+        metadata=req.metadata,
+    )
+
+    return {
+        "status": "ok",
+        "cleared": False,
+        "feedback": {
+            "message_key": saved.get("message_key") or safe_message_key,
+            "feedback_type": saved.get("feedback_type") or normalized_feedback,
+            "feedback_score": saved.get("feedback_score"),
+            "history_id": saved.get("history_id") or resolved.get("history_id"),
+            "session_id": saved.get("session_id") or str(resolved.get("session_id") or safe_session_id),
+            "updated_at": saved.get("updated_at"),
+        },
+    }
 

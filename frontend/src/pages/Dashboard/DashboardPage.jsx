@@ -14,6 +14,7 @@ import {
 import { API_BASE_URL, AUTH_TOKEN_KEY, refreshAccessToken as refreshAccessTokenFromApiClient } from '../../api/apiClient';
 import userApi from '../../api/user';
 import historyApi from '../../api/history';
+import chatFeedbackApi from '../../api/chatFeedback';
 import presentationApi from '../../api/presentation';
 import { convertWebMToWav } from '../../utils/audio';
 import {
@@ -1212,7 +1213,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   // ✨ 交互状态
   const [copiedIdx, setCopiedIdx] = useState(null);
   const [speakingIdx, setSpeakingIdx] = useState(null);
-  const [feedbackState, setFeedbackState] = useState({}); // { msgIdx: 'up' | 'down' }
+  const [feedbackState, setFeedbackState] = useState({}); // { messageKey: 'up' | 'down' }
   const [editingMessageIndex, setEditingMessageIndex] = useState(null);
   const [editingMessageText, setEditingMessageText] = useState('');
   const [editingMessageAttachments, setEditingMessageAttachments] = useState([]);
@@ -2591,6 +2592,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       setSelectedModel(modelId);
       setChatHistory([]);
+      setFeedbackState({});
       currentSessionIdRef.current = null;
       resetHistoryPaginationState();
       clearHistoryExpandTask();
@@ -2686,6 +2688,25 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     }
   }, [chatHistory.length, historyHasMoreServer, isHistoryPageLoading, loadOlderSessionMessages, normalizedVisibleCount]);
 
+  const loadSessionFeedbackState = useCallback(async (sessionId) => {
+    const safeSessionId = String(sessionId || '').trim();
+    const safeUserId = String(userProfile?.id || '').trim();
+    if (!safeSessionId || !safeUserId || safeUserId === 'anonymous') {
+      setFeedbackState({});
+      return {};
+    }
+
+    try {
+      const nextFeedbackMap = await chatFeedbackApi.getSessionFeedback(safeSessionId);
+      setFeedbackState(nextFeedbackMap || {});
+      return nextFeedbackMap || {};
+    } catch (error) {
+      console.error('Failed to load session feedback', error);
+      setFeedbackState({});
+      return {};
+    }
+  }, [userProfile?.id]);
+
   const handleSessionClick = async (sessionId) => {
     if (isProcessing) return;
     setIsMobileSidebarOpen(false);
@@ -2700,6 +2721,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setAudioFileUrl(null);
     setCurrentAudioPath(null);
     setPendingFiles([]);
+    setFeedbackState({});
     currentSessionIdRef.current = null;
     resetHistoryPaginationState();
     resetAuditState();
@@ -2712,6 +2734,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         limit: HISTORY_PAGE_SIZE,
         includeContext: true,
       });
+      await loadSessionFeedbackState(sessionId);
       const safeMessages = [...(messagePage.contextItems || []), ...(messagePage.items || [])];
 
       let metaMsg = null;
@@ -2933,6 +2956,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
     } catch (e) {
       console.error("Failed to load session", e);
+      setFeedbackState({});
       setChatHistory([{
         role: 'assistant',
         content: '历史会话加载失败，请重试。'
@@ -2947,6 +2971,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const handleNewChat = () => {
       setChatHistory([]);
+      setFeedbackState({});
       currentSessionIdRef.current = null;
       resetHistoryPaginationState();
       clearHistoryExpandTask();
@@ -3971,6 +3996,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     const freshMeetingSessionId = shouldStartFreshMeetingSession ? createClientSessionId() : '';
     if (shouldStartFreshMeetingSession) {
         setChatHistory([]);
+        setFeedbackState({});
         currentSessionIdRef.current = freshMeetingSessionId;
         resetHistoryPaginationState();
         clearHistoryExpandTask();
@@ -4133,13 +4159,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         .filter(pf => pf.uploaded && pf.previewText)
         .map(pf => pf.previewText)
         .join('\n\n');
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const requestState = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        id: requestId,
         cancelled: false,
         historyLengthBeforeSend: chatHistory.length,
         restoreOnCancel: !isHidden,
         text: textToSend,
         files: filesToDisplay,
+        userClientMessageId: isHidden ? null : `user-${requestId}`,
+        assistantClientMessageId: `assistant-${requestId}`,
     };
     activeChatRequestRef.current = requestState;
 
@@ -4155,13 +4184,25 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             displayContent = `${fileNames}\n${displayContent}`;
         }
 
-        const userMessage = { role: 'user', content: displayContent };
+        const userMessage = {
+            role: 'user',
+            content: displayContent,
+            clientMessageId: requestState.userClientMessageId,
+            session_id: currentSessionId || null,
+        };
         setChatHistory(prev => [...prev, userMessage]);
         if (isReportMode) setReportStep('chat');
     }
 
     setIsProcessing(true);
-    setChatHistory(prev => [...prev, { role: 'assistant', content: '', sources: [] }]);
+    setChatHistory(prev => [...prev, {
+      role: 'assistant',
+      content: '',
+      sources: [],
+      clientMessageId: requestState.assistantClientMessageId,
+      session_id: currentSessionId || null,
+      func_type: currentMode,
+    }]);
     setVisibleMessageCount((prev) => {
       const addedCount = isHidden ? 1 : 2;
       const targetCount = Math.min(historyRenderTarget, chatHistory.length + addedCount);
@@ -4286,14 +4327,33 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                     if (json.src) {
                          setChatHistory(prev => {
                              const newHistory = [...prev];
-                             if (newHistory.length > 0) {
-                                 newHistory[newHistory.length - 1] = { ...newHistory[newHistory.length - 1], sources: json.src };
+                             let assistantIndex = -1;
+                             for (let i = newHistory.length - 1; i >= 0; i -= 1) {
+                                 if (newHistory[i]?.clientMessageId === requestState.assistantClientMessageId) {
+                                     assistantIndex = i;
+                                     break;
+                                 }
+                             }
+                             const targetIndex = assistantIndex >= 0 ? assistantIndex : newHistory.length - 1;
+                             if (targetIndex >= 0) {
+                                 newHistory[targetIndex] = { ...newHistory[targetIndex], sources: json.src };
                              }
                              return newHistory;
                          });
                     }
                     if (json.sid && !sessionAssigned) {
                         sessionAssigned = true;
+                        currentSessionIdRef.current = json.sid;
+                        setChatHistory(prev => prev.map((item) => {
+                            if (!item) return item;
+                            if (item.clientMessageId === requestState.assistantClientMessageId) {
+                                return { ...item, session_id: json.sid };
+                            }
+                            if (requestState.userClientMessageId && item.clientMessageId === requestState.userClientMessageId) {
+                                return { ...item, session_id: json.sid };
+                            }
+                            return item;
+                        }));
                         if (!currentSessionId) {
                             setCurrentSessionId(json.sid);
                             saveSessionMeta(json.sid, selectedModel, effectiveMode, currentAudioPath, effectiveBackend);
@@ -4305,6 +4365,44 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                 savePanelContext(json.sid, activePanelContent, type);
                             }
                         }
+                    }
+                    if (json.history_ids) {
+                        setChatHistory(prev => {
+                            const next = [...prev];
+                            const assistantHistoryId = json.history_ids?.assistant;
+                            const userHistoryId = json.history_ids?.user;
+                            let assistantIndex = -1;
+                            for (let i = next.length - 1; i >= 0; i -= 1) {
+                                if (next[i]?.clientMessageId === requestState.assistantClientMessageId) {
+                                    assistantIndex = i;
+                                    break;
+                                }
+                            }
+                            if (assistantIndex >= 0 && assistantHistoryId) {
+                                next[assistantIndex] = {
+                                    ...next[assistantIndex],
+                                    id: assistantHistoryId,
+                                    messageKey: `h:${assistantHistoryId}`,
+                                };
+                            }
+                            if (requestState.userClientMessageId && userHistoryId) {
+                                let userIndex = -1;
+                                for (let i = next.length - 1; i >= 0; i -= 1) {
+                                    if (next[i]?.clientMessageId === requestState.userClientMessageId) {
+                                        userIndex = i;
+                                        break;
+                                    }
+                                }
+                                if (userIndex >= 0) {
+                                    next[userIndex] = {
+                                        ...next[userIndex],
+                                        id: userHistoryId,
+                                        messageKey: `h:${userHistoryId}`,
+                                    };
+                                }
+                            }
+                            return next;
+                        });
                     }
                     if (json.end) {
                         shouldPostProcessReply = true;
@@ -5496,6 +5594,45 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return next;
   };
 
+  const getMessageFeedbackKey = useCallback((message, fallbackIndex = null) => {
+      if (!message || typeof message !== 'object') {
+          return fallbackIndex == null ? '' : `idx:${fallbackIndex}`;
+      }
+      if (message.id !== undefined && message.id !== null && String(message.id).trim() !== '') {
+          return `h:${message.id}`;
+      }
+      if (message.history_id !== undefined && message.history_id !== null && String(message.history_id).trim() !== '') {
+          return `h:${message.history_id}`;
+      }
+      if (message.messageKey && String(message.messageKey).trim()) {
+          return String(message.messageKey).trim();
+      }
+      if (message.clientMessageId && String(message.clientMessageId).trim()) {
+          return `c:${String(message.clientMessageId).trim()}`;
+      }
+      const safeSessionId = String(message.session_id || currentSessionId || '').trim();
+      if (safeSessionId && fallbackIndex !== null && fallbackIndex !== undefined) {
+          return `s:${safeSessionId}:${fallbackIndex}:${message.role || 'assistant'}`;
+      }
+      return fallbackIndex == null
+          ? `role:${message.role || 'assistant'}`
+          : `idx:${fallbackIndex}:${message.role || 'assistant'}`;
+  }, [currentSessionId]);
+
+  const setFeedbackValue = useCallback((messageKey, nextValue) => {
+      const safeKey = String(messageKey || '').trim();
+      if (!safeKey) return;
+      setFeedbackState((prev) => {
+          const next = { ...prev };
+          if (!nextValue) {
+              delete next[safeKey];
+          } else {
+              next[safeKey] = nextValue;
+          }
+          return next;
+      });
+  }, []);
+
   const handleEditMessageStart = (idx, content) => {
       if (isProcessing || isUploadingFile) return;
       const { attachments, remainingText } = splitUserMessageContent(content || '');
@@ -5524,7 +5661,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
 
       setExpandedSources((prev) => trimIndexedState(prev, editingMessageIndex));
-      setFeedbackState((prev) => trimIndexedState(prev, editingMessageIndex));
+      setFeedbackState({});
       setCopiedIdx(null);
       setSpeakingIdx(null);
       setEditingMessageIndex(null);
@@ -5619,12 +5756,41 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       handleSendMessage(textToResend, true);
   };
 
-  const handleFeedback = (idx, type) => {
-      setFeedbackState(prev => ({
-          ...prev,
-          [idx]: prev[idx] === type ? null : type
-      }));
-      // 在这里，您通常会调用 API 来记录反馈
+  const handleFeedback = async (idx, type) => {
+      const targetMessage = chatHistory[idx];
+      if (!targetMessage || targetMessage.role !== 'assistant') return;
+
+      const safeUserId = String(userProfile?.id || '').trim();
+      if (!safeUserId || safeUserId === 'anonymous') return;
+
+      const messageKey = getMessageFeedbackKey(targetMessage, idx);
+      if (!messageKey) return;
+
+      const previousFeedback = feedbackState[messageKey] || null;
+      const nextFeedback = previousFeedback === type ? null : type;
+      const previousMessage = idx > 0 && chatHistory[idx - 1]?.role === 'user' ? chatHistory[idx - 1] : null;
+      const safeSessionId = String(
+          targetMessage.session_id || currentSessionId || currentSessionIdRef.current || ''
+      ).trim();
+
+      setFeedbackValue(messageKey, nextFeedback);
+
+      try {
+          await chatFeedbackApi.submitFeedback({
+              session_id: safeSessionId,
+              history_id: targetMessage.id ?? targetMessage.history_id ?? null,
+              message_key: messageKey,
+              feedback_type: nextFeedback,
+              user_message: previousMessage?.content || '',
+              assistant_message: targetMessage.content || '',
+              mode: targetMessage.func_type || currentMode,
+              model_backend: llmBackend,
+              model_id: String(selectedModel ?? ''),
+          });
+      } catch (error) {
+          console.error('Failed to submit feedback', error);
+          setFeedbackValue(messageKey, previousFeedback);
+      }
   };
 
   const buildDefaultReportFormData = (type, backend) => {
@@ -8271,6 +8437,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                 )}
                                 {visibleMessages.map((msg, idx) => {
                                   const messageIndex = chatHistory.length - visibleMessages.length + idx;
+                                  const messageRenderKey = msg?.id ?? msg?.clientMessageId ?? msg?.messageKey ?? messageIndex;
+                                  const feedbackKey = msg.role === 'assistant' ? getMessageFeedbackKey(msg, messageIndex) : '';
                                   const allowMarkdown = msg.role === 'assistant'
                                     ? (messageIndex >= chatHistory.length - MARKDOWN_MESSAGE_COUNT || isLikelyMarkdown(msg?.content || ''))
                                     : (messageIndex >= chatHistory.length - MARKDOWN_MESSAGE_COUNT);
@@ -8281,7 +8449,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                                   const userBubbleSize = isEditing ? 'w-full max-w-full' : 'max-w-[85%] sm:max-w-[80%]';
                                   const userBubblePadding = isEditing ? 'p-4' : 'py-2 px-3';
                                   return (
-                                  <div key={messageIndex} className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                  <div key={messageRenderKey} className={`flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                                     <div className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''} group max-w-full w-full`}>
                                       <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center border border-gray-100 dark:border-gray-700 ${msg.role === 'user' ? 'bg-white dark:bg-gray-800' : 'bg-green-500 text-white'}`}>
                                         {msg.role === 'user' ? <User size={16} className="text-gray-600 dark:text-gray-300"/> : <Bot size={16} />}
@@ -8407,7 +8575,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
                                                   <button
                                                       onClick={() => handleFeedback(messageIndex, 'up')}
-                                                      className={`p-1.5 rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${feedbackState[messageIndex] === 'up' ? 'text-green-500 bg-green-50 dark:bg-green-900/20' : 'text-gray-400 dark:text-gray-500'}`}
+                                                      className={`p-1.5 rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${feedbackState[feedbackKey] === 'up' ? 'text-green-500 bg-green-50 dark:bg-green-900/20' : 'text-gray-400 dark:text-gray-500'}`}
                                                       title="有帮助"
                                                   >
                                                       <ThumbsUp size={14} />
@@ -8415,7 +8583,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
                                                   <button
                                                       onClick={() => handleFeedback(messageIndex, 'down')}
-                                                      className={`p-1.5 rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${feedbackState[messageIndex] === 'down' ? 'text-red-500 bg-red-50 dark:bg-red-900/20' : 'text-gray-400 dark:text-gray-500'}`}
+                                                      className={`p-1.5 rounded-md transition-colors hover:bg-gray-100 dark:hover:bg-gray-800 ${feedbackState[feedbackKey] === 'down' ? 'text-red-500 bg-red-50 dark:bg-red-900/20' : 'text-gray-400 dark:text-gray-500'}`}
                                                       title="无帮助"
                                                   >
                                                       <ThumbsDown size={14} />

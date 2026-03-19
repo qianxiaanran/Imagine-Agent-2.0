@@ -482,7 +482,7 @@ const MobileSidebar = memo(({
                       }`}
                     >
                       <div className="flex items-center gap-3">
-                        <Database size={16} /> 知识库管理
+                        <Database size={16} /> 数据库管理
                       </div>
                       {isRestrictedMode ? (
                         <Lock size={12} className="text-gray-400" />

@@ -3,7 +3,8 @@
     "id": "CONTRACT_NO_MISSING",
     "severity": "high",
     "message": "合同编号缺失",
-    "suggestion": "补充合同编号或上传完整合同",
+    "reason": "合同编号未提取到，后续无法和付款、ERP、历史单据建立关联。",
+    "suggestion": "补充合同编号或上传更清晰的合同首页。",
     "checks": [
       { "field": "contract_no", "op": "missing" }
     ],
@@ -13,7 +14,8 @@
     "id": "CONTRACT_AMOUNT_MISSING",
     "severity": "high",
     "message": "合同金额缺失或为0",
-    "suggestion": "补充合同金额信息",
+    "reason": "合同总金额未提取成功，无法继续做金额上限和付款比例核验。",
+    "suggestion": "补充合同总价或上传完整金额页。",
     "checks": [
       { "field": "total_amount", "op": "missing_or_zero" }
     ],
@@ -23,27 +25,148 @@
     "id": "CONTRACT_DATE_MISSING",
     "severity": "medium",
     "message": "合同日期缺失",
-    "suggestion": "补充签署日期",
+    "reason": "未识别到签订日期，无法判断单据时序。",
+    "suggestion": "补充合同签订日期。",
     "checks": [
       { "field": "contract_date", "op": "missing" }
     ],
-    "evidence": { "keyword": "日期" }
+    "evidence": { "keyword": "签订时间" }
+  },
+  {
+    "id": "CONTRACT_PARTIES_INCOMPLETE",
+    "severity": "high",
+    "message": "合同主体信息不完整",
+    "reason": "甲乙方/买卖双方至少缺失一方，无法确认交易相对方。",
+    "suggestion": "补充甲方、乙方或买卖双方完整名称。",
+    "checks": [
+      { "field": "party_a", "op": "missing" },
+      { "field": "party_b", "op": "missing" }
+    ],
+    "evidence": { "keyword": "甲方" }
   },
   {
     "id": "CONTRACT_VENDOR_MISSING",
     "severity": "medium",
-    "message": "合同主体信息缺失",
-    "suggestion": "补充甲乙方名称",
+    "message": "合同供应方信息缺失",
+    "reason": "未识别到供应方/卖方主体，付款对象核验会缺失基线。",
+    "suggestion": "补充卖方、乙方或供应方信息。",
     "checks": [
       { "field": "vendor", "op": "missing" }
     ],
-    "evidence": { "keyword": "甲方" }
+    "evidence": { "keyword": "乙方" }
+  },
+  {
+    "id": "CONTRACT_COMMODITY_MISSING",
+    "severity": "medium",
+    "message": "合同货品/品名缺失",
+    "reason": "未识别到主要货品信息，影响履约和单据一致性核验。",
+    "suggestion": "补充品名、规格或商品描述。",
+    "checks": [
+      { "field": "commodity_name", "op": "missing" }
+    ],
+    "evidence": { "keyword": "品名" }
+  },
+  {
+    "id": "CONTRACT_QUANTITY_MISSING",
+    "severity": "medium",
+    "message": "合同数量信息缺失",
+    "reason": "未识别到数量/单位，影响履约明细校验。",
+    "suggestion": "补充数量和计量单位。",
+    "checks": [
+      { "field": "quantity", "op": "missing" }
+    ],
+    "evidence": { "keyword": "数量" }
+  },
+  {
+    "id": "PURCHASE_CONTRACT_DELIVERY_MISSING",
+    "severity": "medium",
+    "message": "采购合同交货日期缺失",
+    "reason": "采购合同未识别到交货时间，无法核对供应节奏。",
+    "suggestion": "补充交货时间或交货日期。",
+    "when": [
+      { "field": "doc_subtype", "op": "eq", "value": "purchase_contract" }
+    ],
+    "checks": [
+      { "field": "delivery_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "交货时间" }
+  },
+  {
+    "id": "PURCHASE_CONTRACT_TAX_MISSING",
+    "severity": "medium",
+    "message": "采购合同税额缺失",
+    "reason": "采购合同未识别到增值税/税额字段，不利于财税核对。",
+    "suggestion": "补充税额或价税合计信息。",
+    "when": [
+      { "field": "doc_subtype", "op": "eq", "value": "purchase_contract" }
+    ],
+    "checks": [
+      { "field": "vat_amount", "op": "missing" }
+    ],
+    "evidence": { "keyword": "增值税额" }
+  },
+  {
+    "id": "SALES_CONTRACT_SHIPMENT_MISSING",
+    "severity": "high",
+    "message": "销售合同装运期缺失",
+    "reason": "销售合同未识别到装运期限，无法核验履约节点。",
+    "suggestion": "补充装运期限或装运日期。",
+    "when": [
+      { "field": "doc_subtype", "op": "eq", "value": "sales_contract" }
+    ],
+    "checks": [
+      { "field": "shipment_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "装运期限" }
+  },
+  {
+    "id": "SALES_CONTRACT_LOADING_PORT_MISSING",
+    "severity": "medium",
+    "message": "销售合同装运港缺失",
+    "reason": "未识别到装运港，影响物流履约核验。",
+    "suggestion": "补充装运港或起运港信息。",
+    "when": [
+      { "field": "doc_subtype", "op": "eq", "value": "sales_contract" }
+    ],
+    "checks": [
+      { "field": "port_loading", "op": "missing" }
+    ],
+    "evidence": { "keyword": "装运港" }
+  },
+  {
+    "id": "SALES_CONTRACT_DESTINATION_MISSING",
+    "severity": "medium",
+    "message": "销售合同目的港/目的地缺失",
+    "reason": "未识别到目的港或目的地，影响出口履约核验。",
+    "suggestion": "补充目的港、卸货港或目的地。",
+    "when": [
+      { "field": "doc_subtype", "op": "eq", "value": "sales_contract" }
+    ],
+    "checks": [
+      { "field": "port_discharge", "op": "missing" }
+    ],
+    "evidence": { "keyword": "目的地" }
+  },
+  {
+    "id": "SALES_CONTRACT_INCOTERM_MISSING",
+    "severity": "low",
+    "message": "销售合同贸易术语缺失",
+    "reason": "未识别到 FOB/CIF 等贸易术语，影响责任划分核验。",
+    "suggestion": "补充贸易术语或价格条款。",
+    "when": [
+      { "field": "doc_subtype", "op": "eq", "value": "sales_contract" }
+    ],
+    "checks": [
+      { "field": "incoterm", "op": "missing" }
+    ],
+    "evidence": { "keyword": "TRADE TERMS" }
   },
   {
     "id": "CONTRACT_AMOUNT_EXCEED",
     "severity": "high",
     "message": "合同金额超过ERP合同金额",
-    "suggestion": "核对ERP合同金额或进行补充审批",
+    "reason": "合同金额高于 ERP 里的合同基线金额。",
+    "suggestion": "核对ERP合同金额或补充审批。",
     "when": [
       { "field": "erp.contract_amount", "op": "exists" }
     ],

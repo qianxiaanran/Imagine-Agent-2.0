@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -253,8 +254,33 @@ class AuditFields(BaseModel):
     contract_date: Optional[str] = None
     invoice_date: Optional[str] = None
     payment_date: Optional[str] = None
+    request_date: Optional[str] = None
+    shipment_date: Optional[str] = None
+    delivery_date: Optional[str] = None
     payee: Optional[str] = None
     bank_account: Optional[str] = None
+    beneficiary_account: Optional[str] = None
+    bank_name: Optional[str] = None
+    payment_method: Optional[str] = None
+    payment_type: Optional[str] = None
+    payment_status: Optional[str] = None
+    application_status: Optional[str] = None
+    request_no: Optional[str] = None
+    sales_contract_no: Optional[str] = None
+    purchase_contract_no: Optional[str] = None
+    seller: Optional[str] = None
+    buyer: Optional[str] = None
+    party_a: Optional[str] = None
+    party_b: Optional[str] = None
+    commodity_name: Optional[str] = None
+    quantity: Optional[float] = None
+    quantity_unit: Optional[str] = None
+    unit_price: Optional[float] = None
+    tax_amount: Optional[float] = None
+    advance_guarantee: Optional[str] = None
+    remark: Optional[str] = None
+    handler: Optional[str] = None
+    department: Optional[str] = None
     reimburser: Optional[str] = None
     model_config = ConfigDict(extra="allow")
 
@@ -848,6 +874,7 @@ def _build_case_combined_text(case_id: Optional[str], current_job_id: str, curre
         return current_text
     segments: List[str] = []
     current_included = False
+    non_current_segments = 0
     with AUDIT_CASE_LOCK:
         case = AUDIT_CASES.get(case_id) or {}
         docs = case.get("documents") or []
@@ -860,10 +887,16 @@ def _build_case_combined_text(case_id: Optional[str], current_job_id: str, curre
             title = _safe_text(doc.get("file_name")) or _safe_text(doc.get("doc_type")) or "document"
             if _safe_text(doc.get("job_id")) == _safe_text(current_job_id):
                 current_included = True
+            else:
+                non_current_segments += 1
             segments.append(f"[文档]{title}\n{text}")
-    if current_text and _safe_text(current_text) and not current_included:
+    normalized_current_text = _safe_text(current_text)
+    if normalized_current_text and not current_included:
         current_title = f"[当前上传] job={current_job_id}"
-        segments.append(f"{current_title}\n{current_text}")
+        segments.append(f"{current_title}\n{normalized_current_text}")
+    # 仅当前文档时直接返回原文，避免无意义的包装与额外 LLM token 开销。
+    if non_current_segments == 0 and normalized_current_text:
+        return normalized_current_text
     if not segments:
         return current_text
     merged = "\n\n".join(segments)
@@ -1527,18 +1560,51 @@ AUDIT_FIELD_KEYS = [
     "contract_date",
     "invoice_date",
     "payment_date",
+    "request_date",
+    "shipment_date",
+    "delivery_date",
     "payee",
     "bank_account",
+    "beneficiary_account",
+    "bank_name",
+    "payment_method",
+    "payment_type",
+    "payment_status",
+    "application_status",
+    "request_no",
+    "sales_contract_no",
+    "purchase_contract_no",
+    "seller",
+    "buyer",
+    "party_a",
+    "party_b",
+    "commodity_name",
+    "quantity",
+    "quantity_unit",
+    "unit_price",
+    "tax_amount",
+    "advance_guarantee",
+    "remark",
+    "handler",
+    "department",
     "reimburser",
 ]
 AUDIT_AMOUNT_KEYWORDS = [
     "\u4ef7\u7a0e\u5408\u8ba1",
     "\u5408\u8ba1",
+    "\u603b\u91d1\u989d",
     "\u603b\u8ba1",
     "\u91d1\u989d",
+    "\u5408\u540c\u603b\u4ef7",
+    "\u9884\u4ed8\u6b3e\u91d1\u989d",
+    "\u652f\u4ed8\u91d1\u989d",
+    "\u7533\u8bf7\u91d1\u989d",
     "\u5e94\u4ed8",
     "\u4ed8\u6b3e\u91d1\u989d",
     "\u62a5\u9500\u91d1\u989d",
+    "TOTAL AMOUNT",
+    "PAYMENT AMOUNT",
+    "PREPAYMENT AMOUNT",
 ]
 
 
@@ -1593,7 +1659,7 @@ def _clean_value(value: Any) -> Optional[str]:
     lowered = text.lower()
     if lowered in {"null", "none", "n/a", "na", "unknown"}:
         return None
-    if text in {"\u672a\u77e5", "\u672a\u586b\u5199", "\u65e0", "-", "--"}:
+    if text in {"\u672a\u77e5", "\u672a\u586b\u5199", "\u65e0", "-", "--", "/", "\uff0f"}:
         return None
 
     text = re.sub(r"^[\s:\uFF1A\-()\[\]\u3010\u3011]+", "", text)
@@ -1683,12 +1749,12 @@ def _merge_llm_fields(base_fields: Dict[str, Any], llm_result: Optional[Dict[str
         if key not in llm_fields:
             continue
         value = llm_fields.get(key)
-        if key in {"total_amount", "exchange_rate", "customs_duty_amount", "vat_amount"}:
+        if key in {"total_amount", "exchange_rate", "customs_duty_amount", "vat_amount", "quantity", "unit_price", "tax_amount"}:
             amount = _normalize_amount_value(value)
             if amount is not None:
                 merged[key] = amount
             continue
-        if key in ("contract_date", "invoice_date", "payment_date"):
+        if key in ("contract_date", "invoice_date", "payment_date", "request_date", "shipment_date", "delivery_date"):
             date_val = _normalize_date_value(value)
             if date_val:
                 merged[key] = date_val
@@ -1710,8 +1776,9 @@ def _post_process_fields(fields: Dict[str, Any], raw_text: str) -> Dict[str, Any
     normalized = dict(fields or {})
     text = raw_text or ""
     doc_type = normalize_doc_type(normalized.get("doc_type"))
+    doc_subtype = _safe_text(normalized.get("doc_subtype"))
 
-    for date_key in ("contract_date", "invoice_date", "payment_date"):
+    for date_key in ("contract_date", "invoice_date", "payment_date", "request_date", "shipment_date", "delivery_date"):
         date_val = _normalize_date_value(normalized.get(date_key))
         if date_val:
             normalized[date_key] = date_val
@@ -1738,14 +1805,34 @@ def _post_process_fields(fields: Dict[str, Any], raw_text: str) -> Dict[str, Any
     else:
         normalized["total_amount"] = amount
 
-    for numeric_key in ("exchange_rate", "customs_duty_amount", "vat_amount"):
+    for numeric_key in ("exchange_rate", "customs_duty_amount", "vat_amount", "quantity", "unit_price", "tax_amount"):
         value = _normalize_amount_value(normalized.get(numeric_key))
         if value is None:
             normalized.pop(numeric_key, None)
         else:
             normalized[numeric_key] = value
 
+    for text_key in (
+        "commodity_name",
+        "payee",
+        "bank_name",
+        "payment_method",
+        "application_status",
+        "payment_status",
+        "sales_contract_no",
+        "purchase_contract_no",
+        "department",
+    ):
+        value = _safe_text(normalized.get(text_key))
+        if not value or _looks_like_header_noise(value):
+            normalized.pop(text_key, None)
+
     if doc_type == "contract":
+        normalized.pop("invoice_date", None)
+        normalized.pop("payment_date", None)
+        normalized.pop("request_date", None)
+        sales_hint = _text_contains_any(text, ["销售合同", "销售合同书", "SALES CONTRACT"])
+        purchase_hint = _text_contains_any(text, ["采购合同", "购销合同", "PURCHASE CONTRACT"])
         counterparty = _infer_contract_counterparty(text, fallback_vendor=normalized.get("vendor"))
         if counterparty:
             normalized["vendor"] = counterparty
@@ -1753,6 +1840,46 @@ def _post_process_fields(fields: Dict[str, Any], raw_text: str) -> Dict[str, Any
             current_vendor = _safe_text(normalized.get("vendor"))
             if current_vendor and not _looks_like_org_name(current_vendor):
                 normalized.pop("vendor", None)
+        if doc_subtype == "purchase_contract" or purchase_hint:
+            if _safe_text(normalized.get("party_a")):
+                normalized["buyer"] = _safe_text(normalized.get("party_a"))
+            if _safe_text(normalized.get("party_b")):
+                normalized["seller"] = _safe_text(normalized.get("party_b"))
+        else:
+            if not _safe_text(normalized.get("seller")) and _safe_text(normalized.get("party_a")):
+                normalized["seller"] = _safe_text(normalized.get("party_a"))
+            if not _safe_text(normalized.get("buyer")) and _safe_text(normalized.get("party_b")):
+                normalized["buyer"] = _safe_text(normalized.get("party_b"))
+        if sales_hint and _safe_text(normalized.get("party_a")):
+            normalized["seller"] = _safe_text(normalized.get("party_a"))
+        if sales_hint and _safe_text(normalized.get("party_b")):
+            normalized["buyer"] = _safe_text(normalized.get("party_b"))
+        if _safe_text(normalized.get("payee")) and not _looks_like_org_name(normalized.get("payee")):
+            normalized.pop("payee", None)
+        for location_key in ("port_loading", "port_discharge"):
+            cleaned_location = _sanitize_trade_location(normalized.get(location_key))
+            if cleaned_location:
+                normalized[location_key] = cleaned_location
+            else:
+                normalized.pop(location_key, None)
+        payment_method = _safe_text(normalized.get("payment_method"))
+        if not payment_method or "/" in payment_method or len(payment_method) < 3:
+            normalized.pop("payment_method", None)
+        contract_no = _safe_text(normalized.get("contract_no"))
+        if contract_no.upper() in {"CONT", "CONTRACT", "NO"}:
+            normalized.pop("contract_no", None)
+    elif doc_type == "payment":
+        normalized.pop("invoice_date", None)
+        if not _safe_text(normalized.get("beneficiary_account")) and _safe_text(normalized.get("bank_account")):
+            normalized["beneficiary_account"] = _safe_text(normalized.get("bank_account"))
+        contract_no = _safe_text(normalized.get("contract_no"))
+        if len(contract_no) < 4:
+            normalized.pop("contract_no", None)
+        if not _safe_text(normalized.get("payment_status")):
+            normalized.pop("payment_status", None)
+        department = _safe_text(normalized.get("department"))
+        if department and (re.search(r"\d{4}", department) or "经理" in department):
+            normalized.pop("department", None)
     return normalized
 
 
@@ -1794,6 +1921,217 @@ def _extract_party_by_labels(text: str, labels: List[str]) -> List[str]:
             if value not in values:
                 values.append(value)
     return values
+
+
+def _extract_labeled_value(
+    text: str,
+    labels: List[str],
+    *,
+    stop_tokens: Optional[List[str]] = None,
+    max_len: int = 120,
+    multiline: bool = False,
+) -> str:
+    source = text or ""
+    if not source or not labels:
+        return ""
+
+    stop_tokens = stop_tokens or []
+    label_expr = "|".join(labels)
+    patterns = [
+        rf"(?:^|[\r\n])\s*(?:{label_expr})\s*[:：]?\s*([^\n\r]{{1,{max_len}}})",
+    ]
+    if multiline:
+        patterns.append(
+            rf"(?:^|[\r\n])\s*(?:{label_expr})\s*[:：]?\s*[\r\n]+\s*([^\n\r]{{1,{max_len}}})"
+        )
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, source, flags=re.IGNORECASE | re.MULTILINE):
+            value = _trim_value_by_stop_tokens(match.group(1), stop_tokens)
+            cleaned = _clean_value(value)
+            if cleaned:
+                return cleaned
+    return ""
+
+
+def _extract_reference_after_labels(
+    text: str,
+    labels: List[str],
+    *,
+    search_window: int = 160,
+    token_pattern: str = r"[A-Za-z0-9][A-Za-z0-9\-_/]{0,39}",
+    require_digit: bool = True,
+) -> str:
+    source = text or ""
+    if not source or not labels:
+        return ""
+
+    invalid_tokens = {
+        "CONT",
+        "CONTRACT",
+        "NO",
+        "DATE",
+        "BUYER",
+        "SELLER",
+        "THE",
+        "NAME",
+        "ADDRESS",
+        "BANK",
+        "PAYMENT",
+    }
+    for label in labels:
+        for match in re.finditer(label, source, flags=re.IGNORECASE):
+            snippet = source[match.end(): match.end() + search_window]
+            for token_match in re.finditer(token_pattern, snippet):
+                token = _clean_value(token_match.group(0)) or ""
+                if not token:
+                    continue
+                upper_token = token.upper().replace(".", "")
+                if upper_token in invalid_tokens:
+                    continue
+                if require_digit and not re.search(r"\d", token):
+                    continue
+                return token
+    return ""
+
+
+def _extract_anchor_line(text: str, anchors: List[str], window: int = 12) -> str:
+    lines = [line.strip() for line in (text or "").splitlines()]
+    if not lines:
+        return ""
+
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        if not any(anchor and anchor.lower() in line.lower() for anchor in anchors):
+            continue
+        collected: List[str] = []
+        for candidate in lines[idx + 1: idx + 1 + window]:
+            if not candidate:
+                continue
+            candidate_lower = candidate.lower()
+            if any(anchor and anchor.lower() in candidate_lower for anchor in anchors):
+                continue
+            collected.append(candidate)
+            if len(collected) >= 3:
+                break
+        if collected:
+            return " ".join(collected)
+    return ""
+
+
+def _extract_first_meaningful_line(text: str, anchors: List[str], stop_markers: List[str], max_len: int = 48) -> str:
+    lines = [line.strip() for line in (text or "").splitlines()]
+    if not lines:
+        return ""
+
+    normalized_anchors = [_normalize_text(anchor) for anchor in anchors if anchor]
+    normalized_stops = [_normalize_text(marker) for marker in stop_markers if marker]
+    for idx, line in enumerate(lines):
+        if not line:
+            continue
+        if not any(anchor and anchor.lower() in line.lower() for anchor in anchors):
+            continue
+        for candidate in lines[idx + 1: idx + 10]:
+            if not candidate:
+                continue
+            normalized_candidate = _normalize_text(candidate)
+            if any(marker and marker.lower() in candidate.lower() for marker in stop_markers):
+                break
+            if any(token and token in normalized_candidate for token in normalized_anchors):
+                continue
+            if any(token and token in normalized_candidate for token in normalized_stops):
+                break
+            if re.search(r"[\u4e00-\u9fffA-Za-z]{2,}", candidate) and len(candidate) <= max_len:
+                return candidate
+    return ""
+
+
+def _looks_like_header_noise(value: Any) -> bool:
+    text = _normalize_text(value)
+    if not text:
+        return False
+    noisy_tokens = [
+        "specification",
+        "commodityand",
+        "nameaddress",
+        "beneficiarynameaddress",
+        "出运明细单号",
+        "采购合同号",
+        "预付款金额",
+        "支付金额",
+        "审批信息",
+        "部门经理",
+        "paymentamount",
+    ]
+    return any(token in text for token in noisy_tokens)
+
+
+def _sanitize_trade_location(value: Any) -> str:
+    text = _safe_text(value)
+    if not text:
+        return ""
+    cleaned = re.sub(r"\s{2,}", " ", text).strip(" ,，")
+    cleaned = re.split(r"(?:股份|有限公司|集团|进出口|公\s*司)", cleaned, maxsplit=1)[0].strip(" ,，")
+    return cleaned
+
+
+def _extract_contract_commodity_name(text: str) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    header_tokens = [
+        "品名及规格",
+        "commodityand",
+        "specification",
+        "quantityweight",
+        "unitpriceterms",
+        "totalamount",
+        "金额",
+        "一般条款",
+        "generalterms",
+        "合计",
+    ]
+    noise_tokens = {"集团", "天津", "纺织", "出口", "进口", "有限", "公司", "股份", "织集", "团进", "口股", "司"}
+    for idx, line in enumerate(lines):
+        normalized_line = _normalize_text(line)
+        if not normalized_line:
+            continue
+        if any(token in normalized_line for token in header_tokens):
+            continue
+        compact_line = re.split(r"\s{2,}", line, maxsplit=1)[0].strip()
+        if compact_line in noise_tokens:
+            continue
+        same_line_match = re.search(r"([\u4e00-\u9fffA-Za-z]{2,20}).*?\d+(?:\.\d+)?\s*(?:pcs|条|件|kg|公斤|套|箱)", line, flags=re.IGNORECASE)
+        if same_line_match:
+            return same_line_match.group(1)
+        if len(compact_line) > 24 or not re.search(r"[\u4e00-\u9fffA-Za-z]{2,}", compact_line):
+            continue
+        lookahead = " ".join(lines[idx + 1: idx + 4])
+        if re.search(r"\d+(?:\.\d+)?\s*(?:pcs|条|件|kg|公斤|套|箱)", lookahead, flags=re.IGNORECASE):
+            return compact_line
+    return ""
+
+
+def _extract_following_code(text: str, anchors: List[str], max_lines: int = 6) -> str:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    invalid = {"CONT", "CONTRACT", "NO", "DATE", "2020"}
+    for idx, line in enumerate(lines):
+        lower_line = line.lower()
+        if not any(anchor and anchor.lower() in lower_line for anchor in anchors):
+            continue
+        for candidate in lines[idx + 1: idx + 1 + max_lines]:
+            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_\/]{0,19}", candidate):
+                upper = token.upper()
+                if upper in invalid:
+                    continue
+                if not re.search(r"\d", token):
+                    continue
+                return token
+    return ""
 
 
 def _looks_like_org_name(name: str) -> bool:
@@ -1887,16 +2225,40 @@ def _infer_contract_counterparty(text: str, fallback_vendor: Optional[str] = Non
     return ""
 
 
-def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = None) -> Dict[str, Any]:
+def _extract_fields(
+    raw_text: str,
+    doc_type: str,
+    llm_backend: Optional[str] = None,
+    llm_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     text = raw_text or ""
     fields: Dict[str, Any] = {"doc_type": doc_type}
 
     currency = "CNY"
-    if "USD" in text or "$" in text:
+    if re.search(r"\bUSD\b|\$", text, flags=re.IGNORECASE):
         currency = "USD"
-    elif "EUR" in text or "\u20ac" in text:
+    elif re.search(r"\bEUR\b|\u20ac", text, flags=re.IGNORECASE):
         currency = "EUR"
+    elif re.search(r"\bRMB\b", text, flags=re.IGNORECASE):
+        currency = "CNY"
     fields["currency"] = currency
+
+    party_stop_tokens = ["地址", "邮箱", "E-MAIL", "EMAIL", "电话", "ADD:", "ADDRESS"]
+    detail_stop_tokens = [
+        "\u4ed8\u6b3e\u65b9\u5f0f",
+        "\u7533\u8bf7\u91d1\u989d",
+        "\u6536\u6b3e\u94f6\u884c",
+        "\u94f6\u884c\u8d26\u53f7",
+        "\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f",
+        "\u4ed8\u6b3e\u7c7b\u578b",
+        "\u9879\u76ee",
+        "\u5907\u6ce8",
+        "\u7ecf\u529e\u4eba",
+        "\u90e8\u95e8",
+        "PAYMENT",
+        "BANK",
+        "ACCOUNT",
+    ]
 
     fields["invoice_no"] = None
     m = re.search(
@@ -1912,17 +2274,47 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
         fields["tax_no"] = m.group(1)
 
     dates = _extract_dates(text)
-    if dates:
-        fields["invoice_date"] = dates[0]
-        fields["payment_date"] = dates[-1]
 
     fields["contract_no"] = None
     m = re.search(
-        r"(?:\u5408\u540c(?:\u7f16\u53f7|\u53f7)?|\u534f\u8bae(?:\u7f16\u53f7|\u53f7)?)\s*[:\uFF1A]?\s*([A-Za-z0-9\-]{4,40})",
+        r"(?:\u5408\u540c(?:\u7f16\u53f7|\u53f7)?|\u534f\u8bae(?:\u7f16\u53f7|\u53f7)?)\s*(?:CONT\.?\s*NO\.?)?\s*[:\uFF1A]?\s*([A-Za-z0-9][A-Za-z0-9\-_/]{1,39})",
         text,
+        flags=re.IGNORECASE,
     )
     if m:
         fields["contract_no"] = m.group(1)
+    if _normalize_text(fields.get("contract_no")) in {"cont", "contract", "no"}:
+        fields["contract_no"] = None
+    if not fields.get("contract_no"):
+        fields["contract_no"] = _extract_reference_after_labels(
+            text,
+            [r"\u5408\u540c(?:\u7f16\u53f7|\u53f7)?", r"CONT\.?\s*NO\.?"],
+            search_window=220,
+        ) or None
+    cont_no_match = re.search(
+        r"CONT\.?\s*NO\.?[\s\S]{0,120}?([A-Za-z0-9][A-Za-z0-9\-_/]{0,19})[\s\S]{0,40}?(?:\u65e5\u671f|DATE)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if cont_no_match and _normalize_text(cont_no_match.group(1)) not in {"2020", "cont", "contract"}:
+        fields["contract_no"] = cont_no_match.group(1)
+    if _safe_text(fields.get("contract_no")) in {"2020", "CONT"}:
+        following_code = _extract_following_code(text, ["CONT.No.", "\u5408\u540c\u53f7"])
+        if following_code:
+            fields["contract_no"] = following_code
+
+    fields["request_no"] = _extract_labeled_value(
+        text,
+        [r"\u7533\u8bf7\u5355\u7f16\u53f7", r"\u7533\u8bf7\u7f16\u53f7", r"PAYMENT\s*REQUEST\s*NO\.?"],
+        max_len=40,
+        multiline=True,
+    ) or None
+    if not fields.get("request_no"):
+        fields["request_no"] = _extract_reference_after_labels(
+            text,
+            [r"\u7533\u8bf7\u5355\u7f16\u53f7", r"\u7533\u8bf7\u7f16\u53f7"],
+            search_window=80,
+        ) or None
 
     fields["po_no"] = None
     m = re.search(
@@ -1943,6 +2335,20 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
             if value:
                 fields["po_no"] = value
 
+    if doc_type == "payment":
+        fields["sales_contract_no"] = _extract_labeled_value(
+            text,
+            [r"\u9500\u552e\u5408\u540c\u53f7", r"SALES\s*CONTRACT\s*NO\.?"],
+            max_len=40,
+            multiline=True,
+        ) or None
+        fields["purchase_contract_no"] = _extract_labeled_value(
+            text,
+            [r"\u91c7\u8d2d\u5408\u540c\u53f7", r"PURCHASE\s*CONTRACT\s*NO\.?"],
+            max_len=40,
+            multiline=True,
+        ) or None
+
     fields["vendor"] = None
     m = re.search(
         r"(?:\u4f9b\u5e94\u5546|\u9500\u552e\u65b9|\u5356\u65b9|\u4e59\u65b9|\u6536\u6b3e\u65b9)\s*[:\uFF1A]?\s*([^\n\r:]{2,40})",
@@ -1950,6 +2356,20 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     )
     if m:
         fields["vendor"] = m.group(1).strip()
+
+    fields["party_a"] = _extract_labeled_value(text, [r"\u7532\u65b9"], stop_tokens=party_stop_tokens, max_len=80) or None
+    fields["party_b"] = _extract_labeled_value(text, [r"\u4e59\u65b9"], stop_tokens=party_stop_tokens, max_len=80) or None
+
+    seller_values = _extract_party_by_labels(text, [r"THE\s+SELLER", r"\bSELLER\b", r"\u5356\u65b9", r"\u4f9b\u65b9"])
+    buyer_values = _extract_party_by_labels(text, [r"THE\s+BUYER", r"\bBUYER\b", r"\u4e70\u65b9", r"\u9700\u65b9"])
+    if not seller_values and _safe_text(fields.get("party_a")):
+        seller_values = [_safe_text(fields.get("party_a"))]
+    if not buyer_values and _safe_text(fields.get("party_b")):
+        buyer_values = [_safe_text(fields.get("party_b"))]
+    if seller_values:
+        fields["seller"] = seller_values[0]
+    if buyer_values:
+        fields["buyer"] = buyer_values[0]
 
     m = re.search(
         r"(?:\u62a5\u5173(?:\u5355|\u53f7|\u7f16\u53f7)?|declaration\s*no\.?)\s*[:\uFF1A]?\s*([A-Za-z0-9\-]{6,40})",
@@ -1990,6 +2410,11 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     )
     if m:
         fields["incoterm"] = m.group(1).upper()
+    if not fields.get("incoterm"):
+        incoterm_anchor = _extract_anchor_line(text, ["UNIT PRICE & TERMS", "\u5355\u4ef7\u53ca\u4ef7\u683c\u6761\u6b3e"])
+        m = re.search(r"\b(EXW|FCA|FAS|FOB|CFR|CIF|CPT|CIP|DAP|DPU|DDP)\b", incoterm_anchor, flags=re.IGNORECASE)
+        if m:
+            fields["incoterm"] = m.group(1).upper()
 
     m = re.search(
         r"(?:country\s*of\s*origin|\u539f\u4ea7\u5730(?:\u56fd)?|\u539f\u4ea7\u56fd)\s*[:\uFF1A]?\s*([A-Za-z\u4e00-\u9fff ]{2,40})",
@@ -2007,21 +2432,27 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     if m:
         fields["destination_country"] = m.group(1).strip()
 
-    m = re.search(
-        r"(?:port\s*of\s*loading|\u8d77\u8fd0\u6e2f|\u88c5\u8fd0\u6e2f)\s*[:\uFF1A]?\s*([A-Za-z\u4e00-\u9fff ]{2,40})",
+    fields["port_loading"] = _extract_labeled_value(
         text,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        fields["port_loading"] = m.group(1).strip()
-
-    m = re.search(
-        r"(?:port\s*of\s*discharge|\u76ee\u7684\u6e2f|\u5378\u8d27\u6e2f)\s*[:\uFF1A]?\s*([A-Za-z\u4e00-\u9fff ]{2,40})",
+        [r"PORT\s+OF\s+SHIPP?MENT", r"PORT\s+OF\s+LOADING", r"\u8d77\u8fd0\u6e2f", r"\u88c5\u8fd0\u6e2f"],
+        stop_tokens=["\u76ee\u7684\u5730", "DESTINATION", "PARTIAL", "TRANSSHIPMENT"],
+        max_len=60,
+        multiline=True,
+    ) or None
+    fields["port_discharge"] = _extract_labeled_value(
         text,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        fields["port_discharge"] = m.group(1).strip()
+        [r"PORT\s+OF\s+DISCHARGE", r"\u76ee\u7684\u6e2f", r"\u5378\u8d27\u6e2f", r"DESTINATION", r"\u76ee\u7684\u5730"],
+        stop_tokens=["PARTIAL", "TRANSSHIPMENT", "PAYMENT", "INSURANCE"],
+        max_len=60,
+        multiline=True,
+    ) or None
+    if not fields.get("port_discharge"):
+        destination_match = re.search(
+            r"\u76ee\u7684\u5730[^A-Za-z\u4e00-\u9fff]{0,30}([A-Za-z\u4e00-\u9fff（）(), ]{2,40})",
+            text,
+        )
+        if destination_match:
+            fields["port_discharge"] = destination_match.group(1).strip()
 
     m = re.search(
         r"(?:exchange\s*rate|\u6c47\u7387)\s*[:\uFF1A]?\s*([0-9]+(?:\.[0-9]+)?)",
@@ -2046,6 +2477,15 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     )
     if m:
         fields["vat_amount"] = _normalize_amount_value(m.group(1))
+    if fields.get("vat_amount") is None:
+        table_anchor = _extract_anchor_line(text, ["\u589e\u503c\u7a0e\u989d", "VAT"])
+        vat_candidates = _extract_amount_candidates(table_anchor)
+        if vat_candidates:
+            vat_candidates.sort(key=lambda item: item[2])
+            if len(vat_candidates) >= 3:
+                fields["vat_amount"] = vat_candidates[1][0]
+
+    fields["tax_amount"] = fields.get("vat_amount")
 
     total_amount = _find_amount_by_keywords(text, AUDIT_AMOUNT_KEYWORDS)
     if total_amount is None:
@@ -2057,30 +2497,22 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
             total_amount = None
     fields["total_amount"] = total_amount
 
-    payee_stop_tokens = [
-        "\u4ed8\u6b3e\u65b9\u5f0f",
-        "\u7533\u8bf7\u91d1\u989d",
-        "\u6536\u6b3e\u94f6\u884c",
-        "\u94f6\u884c\u8d26\u53f7",
-        "\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f",
-        "\u4ed8\u6b3e\u7c7b\u578b",
-        "\u9879\u76ee",
-        "\u5907\u6ce8",
-        "\u7ecf\u529e\u4eba",
-        "\u90e8\u95e8",
-        "PAYMENT",
-        "BANK",
-        "ACCOUNT",
-    ]
     m = re.search(
         r"(?:\u6536\s*\u6b3e\s*(?:\u65b9|\u5355\u4f4d|\u8d26\u6237\u540d|\u8d26\s*\u6237\s*\u540d|\u4eba|\u6237\u540d|\u540d\u79f0)|payee|beneficiary)\s*[:\uFF1A]?\s*([^\n\r:\uFF1A]{2,80}?)\s*(?=(?:\u4ed8\u6b3e\u65b9\u5f0f|\u7533\u8bf7\u91d1\u989d|\u6536\u6b3e\u94f6\u884c|\u94f6\u884c\u8d26\u53f7|\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f|\u4ed8\u6b3e\u7c7b\u578b|\u9879\u76ee|\u5907\u6ce8|\u7ecf\u529e\u4eba|\u90e8\u95e8|$))",
         text,
         flags=re.IGNORECASE,
     )
     if m:
-        payee_value = _trim_value_by_stop_tokens(m.group(1), payee_stop_tokens)
+        payee_value = _trim_value_by_stop_tokens(m.group(1), detail_stop_tokens)
         if len(payee_value) >= 2:
             fields["payee"] = payee_value
+    if not fields.get("payee"):
+        fields["payee"] = _extract_labeled_value(
+            text,
+            [r"\u6536\s*\u6b3e\s*\u4eba", r"\u6536\u6b3e\u65b9", r"PAYEE", r"BENEFICIARY"],
+            stop_tokens=detail_stop_tokens,
+            max_len=80,
+        ) or None
 
     m = re.search(
         r"(?:\u94f6\s*\u884c\s*\u8d26\s*\u53f7|\u8d26\s*\u53f7|\u5f00\s*\u6237\s*\u8d26\s*\u53f7|\u6536\s*\u6b3e\s*\u8d26\s*\u53f7)\s*[:\uFF1A]?\s*([0-9\s-]{8,40})",
@@ -2088,6 +2520,76 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     )
     if m:
         fields["bank_account"] = re.sub(r"\s+", "", m.group(1))
+    if not fields.get("bank_account"):
+        fields["bank_account"] = _extract_reference_after_labels(
+            text,
+            [r"\u94f6\s*\u884c\s*\u8d26\s*\u53f7", r"\u8d26\s*\u53f7", r"A\/C\s*NO\.?", r"ACCOUNT\s*NO\.?"],
+            token_pattern=r"[0-9][0-9\s\-]{5,39}",
+        ).replace(" ", "") or None
+
+    beneficiary_account = _extract_reference_after_labels(
+        text,
+        [r"A\/C\s*NO\.?", r"ACCOUNT\s*NO\.?", r"BENEFICIARY\s+A\/C\s*NO\.?"],
+        token_pattern=r"[0-9][0-9\s\-]{5,39}",
+    )
+    if beneficiary_account:
+        fields["beneficiary_account"] = beneficiary_account.replace(" ", "")
+
+    fields["bank_name"] = _extract_labeled_value(
+        text,
+        [r"\u6536\u6b3e\u94f6\u884c", r"\u5f00\u6237\u94f6\u884c", r"BENEFICIARY\s+BANK"],
+        stop_tokens=["SWIFT", "ACCOUNT", "\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f", "\u94f6\u884c\u8d26\u53f7"],
+        max_len=60,
+        multiline=True,
+    ) or None
+    fields["payment_method"] = _extract_labeled_value(
+        text,
+        [r"\u4ed8\u6b3e\u65b9\u5f0f", r"PAYMENT"],
+        stop_tokens=["\u4fdd\u9669", "INSURANCE", "\u7533\u8bf7\u91d1\u989d", "\u6536\u6b3e\u94f6\u884c"],
+        max_len=40,
+    ) or None
+    fields["payment_type"] = _extract_labeled_value(
+        text,
+        [r"\u4ed8\u6b3e\u7c7b\u578b"],
+        stop_tokens=["\u9879\u76ee", "\u5907\u6ce8", "\u7ecf\u529e\u4eba"],
+        max_len=40,
+    ) or None
+    fields["application_status"] = _extract_labeled_value(
+        text,
+        [r"\(H\)\s*\u72b6\u6001", r"\u5ba1\u6279\u72b6\u6001", r"\u72b6\u6001"],
+        stop_tokens=["\u51fa\u53e3", "\u7533\u8bf7"],
+        max_len=20,
+    ) or None
+    if not fields.get("application_status"):
+        status_match = re.search(r"\u72b6\u6001[:：]?\s*([^\n\r]{2,20})", text)
+        if status_match:
+            fields["application_status"] = _clean_value(status_match.group(1))
+    fields["remark"] = _extract_labeled_value(
+        text,
+        [r"\u5907\u6ce8"],
+        stop_tokens=["\u7ecf\u529e\u4eba", "\u90e8\u95e8"],
+        max_len=80,
+    ) or None
+    fields["handler"] = _extract_labeled_value(
+        text,
+        [r"\u7ecf\u529e\u4eba"],
+        stop_tokens=["\u90e8\u95e8", "\u9884\u4ed8\u6b3e\u660e\u7ec6\u4fe1\u606f"],
+        max_len=40,
+    ) or None
+    fields["department"] = _extract_labeled_value(
+        text,
+        [r"\u90e8\u95e8(?!\u7ecf\u7406)"],
+        stop_tokens=["\u9884\u4ed8\u6b3e\u660e\u7ec6\u4fe1\u606f", "\u5ba1\u6279\u4fe1\u606f", "\u6253\u5370\u6b21\u6570"],
+        max_len=40,
+    ) or None
+
+    payment_status_match = re.search(
+        r"\u652f\u4ed8\u72b6\u6001\s+([^\n\r]{2,20}?)\s+(?:(?:USD|CNY|RMB|EUR)\s*)?[0-9]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if payment_status_match:
+        fields["payment_status"] = _clean_value(payment_status_match.group(1))
 
     if doc_type == "payment" and not _safe_text(fields.get("payee")) and _safe_text(fields.get("vendor")):
         # 付款单中兜底：未识别收款人时，借助已识别的供应商字段补全。
@@ -2096,6 +2598,58 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
     m = re.search(r"(?:\u62a5\u9500\u4eba|\u7533\u8bf7\u4eba|\u62a5\u9500\u7533\u8bf7\u4eba)\s*[:\uFF1A]?\s*([^\n\r:]{2,20})", text)
     if m:
         fields["reimburser"] = m.group(1).strip()
+
+    if doc_type == "invoice":
+        invoice_date = _find_date_by_keywords(text, ["\u5f00\u7968\u65e5\u671f", "invoice\s*date"])
+        if not invoice_date and dates:
+            invoice_date = dates[0]
+        if invoice_date:
+            fields["invoice_date"] = invoice_date
+
+    if doc_type == "payment":
+        request_date = _find_date_by_keywords(text, ["\u7533\u8bf7\u65e5\u671f", "\u7533\u8bf7\u65f6\u95f4"])
+        if not request_date and dates:
+            request_date = dates[0]
+        if request_date:
+            fields["request_date"] = request_date
+
+        payment_date = _find_date_by_keywords(text, ["\u9884\u8ba1\u4ed8\u6b3e\u65e5\u671f", "\u8981\u6c42\u4ed8\u6b3e\u65e5\u671f", "\u4ed8\u6b3e\u65e5\u671f"])
+        if not payment_date and dates:
+            payment_date = dates[-1]
+        if payment_date:
+            fields["payment_date"] = payment_date
+
+        detail_block_match = re.search(r"\u9884\u4ed8\u6b3e\u660e\u7ec6\u4fe1\u606f[:：]?\s*([\s\S]{0,240}?)\n\s*\u5408\u8ba1", text)
+        if detail_block_match:
+            detail_block = detail_block_match.group(1)
+            detail_lines = [line.strip() for line in detail_block.splitlines() if line.strip()]
+            data_line = detail_lines[-1] if detail_lines else ""
+            amount_match = re.search(r"((?:USD|CNY|RMB|EUR)\s*[0-9][0-9,]*(?:\.[0-9]+)?)", data_line, flags=re.IGNORECASE)
+            if amount_match:
+                prefix = data_line[:amount_match.start()].strip()
+                suffix = data_line[amount_match.end():].strip()
+                prefix_tokens = prefix.split()
+                if prefix_tokens:
+                    fields["sales_contract_no"] = prefix_tokens[0]
+                if len(prefix_tokens) >= 2:
+                    fields["purchase_contract_no"] = prefix_tokens[-1]
+                if suffix:
+                    fields["advance_guarantee"] = _clean_value(suffix)
+
+        payment_detail_match = re.search(r"\u652f\u4ed8\u5355\u660e\u7ec6\u4fe1\u606f[:：]?\s*([\s\S]{0,220}?)\n\s*(?:\u5ba1\u6279\u4fe1\u606f|\u6253\u5370\u6b21\u6570)", text)
+        if payment_detail_match:
+            payment_block = payment_detail_match.group(1)
+            detail_match = re.search(
+                rf"({DATE_PATTERN})\s+([^\n\r]{{2,20}}?)\s+(?:(?:USD|CNY|RMB|EUR)\s*)?([0-9][0-9,]*(?:\.[0-9]+)?)",
+                payment_block,
+                flags=re.IGNORECASE,
+            )
+            if detail_match:
+                if not fields.get("payment_date"):
+                    fields["payment_date"] = _normalize_date_token(detail_match.group(1))
+                fields["payment_status"] = _clean_value(detail_match.group(2))
+                if not fields.get("total_amount"):
+                    fields["total_amount"] = _normalize_amount_value(detail_match.group(3))
 
     if doc_type == "contract":
         contract_date = _find_date_by_keywords(
@@ -2113,7 +2667,86 @@ def _extract_fields(raw_text: str, doc_type: str, llm_backend: Optional[str] = N
         if contract_date:
             fields["contract_date"] = contract_date
 
-    llm_result = _extract_with_llm(text, doc_type, llm_backend or AUDIT_LLM_BACKEND)
+        shipment_date = _find_date_by_keywords(text, ["\u88c5\u8fd0\u671f\u9650", "SHIPMENT\s*DATE", "\u88c5\u8fd0\u65e5\u671f"])
+        if not shipment_date:
+            shipment_anchor = _extract_anchor_line(text, ["SHIPMENT DATE", "\u88c5\u8fd0\u671f\u9650"])
+            shipment_match = re.search(DATE_PATTERN, shipment_anchor)
+            if shipment_match:
+                shipment_date = _normalize_date_token(shipment_match.group(0))
+        if shipment_date:
+            fields["shipment_date"] = shipment_date
+
+        delivery_date = _find_date_by_keywords(text, ["\u4ea4\u8d27\u65f6\u95f4", "\u4ea4\u8d27\u65e5\u671f", "\u4ea4\u4ed8\u65e5\u671f"])
+        if not delivery_date:
+            delivery_anchor = _extract_anchor_line(text, ["\u4ea4\u8d27\u65f6\u95f4", "\u4ea4\u8d27\u65e5\u671f"])
+            delivery_match = re.search(DATE_PATTERN, delivery_anchor)
+            if delivery_match:
+                delivery_date = _normalize_date_token(delivery_match.group(0))
+        if delivery_date:
+            fields["delivery_date"] = delivery_date
+
+        contract_table_block = _extract_anchor_line(
+            text,
+            ["\u54c1\u540d\u53ca\u89c4\u683c", "COMMODITY AND", "QUANTITY/WEIGHT"],
+            window=16,
+        )
+        contract_table_flat = re.sub(r"\s+", " ", contract_table_block)
+
+        commodity_name = _extract_first_meaningful_line(
+            text,
+            ["\u54c1\u540d\u53ca\u89c4\u683c", "COMMODITY AND"],
+            ["\u5408\u8ba1", "TOTAL AMOUNT", "\u4e8c ", "GENERAL TERMS", "S PECIFICATION", "SPECIFICATION"],
+        )
+        if not commodity_name:
+            commodity_name = _extract_contract_commodity_name(text)
+        if commodity_name:
+            fields["commodity_name"] = commodity_name
+
+        quantity_anchor = contract_table_flat or _extract_anchor_line(text, ["QUANTITY/WEIGHT", "\u6570\u91cf/\u91cd\u91cf", "\u54c1\u540d\u53ca\u89c4\u683c"])
+        quantity_match = re.search(r"(\d+(?:\.\d+)?)\s*([A-Za-z\u4e00-\u9fff]{1,10})", quantity_anchor)
+        if quantity_match:
+            fields["quantity"] = _normalize_amount_value(quantity_match.group(1))
+            fields["quantity_unit"] = _clean_value(quantity_match.group(2))
+
+        unit_price_anchor = contract_table_flat or _extract_anchor_line(text, ["UNIT PRICE & TERMS", "\u5355\u4ef7\u53ca\u4ef7\u683c\u6761\u6b3e"])
+        unit_price_match = re.search(r"(\d+(?:\.\d{1,4})?)\s*[A-Za-z\u4e00-\u9fff]{0,10}\s*(?:EXW|FCA|FAS|FOB|CFR|CIF|CPT|CIP|DAP|DPU|DDP)?", unit_price_anchor, flags=re.IGNORECASE)
+        if unit_price_match:
+            fields["unit_price"] = _normalize_amount_value(unit_price_match.group(1))
+        if not fields.get("incoterm"):
+            incoterm_match = re.search(r"\b(EXW|FCA|FAS|FOB|CFR|CIF|CPT|CIP|DAP|DPU|DDP)\b", contract_table_flat, flags=re.IGNORECASE)
+            if incoterm_match:
+                fields["incoterm"] = incoterm_match.group(1).upper()
+        if not fields.get("incoterm"):
+            incoterm_match = re.search(r"\b(EXW|FCA|FAS|FOB|CFR|CIF|CPT|CIP|DAP|DPU|DDP)\b", text, flags=re.IGNORECASE)
+            if incoterm_match:
+                fields["incoterm"] = incoterm_match.group(1).upper()
+
+        table_triplet_match = re.search(
+            rf"(\d+(?:\.\d+)?)\s*([A-Za-z\u4e00-\u9fff]{{1,10}})\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s+({DATE_PATTERN})",
+            contract_table_flat,
+            flags=re.IGNORECASE,
+        )
+        if table_triplet_match:
+            if not fields.get("quantity"):
+                fields["quantity"] = _normalize_amount_value(table_triplet_match.group(1))
+            if not fields.get("quantity_unit"):
+                fields["quantity_unit"] = _clean_value(table_triplet_match.group(2))
+            fields["tax_amount"] = _normalize_amount_value(table_triplet_match.group(4))
+            fields["vat_amount"] = _normalize_amount_value(table_triplet_match.group(4))
+            if not fields.get("total_amount"):
+                fields["total_amount"] = _normalize_amount_value(table_triplet_match.group(5))
+
+        if fields.get("vat_amount") is None:
+            vat_line = _extract_anchor_line(text, ["\u589e\u503c\u7a0e\u989d"])
+            vat_numbers = _extract_amount_candidates(vat_line)
+            if vat_numbers:
+                vat_numbers.sort(key=lambda item: item[2])
+                if len(vat_numbers) >= 3:
+                    fields["vat_amount"] = vat_numbers[1][0]
+                    fields["tax_amount"] = fields["vat_amount"]
+
+    if llm_result is None:
+        llm_result = _extract_with_llm(text, doc_type, llm_backend or AUDIT_LLM_BACKEND)
     fields = _merge_llm_fields(fields, llm_result, allow_doc_type_override=False)
     fields = _post_process_fields(fields, text)
 
@@ -2695,19 +3328,31 @@ def _collect_review_feedback(
 
     try:
         sb = require_supabase()
-        query = (
-            sb.table("audit_jobs")
-            .select("job_id,doc_type")
-            .eq("user_id", user_id)
-            .eq("status", "done")
-            .order("created_at", desc=True)
-            .limit(AUDIT_FEEDBACK_LIMIT)
-        )
-        if doc_type and doc_type in AUDIT_DOC_TYPES:
-            query = query.eq("doc_type", doc_type)
+        history_candidates = list(history_records or [])
+        if history_candidates:
+            if doc_type and doc_type in AUDIT_DOC_TYPES:
+                history_candidates = [
+                    row for row in history_candidates
+                    if _safe_text(row.get("doc_type")).lower() == _safe_text(doc_type).lower()
+                ]
+            history_candidates = history_candidates[:AUDIT_FEEDBACK_LIMIT]
+            job_ids = [row.get("job_id") for row in history_candidates if row.get("job_id")]
+            history_map = {r.get("job_id"): r for r in history_candidates if r.get("job_id")}
+        else:
+            query = (
+                sb.table("audit_jobs")
+                .select("job_id,doc_type")
+                .eq("user_id", user_id)
+                .eq("status", "done")
+                .order("created_at", desc=True)
+                .limit(AUDIT_FEEDBACK_LIMIT)
+            )
+            if doc_type and doc_type in AUDIT_DOC_TYPES:
+                query = query.eq("doc_type", doc_type)
 
-        jobs = query.execute().data or []
-        job_ids = [row.get("job_id") for row in jobs if row.get("job_id")]
+            jobs = query.execute().data or []
+            job_ids = [row.get("job_id") for row in jobs if row.get("job_id")]
+            history_map = {r.get("job_id"): r for r in (history_records or []) if r.get("job_id")}
         if not job_ids:
             return feedback
 
@@ -2715,7 +3360,6 @@ def _collect_review_feedback(
         if not review_rows:
             return feedback
 
-        history_map = {r.get("job_id"): r for r in (history_records or []) if r.get("job_id")}
         missing_ids = [j for j in job_ids if j not in history_map]
         if missing_ids:
             result_rows = sb.table("audit_results").select("job_id,result_json").in_("job_id", missing_ids).execute().data or []
@@ -3131,6 +3775,31 @@ def _run_anomaly_detection(
     return findings[:AI_MAX_FINDINGS], stats
 
 
+def _select_case_history_records(
+    history_records: List[Dict[str, Any]],
+    case_documents: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    job_ids = {
+        _safe_text(item.get("job_id"))
+        for item in (case_documents or [])
+        if isinstance(item, dict) and _safe_text(item.get("job_id"))
+    }
+    if not job_ids:
+        return []
+    return [
+        rec for rec in (history_records or [])
+        if _safe_text(rec.get("job_id")) in job_ids
+    ]
+
+
+def _pick_contract_record(records: List[Dict[str, Any]], subtype: str) -> Optional[Dict[str, Any]]:
+    for rec in records or []:
+        fields = rec.get("fields") or {}
+        if _safe_text(fields.get("doc_subtype")) == subtype:
+            return rec
+    return None
+
+
 def _run_cross_document_checks(
     doc_type: str,
     fields: Dict[str, Any],
@@ -3146,9 +3815,13 @@ def _run_cross_document_checks(
     contract_no = _safe_text(fields.get("contract_no"))
     invoice_no = _safe_text(fields.get("invoice_no"))
     vendor = _safe_text(fields.get("vendor") or fields.get("payee"))
+    current_subtype = _safe_text(fields.get("doc_subtype"))
     contract_date = _parse_date(fields.get("contract_date"))
     invoice_date = _parse_date(fields.get("invoice_date"))
     payment_date = _parse_date(fields.get("payment_date"))
+    shipment_date = _parse_date(fields.get("shipment_date"))
+    delivery_date = _parse_date(fields.get("delivery_date"))
+    current_currency = _safe_text(fields.get("currency")).upper()
 
     contract_amount = _safe_float(erp_ctx.get("contract_amount"))
     po_amount = _safe_float(erp_ctx.get("po_amount"))
@@ -3157,6 +3830,13 @@ def _run_cross_document_checks(
     expected_vendor = _safe_text(erp_ctx.get("expected_vendor"))
     vendor_status = _safe_text(erp_ctx.get("vendor_status")).lower()
     blacklist_hit = _safe_bool(erp_ctx.get("blacklist_hit"))
+    same_case_records = _select_case_history_records(history_records, case_documents)
+    same_case_contracts = [
+        rec for rec in same_case_records
+        if normalize_doc_type(rec.get("doc_type")) == "contract"
+    ]
+    purchase_contract_record = _pick_contract_record(same_case_contracts, "purchase_contract")
+    sales_contract_record = _pick_contract_record(same_case_contracts, "sales_contract")
 
     def _add_check(
         check_id: str,
@@ -3276,6 +3956,136 @@ def _run_cross_document_checks(
             expected=expected_vendor,
             evidence={"text": vendor, "highlight": vendor},
         )
+
+    if doc_type == "payment":
+        payee = _safe_text(fields.get("payee"))
+        payment_purchase_contract_no = _safe_text(fields.get("purchase_contract_no") or fields.get("contract_no") or fields.get("po_no"))
+        payment_sales_contract_no = _safe_text(fields.get("sales_contract_no"))
+        guarantee = _safe_text(fields.get("advance_guarantee"))
+
+        purchase_fields = (purchase_contract_record or {}).get("fields") or {}
+        sales_fields = (sales_contract_record or {}).get("fields") or {}
+
+        expected_purchase_vendor = _safe_text(purchase_fields.get("vendor"))
+        expected_purchase_contract_no = _safe_text(purchase_fields.get("contract_no") or purchase_fields.get("po_no"))
+        expected_purchase_currency = _safe_text(purchase_fields.get("currency")).upper()
+        expected_purchase_amount = _safe_float(purchase_fields.get("total_amount"))
+        expected_sales_contract_no = _safe_text(sales_fields.get("contract_no"))
+
+        if expected_purchase_vendor and payee:
+            matched = _normalize_text(expected_purchase_vendor) == _normalize_text(payee)
+            _add_check(
+                "payment_payee_contract_vendor",
+                "付款收款方-采购合同主体校验",
+                matched,
+                "收款方与采购合同乙方一致" if matched else "收款方与采购合同乙方不一致",
+                severity="high",
+                suggestion="建议复核付款对象与采购合同供应商是否一致。",
+                confidence=0.97,
+                actual=payee,
+                expected=expected_purchase_vendor,
+                evidence={"text": payee or expected_purchase_vendor, "highlight": payee or expected_purchase_vendor},
+            )
+
+        if expected_purchase_contract_no:
+            matched = bool(payment_purchase_contract_no) and _normalize_text(payment_purchase_contract_no) == _normalize_text(expected_purchase_contract_no)
+            _add_check(
+                "payment_purchase_contract_link",
+                "付款单-采购合同号校验",
+                matched,
+                "付款单已关联采购合同号" if matched else "付款单采购合同号缺失或与采购合同不一致",
+                severity="high",
+                suggestion="建议补充或修正付款单中的采购合同号。",
+                confidence=0.97,
+                actual=payment_purchase_contract_no or "未提取",
+                expected=expected_purchase_contract_no,
+                evidence={"text": payment_purchase_contract_no or expected_purchase_contract_no, "highlight": payment_purchase_contract_no or expected_purchase_contract_no},
+            )
+
+        if expected_sales_contract_no:
+            matched = bool(payment_sales_contract_no) and _normalize_text(payment_sales_contract_no) == _normalize_text(expected_sales_contract_no)
+            _add_check(
+                "payment_sales_contract_link",
+                "付款单-销售合同号校验",
+                matched,
+                "付款单销售合同号与销售合同一致" if matched else "付款单销售合同号缺失或与销售合同不一致",
+                severity="medium",
+                suggestion="建议核对预付款明细中的销售合同号。",
+                confidence=0.94,
+                actual=payment_sales_contract_no or "未提取",
+                expected=expected_sales_contract_no,
+                evidence={"text": payment_sales_contract_no or expected_sales_contract_no, "highlight": payment_sales_contract_no or expected_sales_contract_no},
+            )
+
+        if current_subtype == "advance_payment":
+            _add_check(
+                "advance_payment_guarantee",
+                "预付款担保信息校验",
+                bool(guarantee),
+                "已提取担保/担保说明" if guarantee else "预付款担保信息缺失",
+                severity="medium",
+                suggestion="建议补充预付款担保或预收外汇说明。",
+                confidence=0.92,
+                actual=guarantee or "未提取",
+                expected="担保情况/预收外汇说明",
+                evidence={"text": guarantee or "担保情况缺失", "highlight": guarantee or "担保情况"},
+            )
+
+        if (
+            amount is not None
+            and expected_purchase_amount is not None
+            and expected_purchase_amount > 0
+            and (not current_currency or not expected_purchase_currency or current_currency == expected_purchase_currency)
+        ):
+            within_purchase = amount <= expected_purchase_amount * 1.05
+            _add_check(
+                "payment_amount_vs_purchase_contract",
+                "付款金额-采购合同上限校验",
+                within_purchase,
+                f"付款金额 {amount:.2f} 超过采购合同金额 {expected_purchase_amount:.2f}" if not within_purchase else "付款金额未超过采购合同金额",
+                severity="high",
+                suggestion="建议复核付款金额、币种及合同结算安排。",
+                confidence=0.95,
+                actual=amount,
+                expected=expected_purchase_amount,
+                evidence={"text": f"{amount:.2f}", "highlight": f"{amount:.2f}"},
+            )
+
+    if doc_type == "contract" and same_case_contracts:
+        purchase_fields = (purchase_contract_record or {}).get("fields") or {}
+        sales_fields = (sales_contract_record or {}).get("fields") or {}
+        paired_sales_ship = _parse_date(sales_fields.get("shipment_date"))
+        paired_purchase_delivery = _parse_date(purchase_fields.get("delivery_date"))
+
+        if current_subtype == "sales_contract" and shipment_date and paired_purchase_delivery:
+            upstream_ready = paired_purchase_delivery <= shipment_date
+            _add_check(
+                "sales_purchase_schedule_alignment",
+                "销售装运期-采购交期衔接校验",
+                upstream_ready,
+                "采购交期早于或等于销售装运期" if upstream_ready else "采购交期晚于销售装运期，存在履约风险",
+                severity="high",
+                suggestion="建议调整采购交期或销售装运计划。",
+                confidence=0.95,
+                actual=shipment_date.isoformat(),
+                expected=paired_purchase_delivery.isoformat(),
+                evidence={"text": f"sales={shipment_date.isoformat()} / purchase={paired_purchase_delivery.isoformat()}", "highlight": shipment_date.isoformat()},
+            )
+
+        if current_subtype == "purchase_contract" and delivery_date and paired_sales_ship:
+            upstream_ready = delivery_date <= paired_sales_ship
+            _add_check(
+                "purchase_sales_schedule_alignment",
+                "采购交期-销售装运期衔接校验",
+                upstream_ready,
+                "采购交期早于或等于销售装运期" if upstream_ready else "采购交期晚于销售装运期，存在交付风险",
+                severity="high",
+                suggestion="建议核对供应计划与销售履约节点。",
+                confidence=0.95,
+                actual=delivery_date.isoformat(),
+                expected=paired_sales_ship.isoformat(),
+                evidence={"text": f"purchase={delivery_date.isoformat()} / sales={paired_sales_ship.isoformat()}", "highlight": delivery_date.isoformat()},
+            )
 
     if amount is not None and contract_amount is not None and contract_amount > 0:
         limit = contract_amount * 1.05
@@ -4136,9 +4946,21 @@ def run_audit_job(
             return
 
         effective_doc_type = doc_type
+        precomputed_llm_result = None
         if doc_type == "auto":
-            llm_doc_type = _infer_doc_type_llm(raw_text, selected_model) if AUDIT_LLM_ENABLED else None
-            effective_doc_type = llm_doc_type or _infer_doc_type(raw_text)
+            heuristic_doc_type = _infer_doc_type(raw_text)
+            if AUDIT_LLM_ENABLED:
+                precomputed_llm_result = _extract_with_llm(
+                    raw_text,
+                    heuristic_doc_type if heuristic_doc_type != "auto" else None,
+                    selected_model,
+                )
+            llm_doc_type = None
+            if isinstance(precomputed_llm_result, dict):
+                candidate_doc_type = precomputed_llm_result.get("doc_type")
+                if candidate_doc_type in AUDIT_DOC_TYPES:
+                    llm_doc_type = candidate_doc_type
+            effective_doc_type = llm_doc_type or heuristic_doc_type
             update_job(job_id, doc_type=effective_doc_type)
             _update_db("audit_docs", {"doc_type": effective_doc_type}, job_id, key="job_id")
         _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, doc_type=effective_doc_type)
@@ -4146,7 +4968,17 @@ def run_audit_job(
         update_job(job_id, progress=STAGE_PROGRESS["ocr"], stage="extract")
 
         extraction_text = _build_case_combined_text(normalized_case_id, job_id, raw_text)
-        fields = _extract_fields(extraction_text, effective_doc_type, llm_backend=selected_model)
+        reusable_llm_result = (
+            precomputed_llm_result
+            if isinstance(precomputed_llm_result, dict) and _safe_text(extraction_text) == _safe_text(raw_text)
+            else None
+        )
+        fields = _extract_fields(
+            extraction_text,
+            effective_doc_type,
+            llm_backend=selected_model,
+            llm_result=reusable_llm_result,
+        )
         fields = _validate_fields(fields)
         doc_subtype = _infer_doc_subtype(raw_text, effective_doc_type, fields, file_name=filename)
         if doc_subtype:
@@ -4159,8 +4991,12 @@ def run_audit_job(
             return
 
         history_records = _collect_history_records(user_id)
-        feedback_ctx = _collect_review_feedback(user_id, effective_doc_type, history_records)
-        erp_ctx = _fetch_erp_context(fields, user_id, effective_doc_type, history_records)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            feedback_future = executor.submit(_collect_review_feedback, user_id, effective_doc_type, history_records)
+            erp_future = executor.submit(_fetch_erp_context, fields, user_id, effective_doc_type, history_records)
+            feedback_ctx = feedback_future.result()
+            erp_ctx = erp_future.result()
+        t_after_context = time.perf_counter()
 
         update_job(job_id, progress=STAGE_PROGRESS["extract"], stage="rules", workflow_state="rule_checking")
 
@@ -4343,9 +5179,11 @@ def run_audit_job(
             f"extract_mode={extract_mode} "
             f"ocr={t_after_ocr - t_start:.2f}s "
             f"extract={t_after_extract - t_after_ocr:.2f}s "
-            f"rules={t_after_rules - t_after_extract:.2f}s "
+            f"context={t_after_context - t_after_extract:.2f}s "
+            f"rules={t_after_rules - t_after_context:.2f}s "
             f"ai={t_after_ai - t_after_rules:.2f}s "
             f"report={t_done - t_after_ai:.2f}s "
+            f"llm_extract_reused={bool(reusable_llm_result)} "
             f"total={t_done - t_start:.2f}s"
         )
 

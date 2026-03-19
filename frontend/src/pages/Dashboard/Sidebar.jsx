@@ -568,7 +568,7 @@ const Sidebar = ({
                 </button>
               </div>
 
-              {/* 2. 2. 工具：搜索和知识库管理 */}
+              {/* 2. 2. 工具：搜索和数据库管理 */}
               <div className="px-3 py-2 space-y-1">
                   <div
                     onClick={() => setIsSearchOpen(true)}
@@ -588,10 +588,10 @@ const Sidebar = ({
                           ? "opacity-50 cursor-not-allowed text-gray-400 dark:text-gray-500"
                           : `hover:bg-gray-200/60 dark:hover:bg-gray-800 text-sm text-gray-700 dark:text-gray-300 cursor-pointer ${isKbExpanded ? "bg-gray-100 dark:bg-gray-800" : ""}`
                       }`}
-                      title={isRestrictedMode ? "仅在通用问答模式下可用" : "切换知识库模式"}
+                      title={isRestrictedMode ? "仅在通用问答模式下可用" : "展开数据库管理"}
                     >
                       <div className="flex items-center gap-3">
-                        <Database size={16} /> 知识库管理
+                        <Database size={16} /> 数据库管理
                       </div>
                       {isRestrictedMode ? (
                         <Lock size={12} className="text-gray-400" />

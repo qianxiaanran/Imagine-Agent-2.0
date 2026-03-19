@@ -223,6 +223,44 @@ def add_history_to_supabase(user_id, session_id, func_type, role, content):
         return False
 
 
+def add_history_turn_to_supabase(user_id, session_id, func_type, user_content, assistant_content):
+    """Insert a user/assistant turn and return the persisted history ids."""
+    try:
+        _ensure_history_id_autoincrement()
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    INSERT INTO public.history (user_id, session_id, func_type, role, content)
+                    VALUES
+                        (:user_id, :session_id, :func_type, 'user', :user_content),
+                        (:user_id, :session_id, :func_type, 'assistant', :assistant_content)
+                    RETURNING id, role
+                    """
+                ),
+                {
+                    "user_id": str(user_id),
+                    "session_id": str(session_id),
+                    "func_type": func_type,
+                    "user_content": "" if user_content is None else str(user_content),
+                    "assistant_content": "" if assistant_content is None else str(assistant_content),
+                },
+            )
+            id_map = {}
+            for row in result.mappings().all():
+                role = str(row.get("role") or "").strip().lower()
+                row_id = row.get("id")
+                if role and row_id is not None:
+                    id_map[role] = int(row_id)
+            return {
+                "user_id": id_map.get("user"),
+                "assistant_id": id_map.get("assistant"),
+            }
+    except Exception as e:
+        print(f"Error logging history turn: {e}")
+        return None
+
+
 def save_context(user_id, session_id, content, func_type="context_save"):
     """保存上下文并自动命名"""
     try:

@@ -1,49 +1,134 @@
 [
   {
+    "id": "PAYMENT_REQUEST_NO_MISSING",
+    "severity": "high",
+    "message": "付款申请单编号缺失",
+    "reason": "付款申请单未识别到单号，无法追踪审批流转。",
+    "suggestion": "补充付款申请单编号。",
+    "checks": [
+      { "field": "request_no", "op": "missing" }
+    ],
+    "evidence": { "keyword": "申请单编号" }
+  },
+  {
+    "id": "PAYMENT_REQUEST_DATE_MISSING",
+    "severity": "medium",
+    "message": "付款申请日期缺失",
+    "reason": "付款申请日期缺失，无法判断申请与付款时序。",
+    "suggestion": "补充申请日期。",
+    "checks": [
+      { "field": "request_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "申请日期" }
+  },
+  {
+    "id": "PAYMENT_APPLICATION_STATUS_MISSING",
+    "severity": "medium",
+    "message": "付款审批状态缺失",
+    "reason": "未识别到审批状态，无法判断付款是否已流转审批。",
+    "suggestion": "补充审批状态信息。",
+    "checks": [
+      { "field": "application_status", "op": "missing" }
+    ],
+    "evidence": { "keyword": "状态" }
+  },
+  {
     "id": "PAYMENT_PAYEE_MISSING",
     "severity": "high",
     "message": "收款方信息缺失",
-    "suggestion": "补充收款方名称或账户信息",
+    "reason": "未识别到收款人/收款方名称，无法校验付款对象。",
+    "suggestion": "补充收款方名称。",
     "checks": [
       { "field": "payee", "op": "missing" }
     ],
-    "evidence": { "keyword": "收款方" }
+    "evidence": { "keyword": "收款人" }
+  },
+  {
+    "id": "PAYMENT_BANK_NAME_MISSING",
+    "severity": "medium",
+    "message": "收款银行缺失",
+    "reason": "未识别到收款银行，银行账户校验信息不完整。",
+    "suggestion": "补充收款银行信息。",
+    "checks": [
+      { "field": "bank_name", "op": "missing" }
+    ],
+    "evidence": { "keyword": "收款银行" }
   },
   {
     "id": "PAYMENT_ACCOUNT_MISSING",
-    "severity": "medium",
+    "severity": "high",
     "message": "收款账户缺失",
-    "suggestion": "补充银行账号信息",
+    "reason": "未识别到银行账号，付款指令不可核验。",
+    "suggestion": "补充收款银行账号。",
     "checks": [
       { "field": "bank_account", "op": "missing" }
     ],
-    "evidence": { "keyword": "账号" }
+    "evidence": { "keyword": "银行账号" }
+  },
+  {
+    "id": "PAYMENT_METHOD_MISSING",
+    "severity": "medium",
+    "message": "付款方式缺失",
+    "reason": "未识别到电汇/信用证等付款方式。",
+    "suggestion": "补充付款方式。",
+    "checks": [
+      { "field": "payment_method", "op": "missing" }
+    ],
+    "evidence": { "keyword": "付款方式" }
+  },
+  {
+    "id": "PAYMENT_TYPE_MISSING",
+    "severity": "medium",
+    "message": "付款类型缺失",
+    "reason": "未识别到预付款、尾款等付款类型。",
+    "suggestion": "补充付款类型。",
+    "checks": [
+      { "field": "payment_type", "op": "missing" }
+    ],
+    "evidence": { "keyword": "付款类型" }
+  },
+  {
+    "id": "PAYMENT_DATE_MISSING",
+    "severity": "medium",
+    "message": "计划付款日期缺失",
+    "reason": "未识别到预计/要求付款日期。",
+    "suggestion": "补充付款日期。",
+    "checks": [
+      { "field": "payment_date", "op": "missing" }
+    ],
+    "evidence": { "keyword": "预计付款日期" }
   },
   {
     "id": "PAYMENT_AMOUNT_MISSING",
     "severity": "high",
     "message": "付款金额缺失或为0",
-    "suggestion": "补充付款金额",
+    "reason": "未识别到付款金额，无法继续做合同金额核验。",
+    "suggestion": "补充付款金额。",
     "checks": [
       { "field": "total_amount", "op": "missing_or_zero" }
     ],
-    "evidence": { "field": "total_amount" }
+    "evidence": { "field": "total_amount", "keyword": "付款金额" }
   },
   {
-    "id": "PAYMENT_DATE_MISSING",
+    "id": "ADVANCE_PAYMENT_GUARANTEE_MISSING",
     "severity": "medium",
-    "message": "付款日期缺失",
-    "suggestion": "补充付款日期",
-    "checks": [
-      { "field": "payment_date", "op": "missing" }
+    "message": "预付款担保信息缺失",
+    "reason": "预付款场景未识别到担保/预收外汇说明。",
+    "suggestion": "补充担保情况或预收外汇账款说明。",
+    "when": [
+      { "field": "doc_subtype", "op": "eq", "value": "advance_payment" }
     ],
-    "evidence": { "keyword": "日期" }
+    "checks": [
+      { "field": "advance_guarantee", "op": "missing" }
+    ],
+    "evidence": { "keyword": "担保情况" }
   },
   {
     "id": "PAYMENT_OVERPAY",
     "severity": "high",
     "message": "付款金额超过ERP合同金额",
-    "suggestion": "核对合同金额或拆分付款",
+    "reason": "付款金额高于 ERP 合同金额基线。",
+    "suggestion": "核对合同金额、付款拆分或补充审批。",
     "when": [
       { "field": "erp.contract_amount", "op": "exists" }
     ],
