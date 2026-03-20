@@ -631,6 +631,50 @@ def _normalize_case_id(case_id: Optional[str]) -> Optional[str]:
     return None
 
 
+def _normalize_client_request_id(client_request_id: Optional[str]) -> Optional[str]:
+    text = _safe_text(client_request_id)
+    if not text:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_\-:.]{8,128}", text):
+        return text
+    return None
+
+
+def _find_existing_job_by_client_request_id(
+    client_request_id: Optional[str],
+    *,
+    user_id: Optional[str] = None,
+    case_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    normalized_request_id = _normalize_client_request_id(client_request_id)
+    if not normalized_request_id:
+        return None
+    normalized_user_id = _safe_text(user_id)
+    normalized_case_id = _normalize_case_id(case_id)
+
+    def _matches(job: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(job, dict):
+            return False
+        if _safe_text(job.get("client_request_id")) != normalized_request_id:
+            return False
+        if normalized_user_id and _safe_text(job.get("user_id")) != normalized_user_id:
+            return False
+        if normalized_case_id and _normalize_case_id(job.get("case_id")) != normalized_case_id:
+            return False
+        return True
+
+    with AUDIT_LOCK:
+        for payload in AUDIT_JOBS.values():
+            if _matches(payload):
+                return dict(payload)
+
+    for payload in list_local_audit_jobs(limit=400, offset=0):
+        if _matches(payload):
+            job_id = _safe_text(payload.get("job_id"))
+            return _hydrate_job_from_storage(job_id) or payload
+    return None
+
+
 def _ensure_case(case_id: str, user_id: str, doc_type: str = "auto") -> Dict[str, Any]:
     now = _now_iso()
     _hydrate_case_from_storage(case_id)
@@ -1030,21 +1074,20 @@ def _insert_db(table: str, payload: Any) -> None:
     if not require_supabase:
         return
     sanitized_payload = _sanitize_db_payload(table, payload)
-    try:
-        sb = require_supabase()
-        sb.table(table).insert(sanitized_payload).execute()
-    except Exception as e:
-        missing_column = _record_missing_db_column(table, e)
-        if missing_column:
-            retry_payload = _sanitize_db_payload(table, sanitized_payload)
-            if retry_payload != sanitized_payload:
-                try:
-                    sb = require_supabase()
-                    sb.table(table).insert(retry_payload).execute()
-                    return
-                except Exception as retry_error:
-                    print(f"[Audit DB] Insert retry failed ({table}): {retry_error}")
-        print(f"[Audit DB] Insert failed ({table}): {e}")
+    while True:
+        try:
+            sb = require_supabase()
+            sb.table(table).insert(sanitized_payload).execute()
+            return
+        except Exception as e:
+            missing_column = _record_missing_db_column(table, e)
+            if missing_column:
+                retry_payload = _sanitize_db_payload(table, sanitized_payload)
+                if retry_payload != sanitized_payload and retry_payload:
+                    sanitized_payload = retry_payload
+                    continue
+            print(f"[Audit DB] Insert failed ({table}): {e}")
+            return
 
 
 def _update_db(table: str, payload: Dict[str, Any], job_id: str, key: str = "job_id") -> None:
@@ -1053,21 +1096,42 @@ def _update_db(table: str, payload: Dict[str, Any], job_id: str, key: str = "job
     sanitized_payload = _sanitize_db_payload(table, payload)
     if not sanitized_payload:
         return
-    try:
-        sb = require_supabase()
-        sb.table(table).update(sanitized_payload).eq(key, job_id).execute()
-    except Exception as e:
-        missing_column = _record_missing_db_column(table, e)
-        if missing_column:
-            retry_payload = _sanitize_db_payload(table, sanitized_payload)
-            if retry_payload != sanitized_payload:
-                try:
-                    sb = require_supabase()
-                    sb.table(table).update(retry_payload).eq(key, job_id).execute()
-                    return
-                except Exception as retry_error:
-                    print(f"[Audit DB] Update retry failed ({table}): {retry_error}")
-        print(f"[Audit DB] Update failed ({table}): {e}")
+    while True:
+        try:
+            sb = require_supabase()
+            sb.table(table).update(sanitized_payload).eq(key, job_id).execute()
+            return
+        except Exception as e:
+            missing_column = _record_missing_db_column(table, e)
+            if missing_column:
+                retry_payload = _sanitize_db_payload(table, sanitized_payload)
+                if retry_payload != sanitized_payload and retry_payload:
+                    sanitized_payload = retry_payload
+                    continue
+            print(f"[Audit DB] Update failed ({table}): {e}")
+            return
+
+
+def _upsert_db(table: str, payload: Dict[str, Any], *, on_conflict: str) -> None:
+    if not require_supabase:
+        return
+    sanitized_payload = _sanitize_db_payload(table, payload)
+    if not sanitized_payload:
+        return
+    while True:
+        try:
+            sb = require_supabase()
+            sb.table(table).upsert(sanitized_payload, on_conflict=on_conflict).execute()
+            return
+        except Exception as e:
+            missing_column = _record_missing_db_column(table, e)
+            if missing_column:
+                retry_payload = _sanitize_db_payload(table, sanitized_payload)
+                if retry_payload != sanitized_payload and retry_payload:
+                    sanitized_payload = retry_payload
+                    continue
+            print(f"[Audit DB] Upsert failed ({table}): {e}")
+            return
 
 
 def _load_job_from_db(job_id: str) -> Optional[Dict[str, Any]]:
@@ -1120,7 +1184,17 @@ def create_job(
     doc_type: Optional[str],
     case_id: Optional[str] = None,
     model_type: Optional[str] = None,
+    client_request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    normalized_client_request_id = _normalize_client_request_id(client_request_id)
+    if normalized_client_request_id:
+        existing_job = _find_existing_job_by_client_request_id(
+            normalized_client_request_id,
+            user_id=user_id,
+            case_id=case_id,
+        )
+        if existing_job:
+            return existing_job
     job_id = str(uuid.uuid4())
     doc_id = str(uuid.uuid4())
     normalized_doc_type = normalize_doc_type(doc_type)
@@ -1161,6 +1235,7 @@ def create_job(
         "file_url": file_url,
         "local_path": local_path,
         "file_name": filename,
+        "client_request_id": normalized_client_request_id,
         "upload_sequence_notice": upload_sequence_notice or None,
         "result": None,
         "created_at": _now_iso(),
@@ -1313,6 +1388,29 @@ def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
     local_job = _hydrate_job_from_storage(job_id)
     if snapshot:
         if local_job:
+            local_updated_at = _parse_date(local_job.get("updated_at"))
+            snapshot_updated_at = _parse_date(snapshot.get("updated_at"))
+            prefer_local_runtime = (
+                snapshot_updated_at is None
+                or (local_updated_at is not None and local_updated_at >= snapshot_updated_at)
+            )
+            if prefer_local_runtime:
+                for key in (
+                    "user_id",
+                    "doc_type",
+                    "model_type",
+                    "status",
+                    "progress",
+                    "stage",
+                    "workflow_state",
+                    "error_message",
+                    "file_url",
+                    "file_name",
+                    "created_at",
+                    "updated_at",
+                ):
+                    if key in local_job and local_job.get(key) is not None:
+                        snapshot[key] = local_job.get(key)
             if not snapshot.get("case_id"):
                 snapshot["case_id"] = local_job.get("case_id")
             snapshot["workflow_state"] = local_job.get("workflow_state") or snapshot.get("workflow_state")
@@ -1685,6 +1783,31 @@ def list_local_audit_jobs(limit: int = 200, offset: int = 0) -> List[Dict[str, A
     if offset:
         rows = rows[offset:]
     return rows[:limit]
+
+
+def _history_record_from_job_payload(job_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(job_payload, dict):
+        return None
+    status = _safe_text(job_payload.get("status")).lower()
+    if status != "done":
+        return None
+    result = job_payload.get("result")
+    if not isinstance(result, dict):
+        result = {}
+    fields = result.get("extracted_fields") if isinstance(result.get("extracted_fields"), dict) else {}
+    return {
+        "job_id": _safe_text(job_payload.get("job_id")),
+        "case_id": _safe_text(job_payload.get("case_id")),
+        "doc_type": normalize_doc_type(job_payload.get("doc_type")),
+        "status": status,
+        "created_at": job_payload.get("created_at"),
+        "file_name": _safe_text(job_payload.get("file_name")),
+        "risk_level": result.get("risk_level"),
+        "summary": result.get("summary"),
+        "findings": result.get("findings") if isinstance(result.get("findings"), list) else [],
+        "fields": fields,
+        "result": result,
+    }
 
 
 DATE_PATTERN = r"(?:19|20)\d{2}\s*(?:[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}|\u5e74\s*\d{1,2}\s*\u6708\s*\d{1,2}\s*\u65e5?)"
@@ -3521,6 +3644,8 @@ def _build_finding(
     confidence: Optional[float] = None,
     rule_id: Optional[str] = None,
     action: Optional[str] = None,
+    actual: Any = None,
+    expected: Any = None,
 ) -> Dict[str, Any]:
     score = _safe_float(confidence)
     if score is None:
@@ -3538,6 +3663,8 @@ def _build_finding(
         "action": _safe_text(action) or _safe_text(suggestion) or "建议人工复核",
         "evidence": evidence or None,
         "confidence": score,
+        "actual": actual,
+        "expected": expected,
     }
 
 
@@ -3625,69 +3752,90 @@ def _run_rules(doc_type: str, fields: Dict[str, Any], raw_text: str, erp: Dict[s
 
 
 def _collect_history_records(user_id: str, limit: int = AUDIT_HISTORY_LIMIT) -> List[Dict[str, Any]]:
-    if not require_supabase:
-        return []
-    try:
-        sb = require_supabase()
+    record_map: Dict[str, Dict[str, Any]] = {}
+
+    for job in list_local_audit_jobs(limit=max(limit * 2, 200), offset=0):
+        if _safe_text(job.get("user_id")) != _safe_text(user_id):
+            continue
+        record = _history_record_from_job_payload(job)
+        job_id = _safe_text((record or {}).get("job_id"))
+        if not record or not job_id:
+            continue
+        record_map[job_id] = record
+
+    if require_supabase:
         try:
-            jobs_res = (
-                sb.table("audit_jobs")
-                .select("job_id,case_id,doc_type,status,created_at,file_name")
-                .eq("user_id", user_id)
-                .eq("status", "done")
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
-            jobs = jobs_res.data or []
-        except Exception:
-            jobs_res = (
-                sb.table("audit_jobs")
-                .select("job_id,doc_type,status,created_at,file_name")
-                .eq("user_id", user_id)
-                .eq("status", "done")
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
-            jobs = jobs_res.data or []
-        job_ids = [row.get("job_id") for row in jobs if row.get("job_id")]
-        if not job_ids:
-            return []
-
-        result_res = sb.table("audit_results").select("job_id,result_json,created_at").in_("job_id", job_ids).execute()
-        result_map = {
-            row.get("job_id"): row.get("result_json") or {}
-            for row in (result_res.data or [])
-            if row.get("job_id")
-        }
-
-        records = []
-        for job in jobs:
-            job_id = job.get("job_id")
-            result = result_map.get(job_id) or {}
-            fields = result.get("extracted_fields") if isinstance(result, dict) else {}
-            if not isinstance(fields, dict):
-                fields = {}
-            records.append(
-                {
-                    "job_id": job_id,
-                    "case_id": job.get("case_id"),
-                    "doc_type": job.get("doc_type"),
-                    "status": job.get("status"),
-                    "created_at": job.get("created_at"),
-                    "file_name": job.get("file_name"),
-                    "risk_level": result.get("risk_level"),
-                    "summary": result.get("summary"),
-                    "findings": result.get("findings") if isinstance(result.get("findings"), list) else [],
-                    "fields": fields,
-                    "result": result if isinstance(result, dict) else {},
+            sb = require_supabase()
+            try:
+                jobs_res = (
+                    sb.table("audit_jobs")
+                    .select("job_id,case_id,doc_type,status,created_at,file_name")
+                    .eq("user_id", user_id)
+                    .eq("status", "done")
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                jobs = jobs_res.data or []
+            except Exception:
+                jobs_res = (
+                    sb.table("audit_jobs")
+                    .select("job_id,doc_type,status,created_at,file_name")
+                    .eq("user_id", user_id)
+                    .eq("status", "done")
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                jobs = jobs_res.data or []
+            job_ids = [row.get("job_id") for row in jobs if row.get("job_id")]
+            result_map: Dict[str, Dict[str, Any]] = {}
+            if job_ids:
+                result_res = sb.table("audit_results").select("job_id,result_json,created_at").in_("job_id", job_ids).execute()
+                result_map = {
+                    row.get("job_id"): row.get("result_json") or {}
+                    for row in (result_res.data or [])
+                    if row.get("job_id")
                 }
-            )
-        return records
-    except Exception as e:
-        print(f"[Audit History] Load failed: {e}")
-        return []
+
+            for job in jobs:
+                job_id = _safe_text(job.get("job_id"))
+                if not job_id:
+                    continue
+                result = result_map.get(job_id) or {}
+                fields = result.get("extracted_fields") if isinstance(result, dict) else {}
+                if not isinstance(fields, dict):
+                    fields = {}
+                existing = record_map.get(job_id) or {}
+                record_map[job_id] = {
+                    "job_id": job_id,
+                    "case_id": job.get("case_id") or existing.get("case_id"),
+                    "doc_type": normalize_doc_type(job.get("doc_type") or existing.get("doc_type")),
+                    "status": _safe_text(job.get("status") or existing.get("status") or "done").lower(),
+                    "created_at": job.get("created_at") or existing.get("created_at"),
+                    "file_name": job.get("file_name") or existing.get("file_name"),
+                    "risk_level": result.get("risk_level") or existing.get("risk_level"),
+                    "summary": result.get("summary") or existing.get("summary"),
+                    "findings": result.get("findings") if isinstance(result.get("findings"), list) else (existing.get("findings") or []),
+                    "fields": fields or existing.get("fields") or {},
+                    "result": result if isinstance(result, dict) and result else (existing.get("result") or {}),
+                }
+        except Exception as e:
+            print(f"[Audit History] Load failed: {e}")
+
+    records = list(record_map.values())
+    records = [
+        item for item in records
+        if _safe_text(item.get("job_id")) and _safe_text(item.get("status")).lower() == "done"
+    ]
+    records.sort(
+        key=lambda item: (
+            _safe_text(item.get("created_at")),
+            _safe_text(item.get("job_id")),
+        ),
+        reverse=True,
+    )
+    return records[:limit]
 
 
 def _collect_review_feedback(
@@ -5159,6 +5307,7 @@ def _build_vendor_history_summary(
     history_records: List[Dict[str, Any]],
     *,
     current_case_id: Optional[str] = None,
+    current_job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     current_anchor = _history_anchor_fields(current_doc_type, current_fields or {})
     current_vendor = _safe_text(current_anchor.get("counterparty"))
@@ -5168,7 +5317,7 @@ def _build_vendor_history_summary(
 
     matched_records: List[Dict[str, Any]] = []
     for record in history_records or []:
-        if current_case_id and _safe_text(record.get("case_id")) == _safe_text(current_case_id):
+        if current_job_id and _safe_text(record.get("job_id")) == _safe_text(current_job_id):
             continue
         record_fields = record.get("fields") if isinstance(record, dict) else {}
         if not isinstance(record_fields, dict):
@@ -5329,10 +5478,11 @@ def _build_history_intelligence(
     history_records: List[Dict[str, Any]],
     *,
     current_case_id: Optional[str] = None,
+    current_job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     candidate_items: List[Dict[str, Any]] = []
     for record in history_records or []:
-        if current_case_id and _safe_text(record.get("case_id")) == _safe_text(current_case_id):
+        if current_job_id and _safe_text(record.get("job_id")) == _safe_text(current_job_id):
             continue
         item = _build_history_similarity_item(current_doc_type, current_fields, record)
         if item:
@@ -5345,6 +5495,7 @@ def _build_history_intelligence(
         current_fields,
         history_records,
         current_case_id=current_case_id,
+        current_job_id=current_job_id,
     )
     duplicate_signals = _build_history_duplicate_signals(current_doc_type, similar_cases)
     return {
@@ -5588,30 +5739,29 @@ def _persist_audit_result(job_id: str, result: Dict[str, Any]) -> None:
     if not require_supabase:
         return
     now = _now_iso()
+    insert_payload = {
+        "job_id": job_id,
+        "result_json": result,
+        "created_at": now,
+        "updated_at": now,
+    }
     try:
         sb = require_supabase()
-        sb.table("audit_results").upsert(
-            {
-                "id": job_id,
-                "job_id": job_id,
-                "result_json": result,
-                "updated_at": now,
-                "created_at": now,
-            },
-            on_conflict="job_id",
-        ).execute()
-        return
+        _update_db("audit_results", {"result_json": result, "updated_at": now}, job_id)
+        resp = sb.table("audit_results").select("job_id").eq("job_id", job_id).limit(1).execute()
+        if resp.data:
+            return
     except Exception:
         pass
     try:
+        _insert_db("audit_results", insert_payload)
         sb = require_supabase()
-        sb.table("audit_results").update({"result_json": result, "updated_at": now}).eq("job_id", job_id).execute()
+        resp = sb.table("audit_results").select("job_id").eq("job_id", job_id).limit(1).execute()
+        if resp.data:
+            return
     except Exception:
-        try:
-            sb = require_supabase()
-            sb.table("audit_results").insert({"id": job_id, "job_id": job_id, "result_json": result, "created_at": now, "updated_at": now}).execute()
-        except Exception as e:
-            print(f"[Audit Result] Persist failed: {e}")
+        pass
+    print(f"[Audit Result] Persist failed: job_id={job_id}")
 
 
 def _update_job_result_in_memory(job_id: str, result: Dict[str, Any]) -> None:
@@ -5975,9 +6125,18 @@ def enqueue_audit_job(
     doc_type: Optional[str],
     case_id: Optional[str] = None,
     model_type: Optional[str] = None,
+    client_request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     selected_model = normalize_model_type(model_type)
-    job = create_job(file_bytes, filename, user_id, doc_type, case_id=case_id, model_type=selected_model)
+    job = create_job(
+        file_bytes,
+        filename,
+        user_id,
+        doc_type,
+        case_id=case_id,
+        model_type=selected_model,
+        client_request_id=client_request_id,
+    )
     queue_job_id = f"audit:{job['job_id']}"
 
     if enqueue_job is None:
@@ -6143,6 +6302,7 @@ def run_audit_job(
             fields,
             history_records,
             current_case_id=normalized_case_id,
+            current_job_id=job_id,
         )
         history_findings = _build_history_similarity_findings(effective_doc_type, history_intelligence)
         deterministic_findings = list(rule_findings) + list(cross_findings) + list(anomaly_findings) + list(history_findings)
@@ -6163,12 +6323,13 @@ def run_audit_job(
             _insert_db("audit_findings", rows)
 
         high_risk_gate = _has_high_risk(deterministic_findings)
+        review_context_text = _build_case_combined_text(normalized_case_id, job_id, extraction_text)
 
         update_job(job_id, progress=STAGE_PROGRESS["rules"], stage="ai", workflow_state="ai_review")
         ai_assessment = _run_ai_review(
             effective_doc_type,
             fields,
-            extraction_text,
+            review_context_text,
             deterministic_findings,
             high_risk_gate,
             selected_model,
@@ -6299,8 +6460,14 @@ def run_audit_job(
             },
         }
 
-        _persist_audit_result(job_id, result)
         _update_case_document_entry(case_id=normalized_case_id, job_id=job_id, status="done", doc_type=effective_doc_type)
+        latest_case_documents = _case_public_documents(normalized_case_id)
+        result["case_summary"] = {
+            "case_id": normalized_case_id,
+            "documents": latest_case_documents,
+            "completeness": case_completeness,
+        }
+        _persist_audit_result(job_id, result)
 
         update_job(
             job_id,

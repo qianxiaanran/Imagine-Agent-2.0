@@ -269,8 +269,12 @@ const AuditWorkspace = ({
   const batchCompletedCount = Number(auditFile?.completedCount) || auditQueue.filter((item) => item?.status === "done").length;
   const batchFailedCount = Number(auditFile?.failedCount) || auditQueue.filter((item) => item?.status === "failed").length;
   const batchQueuedCount = auditQueue.filter((item) => item?.status === "queued").length;
+  const activeCaseId = String(auditState?.caseId || "").trim();
+  const activeCaseDocCount = Array.isArray(auditState?.caseDocuments) ? auditState.caseDocuments.length : 0;
+  const canAppendToCase = !isBusy && !!activeCaseId && (isDone || isFailed || activeCaseDocCount > 0);
 
   const result = auditState?.result || {};
+  const hasAuditResult = !!result && typeof result === "object" && Object.keys(result).length > 0;
   const findings = Array.isArray(result.findings) ? result.findings : [];
   const erpChecks = Array.isArray(result.erp_checks) ? result.erp_checks : [];
   const extracted = result.extracted_fields || {};
@@ -280,6 +284,8 @@ const AuditWorkspace = ({
   const riskClass = riskBadgeClass(riskLevel);
   const historyText = typeof panelContent === "string" ? panelContent.trim() : "";
   const showHistory = !isBusy && !isDone && !isFailed && !!historyText;
+  const showRetainedReportWhileBusy = isBusy && hasAuditResult && activeCaseDocCount > 0;
+  const showAuditReport = hasAuditResult && !isFailed && (isDone || showRetainedReportWhileBusy);
   const openFilePicker = () => {
     if (isBusy) return;
     fileInputRef.current?.click();
@@ -500,6 +506,13 @@ const AuditWorkspace = ({
   const workflowLabel = workflowLabelMap[workflow] || workflow || "待处理";
   const selectedDocTypeLabel = (docTypes || []).find((item) => item.value === docType)?.label || "自动识别";
   const modelLabel = auditModelBackend === "cloud" ? "云端审单" : "本地审单";
+  const uploadCardTitle = canAppendToCase ? "继续向当前审单包添加文件" : "点击整个区域上传审单文件";
+  const uploadCardDescription = canAppendToCase
+    ? "新文件会继续归入当前案件，上下文、整包汇总和跨单据核对会自动延续。"
+    : "支持一次选择多份文件，系统会按顺序逐份审单：先合同，再发票/提单/装箱单，最后付款/报销单据";
+  const uploadCardHint = canAppendToCase
+    ? `当前审单包已收录 ${activeCaseDocCount} 份文件${activeCaseId ? ` · Case ${activeCaseId.slice(0, 8)}` : ""}`
+    : "支持图片、PDF、Word，多选后自动串行提交";
   const progressFallbackKey = progress < 10
     ? "upload"
     : progress < 30
@@ -598,13 +611,13 @@ const AuditWorkspace = ({
                 <FileUp size={20} />
               </div>
               <div className="mt-4 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                点击整个区域上传审单文件
+                {uploadCardTitle}
               </div>
               <div className="mt-1 max-w-md text-sm text-slate-600 dark:text-slate-300">
-                支持一次选择多份文件，系统会按顺序逐份审单：先合同，再发票/提单/装箱单，最后付款/报销单据
+                {uploadCardDescription}
               </div>
               <div className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-                支持图片、PDF、Word，多选后自动串行提交
+                {uploadCardHint}
               </div>
               <button
                 type="button"
@@ -749,8 +762,13 @@ const AuditWorkspace = ({
 
         {isFailed && <section className="rounded-2xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 p-4 text-sm">{auditState?.error_message || auditState?.error || "审单失败，请重试。"}</section>}
         {showHistory && <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{historyText}</section>}
+        {showRetainedReportWhileBusy && (
+          <section className="rounded-2xl border border-cyan-200 dark:border-cyan-900/60 bg-cyan-50/80 dark:bg-cyan-950/20 text-cyan-800 dark:text-cyan-200 p-4 text-sm">
+            当前正在处理新文件，下面保留的是本审单包上一轮解析与核对结果。新文件完成后，整包比对会自动刷新。
+          </section>
+        )}
 
-        {isDone && (
+        {showAuditReport && (
           <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
             <div className="grid grid-cols-1 xl:grid-cols-[220px_minmax(0,1fr)]">
               <aside className="border-r border-slate-200 dark:border-slate-800 p-3 bg-slate-50 dark:bg-slate-950/60 space-y-2">
@@ -880,8 +898,8 @@ const AuditWorkspace = ({
                           </>
                         )}
                         <div className="flex flex-wrap gap-2 pt-1">
-                          <button type="button" onClick={() => onErpAction && onErpAction("approved")} disabled={isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-emerald-600 text-white disabled:opacity-50">{isErpActionLoading ? "提交中..." : "回写通过"}</button>
-                          <button type="button" onClick={() => onErpAction && onErpAction("need_more")} disabled={isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-amber-600 text-white disabled:opacity-50">回写补件</button>
+                          <button type="button" onClick={() => onErpAction && onErpAction("approved")} disabled={!isDone || isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-emerald-600 text-white disabled:opacity-50">{isErpActionLoading ? "提交中..." : "回写通过"}</button>
+                          <button type="button" onClick={() => onErpAction && onErpAction("need_more")} disabled={!isDone || isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-amber-600 text-white disabled:opacity-50">回写补件</button>
                         </div>
                       </div>
                     </div>
@@ -971,8 +989,23 @@ const AuditWorkspace = ({
       </div>
 
       {(isDone || isFailed) && (
-        <div className="px-4 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-900/70 flex justify-end">
-          <button type="button" onClick={onReset} disabled={isErpActionLoading} className="px-4 py-2 rounded-lg text-sm font-medium bg-slate-900 hover:bg-black text-white dark:bg-white dark:text-slate-900 disabled:opacity-50">重新审单</button>
+        <div className="px-4 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-900/70 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            onClick={openFilePicker}
+            disabled={isErpActionLoading}
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-950 disabled:opacity-50"
+          >
+            继续添加文档
+          </button>
+          <button
+            type="button"
+            onClick={onReset}
+            disabled={isErpActionLoading}
+            className="px-4 py-2 rounded-lg text-sm font-medium bg-slate-900 hover:bg-black text-white dark:bg-white dark:text-slate-900 disabled:opacity-50"
+          >
+            新建审单包
+          </button>
         </div>
       )}
     </div>

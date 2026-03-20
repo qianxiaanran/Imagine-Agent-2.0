@@ -1100,7 +1100,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   // 通用内容面板状态
   const [panelContent, setPanelContent] = useState('');
   const [auditDocType, setAuditDocType] = useState('contract');
-  const [auditModelBackend, setAuditModelBackend] = useState('local');
+  const [auditModelBackend, setAuditModelBackend] = useState('cloud');
   const [auditFile, setAuditFile] = useState(null);
   const [auditBatch, setAuditBatch] = useState({
     active: false,
@@ -1900,15 +1900,22 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           throw new Error(data.detail || data.error || '获取审单状态失败');
         }
 
-        const nextStatus = data.status || status;
+        const returnedStatus = String(data.status || status || '').toLowerCase();
+        const hasFinalResult = !!(data.result && typeof data.result === 'object');
+        const nextStatus = (['pending', 'running'].includes(returnedStatus) && hasFinalResult)
+          ? 'done'
+          : (returnedStatus || status);
         const progressValue = Number(data.progress);
+        const resolvedProgress = Number.isFinite(progressValue)
+          ? progressValue
+          : (nextStatus === 'done' ? 100 : undefined);
         auditPollFailureCountRef.current = 0;
         setAuditState((prev) => ({
           ...prev,
           status: nextStatus,
-          progress: Number.isFinite(progressValue) ? progressValue : prev.progress,
-          stage: data.stage || prev.stage,
-          workflow_state: data.workflow_state || prev.workflow_state,
+          progress: Number.isFinite(resolvedProgress) ? resolvedProgress : prev.progress,
+          stage: data.stage || (nextStatus === 'done' ? 'done' : prev.stage),
+          workflow_state: data.workflow_state || data.result?.workflow_state || prev.workflow_state,
           caseId: data.case_id || prev.caseId,
           caseDocuments: Array.isArray(data.case_documents) ? data.case_documents : prev.caseDocuments,
           result: data.result || prev.result,
@@ -1924,16 +1931,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         const message = error?.message || '获取审单状态失败';
         const failureCount = auditPollFailureCountRef.current + 1;
         auditPollFailureCountRef.current = failureCount;
-        if (failureCount < 3) {
-          auditPollRef.current = setTimeout(poll, AUDIT_POLL_INTERVAL);
-          return;
+        if (failureCount === 3) {
+          showAuditNotice('审单状态同步暂时中断，系统正在自动重试。');
         }
+        const retryDelay = Math.min(AUDIT_POLL_INTERVAL * Math.max(1, failureCount), 8000);
         setAuditState((prev) => ({
           ...prev,
-          status: 'failed',
           error: message,
-          error_message: message
+          error_message: prev.status === 'failed' ? (prev.error_message || message) : null
         }));
+        auditPollRef.current = setTimeout(poll, retryDelay);
       }
     };
 
@@ -2010,6 +2017,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     auditBatchTransitionRef.current = marker;
 
     const currentIndex = Math.min(batch.currentIndex, batch.items.length - 1);
+    const currentCaseDocumentCount = Array.isArray(auditState.caseDocuments) ? auditState.caseDocuments.length : 0;
     if (terminalStatus === 'failed') {
       setAuditBatch((prev) => ({ ...prev, active: false }));
       if (batch.items.length > 1) {
@@ -2020,18 +2028,29 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
     const nextIndex = batch.items.findIndex((item, index) => index > currentIndex && item.status === 'queued');
     if (nextIndex === -1) {
+      const shouldRefreshCaseReport = Boolean(auditState.caseId) && currentCaseDocumentCount > 1;
       if (batch.active && batch.items.length > 1) {
         setAuditBatch((prev) => ({ ...prev, active: false }));
+      }
+      if (shouldRefreshCaseReport) {
         window.setTimeout(() => {
           void (async () => {
             const aggregatedResult = auditState.caseId ? await fetchAuditCaseReport(auditState.caseId) : null;
-            showAuditNotice(
-              aggregatedResult
-                ? `批量审单完成，共处理 ${batch.items.length} 份文件，已切换为整包汇总报告。`
-                : `批量审单完成，共处理 ${batch.items.length} 份文件。`
-            );
+            if (batch.active && batch.items.length > 1) {
+              showAuditNotice(
+                aggregatedResult
+                  ? `批量审单完成，共处理 ${batch.items.length} 份文件，已切换为整包汇总报告。`
+                  : `批量审单完成，共处理 ${batch.items.length} 份文件。`
+              );
+              return;
+            }
+            if (aggregatedResult) {
+              showAuditNotice(`已更新当前审单包汇总，共关联 ${currentCaseDocumentCount} 份文件。`);
+            }
           })();
         }, 120);
+      } else if (batch.active && batch.items.length > 1) {
+        showAuditNotice(`批量审单完成，共处理 ${batch.items.length} 份文件。`);
       }
       return;
     }
@@ -2631,6 +2650,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           setAuditState((prev) => ({
               ...prev,
               status: 'done',
+              progress: 100,
               stage: 'done',
               workflow_state: data.workflow_state || data.result?.workflow_state || prev.workflow_state,
               caseId: data.case_id || prev.caseId,
@@ -2651,7 +2671,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const {
           docTypeOverride = auditDocType,
           suppressBusyCheck = false,
-          batchIndex = -1
+          batchIndex = -1,
+          clientRequestId: providedClientRequestId = null
       } = options;
       if (!suppressBusyCheck && ['uploading', 'pending', 'running'].includes(auditState.status)) {
           showAuditNotice('审单进行中，请等待完成后再提交新文件。');
@@ -2673,7 +2694,18 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       const currentCaseDocs = Array.isArray(auditState?.caseDocuments) ? auditState.caseDocuments : [];
+      const currentCaseId = auditState?.caseId || '';
+      const preserveCaseResult = Boolean(
+          String(currentCaseId).trim()
+          && currentCaseDocs.length > 0
+          && auditState?.result
+          && typeof auditState.result === 'object'
+      );
       const uploadSequenceNotice = inspectAuditUploadSelection([file], docTypeOverride, currentCaseDocs);
+      const clientRequestId = providedClientRequestId
+          || (crypto.randomUUID
+              ? crypto.randomUUID()
+              : `audit_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`);
 
       setAuditNotice('');
       if (batchIndex >= 0) {
@@ -2703,32 +2735,61 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           progress: 0,
           stage: 'pending_docs',
           workflow_state: 'pending_docs',
-          result: null,
+          result: preserveCaseResult ? prev.result : null,
           error: null,
           error_message: null
       }));
 
       try {
-          const formData = new FormData();
-          formData.append('file', file);
-          if (docTypeOverride) formData.append('doc_type', docTypeOverride);
           const effectiveAuditBackend = auditModelBackend === 'cloud' ? 'cloud' : 'local';
-          formData.append('model_type', effectiveAuditBackend);
-          formData.append('user_id', userProfile.id || 'anonymous');
-          if (auditState.caseId) formData.append('case_id', auditState.caseId);
-
           const token = localStorage.getItem(AUTH_TOKEN_KEY);
           const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-          const response = await fetch(`${API_BASE_URL}/api/audit/start`, {
-              method: 'POST',
-              headers,
-              body: formData
+          const buildStartFormData = () => {
+              const formData = new FormData();
+              formData.append('file', file);
+              if (docTypeOverride) formData.append('doc_type', docTypeOverride);
+              formData.append('model_type', effectiveAuditBackend);
+              formData.append('user_id', userProfile.id || 'anonymous');
+              formData.append('client_request_id', clientRequestId);
+              if (currentCaseId) formData.append('case_id', currentCaseId);
+              return formData;
+          };
+          const requestAuditStart = async () => {
+              const response = await fetch(`${API_BASE_URL}/api/audit/start`, {
+                  method: 'POST',
+                  headers,
+                  body: buildStartFormData()
+              });
+              let data = {};
+              try {
+                  data = await response.json();
+              } catch (parseError) {
+                  data = {};
+              }
+              if (!response.ok || !data?.job_id) {
+                  throw new Error(data.detail || data.error || '审单启动失败');
+              }
+              return data;
+          };
+          const isTransportError = (error) => {
+              const message = String(error?.message || '');
+              return error instanceof TypeError
+                  || /Failed to fetch|NetworkError|Load failed|Network request failed/i.test(message);
+          };
 
-          });
-          const data = await response.json();
-
-          if (!response.ok || !data.job_id) {
-              throw new Error(data.detail || data.error || '审单启动失败');
+          let data;
+          try {
+              data = await requestAuditStart();
+          } catch (error) {
+              if (!isTransportError(error)) {
+                  throw error;
+              }
+              console.warn('Audit start transport error, retrying with same client_request_id', {
+                  clientRequestId,
+                  error
+              });
+              await new Promise((resolve) => window.setTimeout(resolve, 350));
+              data = await requestAuditStart();
           }
 
           if (batchIndex >= 0) {
@@ -2748,8 +2809,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               caseDocuments: Array.isArray(data.case_documents) ? data.case_documents : prev.caseDocuments,
               progress: 0,
               stage: data.stage || 'pending_docs',
-              workflow_state: data.stage || 'pending_docs',
-              result: null,
+              workflow_state: data.workflow_state || data.stage || 'pending_docs',
+              result: preserveCaseResult ? prev.result : null,
               error: null,
               error_message: null
           }));
@@ -2762,7 +2823,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               notice: nextNotice || ''
           };
       } catch (error) {
-          const message = error?.message || '审单启动失败';
+          const rawMessage = error?.message || '审单启动失败';
+          const isTransportError = error instanceof TypeError
+              || /Failed to fetch|NetworkError|Load failed|Network request failed/i.test(String(rawMessage));
+          const message = isTransportError
+              ? '上传请求未收到服务端响应，请稍后重试。若服务端已接收，系统会在重试时自动接回原任务。'
+              : rawMessage;
           if (batchIndex >= 0) {
               setAuditBatch((prev) => {
                   if (!prev.items[batchIndex]) return { ...prev, active: false };
@@ -2779,7 +2845,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               progress: 0,
               stage: 'failed',
               workflow_state: 'failed',
-              result: null,
+              result: preserveCaseResult ? prev.result : null,
               error: message,
               error_message: message
           }));

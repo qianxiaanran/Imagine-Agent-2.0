@@ -19,6 +19,7 @@ async def audit_start(
     user_id: str = Form(None),
     case_id: str = Form(None),
     model_type: str = Form(None),
+    client_request_id: str = Form(None),
 ):
     if not file:
         raise HTTPException(status_code=400, detail="Missing file")
@@ -35,6 +36,7 @@ async def audit_start(
             doc_type,
             case_id=case_id,
             model_type=model_type,
+            client_request_id=client_request_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -46,8 +48,10 @@ async def audit_start(
         "status": job["status"],
         "case_id": job.get("case_id"),
         "stage": job.get("stage"),
+        "workflow_state": snapshot.get("workflow_state") or job.get("workflow_state"),
         "upload_sequence_notice": job.get("upload_sequence_notice") or snapshot.get("upload_sequence_notice"),
         "case_documents": snapshot.get("case_documents", []),
+        "client_request_id": job.get("client_request_id"),
     }
 
 

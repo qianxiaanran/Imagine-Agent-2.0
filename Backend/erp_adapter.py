@@ -1,4 +1,6 @@
 ﻿import os
+import re
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -8,6 +10,43 @@ try:
     from supabase_client import require_supabase
 except Exception:
     require_supabase = None
+
+
+_ERP_SCHEMA_LOCK = threading.Lock()
+_ERP_UNAVAILABLE_TABLES: set[str] = set()
+_ERP_UNSUPPORTED_COLUMNS: Dict[str, set[str]] = {}
+
+
+def _remember_missing_table(table: str, error: Exception) -> bool:
+    message = str(error or "")
+    patterns = [
+        rf"Could not find the table '([^']*{re.escape(table)}[^']*)' in the schema cache",
+        rf"(?:relation|table)\s+['\"]?(?:public\.)?{re.escape(table)}['\"]?\s+does not exist",
+    ]
+    if not any(re.search(pattern, message, re.IGNORECASE) for pattern in patterns):
+        return False
+    with _ERP_SCHEMA_LOCK:
+        _ERP_UNAVAILABLE_TABLES.add(table)
+    return True
+
+
+def _remember_missing_column(table: str, error: Exception) -> Optional[str]:
+    message = str(error or "")
+    patterns = [
+        rf"Could not find the '([^']+)' column of '{re.escape(table)}' in the schema cache",
+        rf"column\s+['\"]?(?:public\.)?{re.escape(table)}\.([A-Za-z0-9_]+)['\"]?\s+does not exist",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if not match:
+            continue
+        column = str(match.group(1) or "").strip()
+        if not column:
+            continue
+        with _ERP_SCHEMA_LOCK:
+            _ERP_UNSUPPORTED_COLUMNS.setdefault(table, set()).add(column)
+        return column
+    return None
 
 
 class ERPAdapter(ABC):
@@ -62,18 +101,40 @@ class SupabaseERPAdapter(ERPAdapter):
     def _query_first(self, table: str, filters: Dict[str, Any], columns: str = "*") -> Optional[Dict[str, Any]]:
         if not require_supabase:
             return None
-        try:
-            sb = require_supabase()
-            query = sb.table(table).select(columns)
-            for key, value in filters.items():
-                if value is None or value == "":
-                    continue
-                query = query.eq(key, value)
-            resp = query.limit(1).execute()
-            data = resp.data or []
-            return data[0] if data else None
-        except Exception:
+        with _ERP_SCHEMA_LOCK:
+            if table in _ERP_UNAVAILABLE_TABLES:
+                return None
+            unsupported_columns = set(_ERP_UNSUPPORTED_COLUMNS.get(table) or set())
+        active_filters = {
+            key: value
+            for key, value in (filters or {}).items()
+            if value not in (None, "") and key not in unsupported_columns
+        }
+        if not active_filters:
             return None
+        while True:
+            try:
+                sb = require_supabase()
+                query = sb.table(table).select(columns)
+                for key, value in active_filters.items():
+                    query = query.eq(key, value)
+                resp = query.limit(1).execute()
+                data = resp.data or []
+                return data[0] if data else None
+            except Exception as e:
+                if _remember_missing_table(table, e):
+                    return None
+                missing_column = _remember_missing_column(table, e)
+                if missing_column:
+                    next_filters = {
+                        key: value
+                        for key, value in active_filters.items()
+                        if key != missing_column
+                    }
+                    if next_filters != active_filters and next_filters:
+                        active_filters = next_filters
+                        continue
+                return None
 
     def _insert_action_row(self, payload: Dict[str, Any]) -> bool:
         if not require_supabase:
@@ -111,7 +172,13 @@ class SupabaseERPAdapter(ERPAdapter):
         value = self._safe_text(value)
         if not value:
             return None
+        with _ERP_SCHEMA_LOCK:
+            if table in _ERP_UNAVAILABLE_TABLES:
+                return None
+            unsupported_columns = set(_ERP_UNSUPPORTED_COLUMNS.get(table) or set())
         for key in key_candidates:
+            if key in unsupported_columns:
+                continue
             row = self._query_first(table, {key: value})
             if row:
                 return row
