@@ -3,6 +3,7 @@ import sys
 import time
 import threading
 import uuid
+import gzip
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
@@ -12,6 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+try:
+    import brotli
+except Exception:
+    brotli = None
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="replace")
@@ -69,6 +77,17 @@ get_cached_sms_session = None
 _USER_STATUS_CACHE_TTL_SECONDS = max(5.0, float(os.getenv("USER_STATUS_CACHE_TTL_SECONDS", "15")))
 _USER_STATUS_CACHE_LOCK = threading.Lock()
 _USER_STATUS_CACHE: Dict[str, Dict[str, Any]] = {}
+BACKEND_COMPRESSION_ENABLED = os.getenv("BACKEND_COMPRESSION", "true").lower() != "false"
+BACKEND_COMPRESSION_MIN_SIZE = max(256, int(os.getenv("BACKEND_COMPRESSION_MIN_SIZE", "1024")))
+BACKEND_GZIP_LEVEL = min(9, max(1, int(os.getenv("BACKEND_GZIP_LEVEL", "5"))))
+BACKEND_BROTLI_QUALITY = min(11, max(0, int(os.getenv("BACKEND_BROTLI_QUALITY", "4"))))
+COMPRESSIBLE_CONTENT_TYPES = (
+    "application/json",
+    "application/problem+json",
+    "application/javascript",
+    "application/xml",
+    "application/xhtml+xml",
+)
 
 
 def _save_ocr_upload(content: bytes, filename: str) -> str:
@@ -83,6 +102,120 @@ def _save_ocr_upload(content: bytes, filename: str) -> str:
     with open(abs_path, "wb") as f:
         f.write(content)
     return build_static_api_url("ocr", date_folder, safe_name)
+
+
+def _merge_vary_header(existing: Optional[str], token: str) -> str:
+    current = [item.strip() for item in str(existing or "").split(",") if item.strip()]
+    lowered = {item.lower() for item in current}
+    if token.lower() not in lowered:
+        current.append(token)
+    return ", ".join(current)
+
+
+def _is_compressible_content_type(content_type: str) -> bool:
+    normalized = str(content_type or "").split(";", 1)[0].strip().lower()
+    if not normalized or normalized == "text/event-stream":
+        return False
+    if normalized.startswith("text/"):
+        return True
+    return normalized in COMPRESSIBLE_CONTENT_TYPES
+
+
+class BackendCompressionMiddleware:
+    def __init__(
+        self,
+        app: ASGIApp,
+        minimum_size: int = BACKEND_COMPRESSION_MIN_SIZE,
+        gzip_level: int = BACKEND_GZIP_LEVEL,
+        brotli_quality: int = BACKEND_BROTLI_QUALITY,
+    ) -> None:
+        self.app = app
+        self.minimum_size = max(0, int(minimum_size))
+        self.gzip_level = min(9, max(1, int(gzip_level)))
+        self.brotli_quality = min(11, max(0, int(brotli_quality)))
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path") or "")
+        method = str(scope.get("method") or "GET").upper()
+        if path.startswith(("/static", "/api/static")) or method == "HEAD":
+            await self.app(scope, receive, send)
+            return
+
+        request_headers = Headers(scope=scope)
+        accept_encoding = request_headers.get("accept-encoding", "").lower()
+        allow_br = "br" in accept_encoding and brotli is not None
+        allow_gzip = "gzip" in accept_encoding
+        if not allow_br and not allow_gzip:
+            await self.app(scope, receive, send)
+            return
+
+        started: Optional[Message] = None
+        body_chunks: List[bytes] = []
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = message
+                return
+
+            if message["type"] != "http.response.body":
+                await send(message)
+                return
+
+            body_chunks.append(message.get("body", b""))
+            if message.get("more_body", False):
+                return
+
+            response_start = started or {"type": "http.response.start", "status": 200, "headers": []}
+            headers = MutableHeaders(raw=response_start.setdefault("headers", []))
+            status_code = int(response_start.get("status", 200))
+            body = b"".join(body_chunks)
+            headers["Vary"] = _merge_vary_header(headers.get("Vary"), "Accept-Encoding")
+
+            if (
+                status_code < 200
+                or status_code in (204, 304)
+                or headers.get("Content-Encoding")
+                or headers.get("Content-Range")
+                or headers.get("X-No-Compression") == "1"
+                or len(body) < self.minimum_size
+                or not _is_compressible_content_type(headers.get("Content-Type", ""))
+            ):
+                headers["Content-Length"] = str(len(body))
+                await send(response_start)
+                await send({"type": "http.response.body", "body": body, "more_body": False})
+                return
+
+            compressed = body
+            encoding = ""
+            if allow_br:
+                candidate = brotli.compress(body, quality=self.brotli_quality)
+                if len(candidate) < len(body):
+                    compressed = candidate
+                    encoding = "br"
+
+            if not encoding and allow_gzip:
+                candidate = gzip.compress(body, compresslevel=self.gzip_level)
+                if len(candidate) < len(body):
+                    compressed = candidate
+                    encoding = "gzip"
+
+            if encoding:
+                headers["Content-Encoding"] = encoding
+                headers["Content-Length"] = str(len(compressed))
+                await send(response_start)
+                await send({"type": "http.response.body", "body": compressed, "more_body": False})
+                return
+
+            headers["Content-Length"] = str(len(body))
+            await send(response_start)
+            await send({"type": "http.response.body", "body": body, "more_body": False})
+
+        await self.app(scope, receive, send_wrapper)
 
 
 def _get_cached_user_status_profile(user_id: str) -> Optional[Dict[str, Any]]:
@@ -160,6 +293,14 @@ except Exception as e:
     traceback.print_exc()
 
 app = FastAPI(title="Enterprise AI API")
+
+if BACKEND_COMPRESSION_ENABLED:
+    app.add_middleware(
+        BackendCompressionMiddleware,
+        minimum_size=BACKEND_COMPRESSION_MIN_SIZE,
+        gzip_level=BACKEND_GZIP_LEVEL,
+        brotli_quality=BACKEND_BROTLI_QUALITY,
+    )
 
 @app.on_event("startup")
 def _bootstrap_runtime_storage():
