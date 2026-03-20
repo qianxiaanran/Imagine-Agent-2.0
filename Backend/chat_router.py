@@ -50,6 +50,8 @@ SEARXNG_ENGINES = ",".join(
 SEARCH_SCRAPE_PAGE_LIMIT = max(1, int(os.getenv("SEARCH_SCRAPE_PAGE_LIMIT", "2")))
 SEARCH_SCRAPE_PAGE_LIMIT_REALTIME = max(1, int(os.getenv("SEARCH_SCRAPE_PAGE_LIMIT_REALTIME", "1")))
 SEARCH_CONTEXT_PAGE_MAX_CHARS = max(700, int(os.getenv("SEARCH_CONTEXT_PAGE_MAX_CHARS", "1400")))
+EXCHANGE_RATE_TIMEOUT_SECONDS = max(3, int(os.getenv("EXCHANGE_RATE_TIMEOUT_SECONDS", "6")))
+EXCHANGE_RATE_CACHE_TTL_SECONDS = max(30, int(os.getenv("EXCHANGE_RATE_CACHE_TTL_SECONDS", "300")))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
 OCR_SUMMARY_MAX_CONTEXT_CHARS = int(os.getenv("OCR_SUMMARY_MAX_CONTEXT_CHARS", "32000"))
 RAG_MAX_ACTIVE_CONTEXT_CHARS = int(os.getenv("RAG_MAX_ACTIVE_CONTEXT_CHARS", "2600"))
@@ -1363,9 +1365,16 @@ _EXCHANGE_CURRENCY_ALIASES = [
 
 def _detect_weather_target_day(text: Optional[str], default: str = "今天") -> str:
     raw = str(text or "")
+    picked: Optional[Tuple[int, int, str]] = None
     for token, normalized in _WEATHER_DAY_ALIASES.items():
-        if token in raw:
-            return normalized
+        pos = raw.rfind(token)
+        if pos < 0:
+            continue
+        candidate = (pos, len(token), normalized)
+        if picked is None or candidate[0] > picked[0] or (candidate[0] == picked[0] and candidate[1] > picked[1]):
+            picked = candidate
+    if picked:
+        return picked[2]
     return default
 
 
@@ -1426,6 +1435,35 @@ def _format_decimal_text(value: str) -> str:
         return str(value).strip()
     decimals = 6 if abs(number) < 1 else 4
     return f"{number:.{decimals}f}".rstrip("0").rstrip(".")
+
+
+def _exchange_rate_cache_key(base_code: str, quote_code: str) -> str:
+    return f"{str(base_code or '').upper()}:{str(quote_code or '').upper()}"
+
+
+def _get_cached_exchange_rate_result(base_code: str, quote_code: str) -> Optional[Dict[str, Any]]:
+    cache_key = _exchange_rate_cache_key(base_code, quote_code)
+    now_ts = datetime.now().timestamp()
+    with _EXCHANGE_RATE_CACHE_LOCK:
+        cached = _EXCHANGE_RATE_CACHE.get(cache_key)
+        if not cached:
+            return None
+        expires_at = float(cached.get("expires_at") or 0)
+        if expires_at <= now_ts:
+            _EXCHANGE_RATE_CACHE.pop(cache_key, None)
+            return None
+        payload = cached.get("payload")
+        return dict(payload) if isinstance(payload, dict) else None
+
+
+def _set_cached_exchange_rate_result(base_code: str, quote_code: str, payload: Dict[str, Any]) -> None:
+    cache_key = _exchange_rate_cache_key(base_code, quote_code)
+    expires_at = datetime.now().timestamp() + EXCHANGE_RATE_CACHE_TTL_SECONDS
+    with _EXCHANGE_RATE_CACHE_LOCK:
+        _EXCHANGE_RATE_CACHE[cache_key] = {
+            "expires_at": expires_at,
+            "payload": dict(payload or {}),
+        }
 
 
 def _is_context_related(query: Optional[str], candidate_text: Optional[str], min_hits: int = 1) -> bool:
@@ -2327,6 +2365,8 @@ EXCHANGE_RATE_PREFERRED_DOMAINS = [
 
 _SEARCH_HOST_RESOLUTION_CACHE: Dict[str, bool] = {}
 _WEATHER_CITY_URL_CACHE: Dict[str, str] = {}
+_EXCHANGE_RATE_CACHE: Dict[str, Dict[str, Any]] = {}
+_EXCHANGE_RATE_CACHE_LOCK = threading.Lock()
 
 
 def _result_text_fields(result: dict) -> Tuple[str, str, str]:
@@ -2686,8 +2726,12 @@ def _rewrite_search_query_for_searxng(query: str, history_text: str = "") -> str
             return f"{subject} 简介"
 
     if any(k in lowered for k in ["天气", "气温", "温度", "weather", "forecast"]):
-        target_day = _detect_weather_target_day(f"{cleaned} {history_text}".strip(), default="")
-        city = _normalize_weather_city_name(f"{cleaned} {history_text}".strip(), default="")
+        target_day = _detect_weather_target_day(cleaned, default="")
+        if not target_day:
+            target_day = _detect_weather_target_day(history_text, default="")
+        city = _normalize_weather_city_name(cleaned, default="")
+        if not city:
+            city = _normalize_weather_city_name(history_text, default="")
         city = _normalize_weather_city_name(city, default="")
         if city:
             parts = [city]
@@ -2710,50 +2754,7 @@ def _build_weather_fallback_items(query_text: str) -> List[dict]:
     if not city:
         return []
 
-    cached_url = _WEATHER_CITY_URL_CACHE.get(city)
-    if not cached_url:
-        try:
-            import requests
-
-            resp = requests.get(
-                "https://toy1.weather.com.cn/search",
-                params={"cityname": city},
-                headers={
-                    "Referer": "https://www.weather.com.cn/",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/123.0.0.0 Safari/537.36"
-                    ),
-                },
-                timeout=max(6, SEARXNG_TIMEOUT_SECONDS),
-            )
-            if resp.status_code == 200:
-                body = resp.text or ""
-                start = body.find("[")
-                end = body.rfind("]")
-                if start >= 0 and end > start:
-                    payload = json.loads(body[start:end + 1])
-                    if isinstance(payload, list):
-                        picked_code = ""
-                        for item in payload:
-                            ref = str((item or {}).get("ref") or "").strip()
-                            if not ref:
-                                continue
-                            parts = ref.split("~")
-                            city_code = parts[0].strip() if parts else ""
-                            city_label = parts[2].strip() if len(parts) > 2 else ""
-                            province_label = parts[-1].strip() if parts else ""
-                            if city_label == city or province_label == city:
-                                picked_code = city_code
-                                break
-                            if not picked_code:
-                                picked_code = city_code
-                        if picked_code:
-                            cached_url = f"https://www.weather.com.cn/weather/{picked_code}.shtml"
-                            _WEATHER_CITY_URL_CACHE[city] = cached_url
-        except Exception as e:
-            print(f"⚠️ [Search] weather fallback lookup failed: {e}")
+    cached_url = _lookup_weather_page_url(city)
 
     if not cached_url:
         return []
@@ -2765,6 +2766,69 @@ def _build_weather_fallback_items(query_text: str) -> List[dict]:
         "source": "weather.com.cn",
         "provider": "weather-fallback",
     }]
+
+
+def _lookup_weather_page_url(city: str) -> str:
+    normalized_city = _normalize_weather_city_name(city, default="")
+    if not normalized_city:
+        return ""
+
+    cached_url = _WEATHER_CITY_URL_CACHE.get(normalized_city)
+    if cached_url:
+        return cached_url
+
+    try:
+        import requests
+
+        resp = requests.get(
+            "https://toy1.weather.com.cn/search",
+            params={"cityname": normalized_city},
+            headers={
+                "Referer": "https://www.weather.com.cn/",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+            },
+            timeout=max(6, SEARXNG_TIMEOUT_SECONDS),
+        )
+        if resp.status_code != 200:
+            return ""
+
+        body = resp.text or ""
+        start = body.find("[")
+        end = body.rfind("]")
+        if start < 0 or end <= start:
+            return ""
+
+        payload = json.loads(body[start:end + 1])
+        if not isinstance(payload, list):
+            return ""
+
+        picked_code = ""
+        for item in payload:
+            ref = str((item or {}).get("ref") or "").strip()
+            if not ref:
+                continue
+            parts = ref.split("~")
+            city_code = parts[0].strip() if parts else ""
+            city_label = parts[2].strip() if len(parts) > 2 else ""
+            province_label = parts[-1].strip() if parts else ""
+            if city_label == normalized_city or province_label == normalized_city:
+                picked_code = city_code
+                break
+            if not picked_code:
+                picked_code = city_code
+        if not picked_code:
+            return ""
+
+        cached_url = f"https://www.weather.com.cn/weather/{picked_code}.shtml"
+        _WEATHER_CITY_URL_CACHE[normalized_city] = cached_url
+        return cached_url
+    except Exception as e:
+        print(f"⚠️ [Search] weather fallback lookup failed: {e}")
+        return ""
 
 
 def _build_exchange_fallback_items(query_text: str) -> List[dict]:
@@ -3088,6 +3152,133 @@ def _build_direct_market_tool_answer(result: Dict[str, Any], domain: str = "") -
     return summary
 
 
+def tool_get_exchange_rate(query: str) -> List[dict]:
+    """Get realtime exchange rate via lightweight APIs instead of webpage scraping."""
+    import requests
+
+    pair = _extract_exchange_rate_pair(query)
+    if not pair:
+        return []
+
+    base_code, quote_code, _, _ = pair
+    cached = _get_cached_exchange_rate_result(base_code, quote_code)
+    if cached:
+        return [cached]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    providers = [
+        {
+            "name": "Frankfurter",
+            "link": f"https://api.frankfurter.app/latest?from={base_code}&to={quote_code}",
+            "fetch": lambda: _fetch_exchange_rate_from_frankfurter(base_code, quote_code, headers),
+        },
+        {
+            "name": "ExchangeRate-API",
+            "link": f"https://open.er-api.com/v6/latest/{base_code}",
+            "fetch": lambda: _fetch_exchange_rate_from_er_api(base_code, quote_code, headers),
+        },
+    ]
+
+    for provider in providers:
+        try:
+            rate_text, reverse_rate_text, updated_at = provider["fetch"]()
+        except Exception as e:
+            print(f"⚠️ [Exchange Tool] provider={provider['name']} failed: {e}")
+            continue
+
+        if not rate_text:
+            continue
+
+        content_lines = [f"1 {base_code}: {rate_text} {quote_code}"]
+        snippet_parts = [f"1 {base_code}: {rate_text} {quote_code}"]
+        if reverse_rate_text:
+            content_lines.append(f"1 {quote_code}: {reverse_rate_text} {base_code}")
+            snippet_parts.append(f"1 {quote_code}: {reverse_rate_text} {base_code}")
+        if updated_at:
+            content_lines.append(f"更新时间: {updated_at}")
+            snippet_parts.append(f"更新时间: {updated_at}")
+
+        payload = {
+            "type": "web",
+            "title": f"{base_code}/{quote_code} 汇率",
+            "link": provider["link"],
+            "snippet": " | ".join(snippet_parts),
+            "source": provider["name"],
+            "date": updated_at,
+            "provider": f"exchange-api-{provider['name'].lower()}",
+            "content": "\n".join(content_lines),
+        }
+        _set_cached_exchange_rate_result(base_code, quote_code, payload)
+        return [payload]
+
+    return []
+
+
+def _fetch_exchange_rate_from_frankfurter(
+    base_code: str,
+    quote_code: str,
+    headers: Dict[str, str],
+) -> Tuple[str, str, str]:
+    import requests
+
+    api_url = f"https://api.frankfurter.app/latest?from={base_code}&to={quote_code}"
+    resp = requests.get(api_url, headers=headers, timeout=EXCHANGE_RATE_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    data = resp.json() or {}
+    rates = data.get("rates") or {}
+    rate = rates.get(quote_code)
+    if rate in (None, ""):
+        raise ValueError("No rate returned")
+
+    direct_rate = _format_decimal_text(str(rate))
+    reverse_rate = ""
+    try:
+        numeric = float(str(rate).replace(",", "").strip())
+        if numeric:
+            reverse_rate = _format_decimal_text(str(1 / numeric))
+    except Exception:
+        reverse_rate = ""
+    updated_at = str(data.get("date") or "").strip()
+    return direct_rate, reverse_rate, updated_at
+
+
+def _fetch_exchange_rate_from_er_api(
+    base_code: str,
+    quote_code: str,
+    headers: Dict[str, str],
+) -> Tuple[str, str, str]:
+    import requests
+
+    api_url = f"https://open.er-api.com/v6/latest/{base_code}"
+    resp = requests.get(api_url, headers=headers, timeout=EXCHANGE_RATE_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    data = resp.json() or {}
+    if str(data.get("result") or "").lower() != "success":
+        raise ValueError(f"Unexpected result: {data.get('result')}")
+    rates = data.get("rates") or {}
+    rate = rates.get(quote_code)
+    if rate in (None, ""):
+        raise ValueError("No rate returned")
+
+    direct_rate = _format_decimal_text(str(rate))
+    reverse_rate = ""
+    try:
+        numeric = float(str(rate).replace(",", "").strip())
+        if numeric:
+            reverse_rate = _format_decimal_text(str(1 / numeric))
+    except Exception:
+        reverse_rate = ""
+
+    updated_at = (
+        str(data.get("time_last_update_utc") or "").strip()
+        or str(data.get("time_last_update_unix") or "").strip()
+    )
+    return direct_rate, reverse_rate, updated_at
+
+
 def _canonicalize_link(link: str) -> str:
     try:
         parsed = urllib.parse.urlparse(link or "")
@@ -3347,13 +3538,133 @@ def _search_with_tavily(query: str, max_results: int) -> List[dict]:
 # 天气工具API
 # ------------------------------------------------------------
 def tool_get_weather(city_name: str) -> List[dict]:
-    """Get realtime weather from Moji only."""
+    """Get structured weather forecast, falling back to Moji when needed."""
+    import requests
+    from bs4 import BeautifulSoup
+
+    results: List[dict] = []
+    raw_query = str(city_name or "").strip()
+    print(f"☁️ [Weather Tool] Getting weather for: {raw_query}")
+
+    normalized_city = _normalize_weather_city_name(raw_query, default="北京")
+    target_day = _detect_weather_target_day(raw_query, default="今天")
+    page_url = _lookup_weather_page_url(normalized_city)
+
+    if page_url:
+        try:
+            headers = {
+                "Referer": "https://www.weather.com.cn/",
+                "User-Agent": "Mozilla/5.0",
+            }
+            page_resp = requests.get(page_url, headers=headers, timeout=10)
+            if page_resp.status_code == 200:
+                html = page_resp.content.decode("utf-8", errors="ignore")
+                soup = BeautifulSoup(html, "html.parser")
+
+                update_node = soup.select_one("#update_time")
+                update_text = ""
+                if update_node and update_node.get("value"):
+                    update_text = str(update_node.get("value") or "").strip()
+
+                content_lines: List[str] = []
+                snippet_parts: List[str] = []
+                target_found = False
+                day_nodes = soup.select("ul.t.clearfix li.sky")
+
+                for idx, day_node in enumerate(day_nodes[:7]):
+                    heading = day_node.select_one("h1")
+                    label_text = heading.get_text(" ", strip=True) if heading else ""
+                    day_label = ""
+                    for token, normalized in _WEATHER_DAY_ALIASES.items():
+                        if token in label_text:
+                            day_label = normalized
+                    if not day_label:
+                        day_label = label_text or ("今天" if idx == 0 else "")
+                    if not day_label:
+                        continue
+
+                    weather_node = day_node.select_one("p.wea")
+                    weather_text = (
+                        str(weather_node.get("title") or "").strip()
+                        if weather_node and weather_node.get("title")
+                        else (weather_node.get_text(" ", strip=True) if weather_node else "")
+                    )
+
+                    tem_node = day_node.select_one("p.tem")
+                    high_node = tem_node.select_one("span") if tem_node else None
+                    low_node = tem_node.select_one("i") if tem_node else None
+                    high_text = high_node.get_text(" ", strip=True) if high_node else ""
+                    low_text = low_node.get_text(" ", strip=True) if low_node else ""
+                    temp_text = ""
+                    if high_text or low_text:
+                        if low_text and "℃" not in low_text:
+                            low_text = f"{low_text}℃"
+                        temp_text = f"{high_text}/{low_text}".strip("/")
+
+                    win_node = day_node.select_one("p.win")
+                    wind_titles = [
+                        str(span.get("title") or "").strip()
+                        for span in (win_node.select("em span") if win_node else [])
+                        if str(span.get("title") or "").strip()
+                    ]
+                    wind_force_node = win_node.select_one("i") if win_node else None
+                    wind_force = wind_force_node.get_text(" ", strip=True) if wind_force_node else ""
+                    wind_text = ""
+                    if wind_titles:
+                        wind_text = "转".join(wind_titles[:2]) if len(wind_titles) >= 2 else wind_titles[0]
+                    if wind_force:
+                        wind_text = f"{wind_text} {wind_force}".strip()
+
+                    if weather_text:
+                        content_lines.append(f"{day_label}天气: {weather_text}")
+                    if temp_text:
+                        content_lines.append(f"{day_label}最高/最低气温: {temp_text}")
+                    if wind_text:
+                        content_lines.append(f"{day_label}风力: {wind_text}")
+
+                    if day_label == target_day and not target_found:
+                        if weather_text:
+                            snippet_parts.append(f"天气: {weather_text}")
+                        if temp_text:
+                            snippet_parts.append(f"最高/最低气温: {temp_text}")
+                        if wind_text:
+                            snippet_parts.append(f"风力: {wind_text}")
+                        target_found = True
+
+                if update_text:
+                    content_lines.append(f"更新时间: {update_text}")
+                    if target_found:
+                        snippet_parts.append(f"更新时间: {update_text}")
+
+                if content_lines:
+                    if not snippet_parts:
+                        if update_text:
+                            snippet_parts.append(f"更新时间: {update_text}")
+                    results.append({
+                        "type": "web",
+                        "title": f"{normalized_city}{target_day}天气预报",
+                        "link": page_url,
+                        "snippet": " | ".join(snippet_parts) or f"{normalized_city}{target_day}天气预报",
+                        "source": "weather.com.cn",
+                        "date": update_text,
+                        "provider": "weather-official",
+                        "content": "\n".join(content_lines),
+                    })
+                    return results
+        except Exception as e:
+            print(f"⚠️ [Weather Tool/Official] Failed: {e}")
+
+    return _tool_get_weather_moji_fallback(raw_query)
+
+
+def _tool_get_weather_moji_fallback(city_name: str) -> List[dict]:
+    """Fallback realtime weather from Moji."""
     import requests
     import json as _json
     from bs4 import BeautifulSoup
 
     results: List[dict] = []
-    print(f"☁️ [Weather Tool/Moji] Getting weather for: {city_name}")
+    print(f"☁️ [Weather Tool/Moji] Fallback for: {city_name}")
 
     try:
         raw_city = str(city_name or "").strip()
@@ -3865,7 +4176,8 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
 
     q_lower = query.lower()
     prefer_fresh = any(k in q_lower for k in ["现在", "当前", "实时", "最新", "today", "now", "今日", "刚刚", "近况"])
-    defer_searxng_return = prefer_fresh or _is_reason_search_query(query)
+    is_exchange_query = _looks_like_exchange_rate_query(query)
+    defer_searxng_return = (prefer_fresh or _is_reason_search_query(query)) and not is_exchange_query
     query_variants = _build_search_query_variants(query, prefer_fresh=prefer_fresh)
     best_searxng_results: List[dict] = []
     best_searxng_score = float("-inf")
@@ -3891,6 +4203,9 @@ def perform_web_search(query: str, max_results: int = 8) -> List[dict]:
             print(f"⚠️ [Search] provider=searxng query={query_variant} failed: {e}")
 
     if best_searxng_results:
+        if is_exchange_query:
+            print(f"✅ [Search] exchange query using SearXNG-only results. best_score={best_searxng_score:.1f}")
+            return best_searxng_results
         print(f"⚠️ [Search] SearXNG results weak, trying HTML fallback. best_score={best_searxng_score:.1f}")
 
     best_fallback_results: List[dict] = []
@@ -5044,22 +5359,38 @@ async def chat(
             search_domain = search_domain or _detect_query_domain(search_query)
             scrape_page_limit = SEARCH_SCRAPE_PAGE_LIMIT_REALTIME if (is_realtime_query or search_domain == "weather") else SEARCH_SCRAPE_PAGE_LIMIT
 
-            if search_domain in {"stock", "gold"}:
+            if search_domain in {"weather", "stock", "gold", "exchange"}:
                 tool_query = contextual_user_query or message
-                progress_text = "> 正在查询实时股价：{query}\n\n" if search_domain == "stock" else "> 正在查询实时金价：{query}\n\n"
+                if search_domain == "weather":
+                    progress_text = "> 正在查询天气预报：{query}\n\n"
+                elif search_domain == "stock":
+                    progress_text = "> 正在查询实时股价：{query}\n\n"
+                elif search_domain == "gold":
+                    progress_text = "> 正在查询实时金价：{query}\n\n"
+                else:
+                    progress_text = "> 正在查询实时汇率：{query}\n\n"
                 yield json.dumps({"t": "c", "v": progress_text.format(query=tool_query)}, ensure_ascii=False) + "\n"
 
-                market_sources = await asyncio.to_thread(
-                    tool_get_stock if search_domain == "stock" else tool_get_gold_price,
-                    tool_query,
-                )
+                if search_domain == "weather":
+                    market_sources = await asyncio.to_thread(tool_get_weather, tool_query)
+                elif search_domain == "stock":
+                    market_sources = await asyncio.to_thread(tool_get_stock, tool_query)
+                elif search_domain == "gold":
+                    market_sources = await asyncio.to_thread(tool_get_gold_price, tool_query)
+                else:
+                    market_sources = await asyncio.to_thread(tool_get_exchange_rate, tool_query)
 
                 if _is_cancelled():
                     return
 
                 if market_sources:
                     yield json.dumps({"t": "m", "sid": session_id, "src": market_sources}, ensure_ascii=False) + "\n"
-                    direct_market_answer = _build_direct_market_tool_answer(market_sources[0], domain=search_domain)
+                    if search_domain in {"weather", "exchange"}:
+                        direct_market_answer = _build_direct_exchange_answer(tool_query, market_sources)
+                        if search_domain == "weather":
+                            direct_market_answer = _build_direct_weather_answer(tool_query, market_sources)
+                    else:
+                        direct_market_answer = _build_direct_market_tool_answer(market_sources[0], domain=search_domain)
                     if direct_market_answer:
                         full_reply_clean = direct_market_answer
                         for part in _split_text(full_reply_clean):

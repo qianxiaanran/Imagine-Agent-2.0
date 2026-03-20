@@ -25,6 +25,13 @@ import {
 
 const MarkdownRenderer = React.lazy(() => import('./MarkdownRenderer'));
 const AuditWorkspace = React.lazy(() => import('./AuditWorkspace'));
+const DEFAULT_PANEL_STYLE = {
+  border: 'border-gray-200 dark:border-gray-800',
+  headerBg: 'bg-gray-50/50 dark:bg-gray-900/20',
+  headerText: 'text-gray-800 dark:text-gray-300',
+  btnBg: 'bg-gray-900 hover:bg-black',
+  textareaBg: 'bg-white/50 dark:bg-gray-900/50',
+};
 
 const AudioPlayer = ({ src }) => {
   const audioRef = useRef(null);
@@ -937,7 +944,7 @@ const AuditPanel = ({
 };
 
 const ModePanelComponent = ({
-  panelStyle,
+  panelStyle = DEFAULT_PANEL_STYLE,
   isMeetingMode,
   isOCRMode,
   isAuditMode,

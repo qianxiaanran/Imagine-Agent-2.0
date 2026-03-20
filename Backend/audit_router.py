@@ -1,7 +1,7 @@
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from audit_pipeline import enqueue_audit_job, get_job_snapshot, push_audit_action_to_erp
+from audit_pipeline import enqueue_audit_job, get_case_report, get_job_snapshot, push_audit_action_to_erp
 
 router = APIRouter(tags=["Audit"])
 
@@ -46,6 +46,7 @@ async def audit_start(
         "status": job["status"],
         "case_id": job.get("case_id"),
         "stage": job.get("stage"),
+        "upload_sequence_notice": job.get("upload_sequence_notice") or snapshot.get("upload_sequence_notice"),
         "case_documents": snapshot.get("case_documents", []),
     }
 
@@ -56,6 +57,21 @@ def audit_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.get("/api/audit/case/{case_id}")
+def audit_case_report(case_id: str):
+    result = get_case_report(case_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Case not found")
+    case_summary = result.get("case_summary") if isinstance(result, dict) else {}
+    return {
+        "case_id": case_id,
+        "status": "done",
+        "workflow_state": result.get("workflow_state"),
+        "case_documents": (case_summary or {}).get("documents", []),
+        "result": result,
+    }
 
 
 @router.post("/api/audit/{job_id}/erp-action")

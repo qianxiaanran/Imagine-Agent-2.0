@@ -90,6 +90,12 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
 
+    css: {
+      modules: {
+        localsConvention: "camelCase",
+      },
+    },
+
     optimizeDeps: {
       include: ["react", "react-dom", "lucide-react"],
     },
@@ -125,11 +131,16 @@ export default defineConfig(({ mode }) => {
     },
 
     build: {
+      cssCodeSplit: true,
+      cssMinify: "lightningcss",
       rollupOptions: {
         output: {
           manualChunks: resolveManualChunk,
         },
       },
+    },
+    worker: {
+      format: "es",
     },
   };
 });

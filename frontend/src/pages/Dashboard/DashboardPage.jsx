@@ -27,6 +27,12 @@ import {
   StandaloneTemplatePreviewCard,
 } from './StandalonePptWidgets';
 import WritingEntryHub from './WritingEntryHub';
+import DashboardEmptyState from './DashboardEmptyState';
+import DashboardGlobalOverlays from './DashboardGlobalOverlays';
+import DashboardModePanelHost from './DashboardModePanelHost';
+import DashboardOcrSummaryModal from './DashboardOcrSummaryModal';
+import DashboardSidebars from './DashboardSidebars';
+import DashboardTopbar from './DashboardTopbar';
 import {
   APP_SETTINGS_UPDATED_EVENT,
   DEFAULT_APP_SETTINGS,
@@ -38,14 +44,10 @@ import LoadingScreen from '../../components/LoadingScreen';
 
 const SettingsModal = lazy(() => import('../../components/SettingsModal'));
 const VoiceRecorder = lazy(() => import('../../components/VoiceRecorder'));
-const Sidebar = lazy(() => import('./Sidebar'));
-const MobileSidebar = lazy(() => import('./MobileSidebar'));
-const Suggestions = lazy(() => import('./Suggestions'));
 const ShareModal = lazy(() => import('./ShareModal'));
 const OcrIngestModal = lazy(() => import('./OcrIngestModal'));
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
 const SourcePanel = lazy(() => import('./SourcePanel'));
-const ModePanel = lazy(() => import('./ModePanel'));
 
 const INITIAL_MESSAGE_COUNT = 20;
 const MARKDOWN_MESSAGE_COUNT = 6;
@@ -1100,6 +1102,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [auditDocType, setAuditDocType] = useState('contract');
   const [auditModelBackend, setAuditModelBackend] = useState('local');
   const [auditFile, setAuditFile] = useState(null);
+  const [auditBatch, setAuditBatch] = useState({
+    active: false,
+    currentIndex: -1,
+    docTypeOverride: null,
+    items: []
+  });
   const [auditNotice, setAuditNotice] = useState('');
   const [auditState, setAuditState] = useState({
     status: 'idle',
@@ -1232,7 +1240,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const dragDepthRef = useRef(0);
   const messageInputRef = useRef(null);
   const auditPollRef = useRef(null);
+  const auditPollGenerationRef = useRef(0);
+  const auditPollFailureCountRef = useRef(0);
   const auditHistorySavedRef = useRef(null);
+  const auditBatchRef = useRef({
+    active: false,
+    currentIndex: -1,
+    docTypeOverride: null,
+    items: []
+  });
+  const auditBatchTransitionRef = useRef('');
   // constscrollRafRef = useRef(null); // REMOVED: 删除节流
 
   // ✨✨✨ 流畅的流媒体参考 ✨✨✨
@@ -1865,6 +1882,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return;
     }
 
+    const generation = auditPollGenerationRef.current + 1;
+    auditPollGenerationRef.current = generation;
+    auditPollFailureCountRef.current = 0;
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
@@ -1872,7 +1892,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         const token = localStorage.getItem(AUTH_TOKEN_KEY);
         const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
         const res = await fetch(`${API_BASE_URL}/api/audit/${jobId}`, { headers });
+        if (cancelled || auditPollGenerationRef.current !== generation) return;
         const data = await res.json();
+        if (cancelled || auditPollGenerationRef.current !== generation) return;
 
         if (!res.ok) {
           throw new Error(data.detail || data.error || '获取审单状态失败');
@@ -1880,6 +1902,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
         const nextStatus = data.status || status;
         const progressValue = Number(data.progress);
+        auditPollFailureCountRef.current = 0;
         setAuditState((prev) => ({
           ...prev,
           status: nextStatus,
@@ -1889,16 +1912,22 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           caseId: data.case_id || prev.caseId,
           caseDocuments: Array.isArray(data.case_documents) ? data.case_documents : prev.caseDocuments,
           result: data.result || prev.result,
-          error_message: data.error_message || prev.error_message,
-          error: data.error_message ? data.error_message : prev.error
+          error_message: nextStatus === 'failed' ? (data.error_message || prev.error_message) : null,
+          error: nextStatus === 'failed' ? (data.error_message || prev.error) : null
         }));
 
         if (['pending', 'running'].includes(nextStatus)) {
           auditPollRef.current = setTimeout(poll, AUDIT_POLL_INTERVAL);
         }
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || auditPollGenerationRef.current !== generation) return;
         const message = error?.message || '获取审单状态失败';
+        const failureCount = auditPollFailureCountRef.current + 1;
+        auditPollFailureCountRef.current = failureCount;
+        if (failureCount < 3) {
+          auditPollRef.current = setTimeout(poll, AUDIT_POLL_INTERVAL);
+          return;
+        }
         setAuditState((prev) => ({
           ...prev,
           status: 'failed',
@@ -1918,6 +1947,105 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
     };
   }, [auditState.jobId, auditState.status]);
+
+  useEffect(() => {
+    auditBatchRef.current = auditBatch;
+  }, [auditBatch]);
+
+  useEffect(() => {
+    const items = Array.isArray(auditBatch.items) ? auditBatch.items : [];
+    if (!items.length) {
+      setAuditFile(null);
+      return;
+    }
+    const safeIndex = auditBatch.currentIndex >= 0
+      ? Math.min(auditBatch.currentIndex, items.length - 1)
+      : Math.max(0, items.findIndex((item) => ['uploading', 'pending', 'running'].includes(item.status)));
+    const activeIndex = safeIndex >= 0 ? safeIndex : 0;
+    const currentItem = items[activeIndex] || items[items.length - 1];
+    const completedCount = items.filter((item) => item.status === 'done').length;
+    const failedCount = items.filter((item) => item.status === 'failed').length;
+    setAuditFile({
+      name: currentItem?.name || '',
+      size: currentItem?.size || 0,
+      sizeLabel: currentItem?.sizeLabel || '',
+      isBatch: items.length > 1,
+      totalCount: items.length,
+      currentIndex: activeIndex + 1,
+      completedCount,
+      failedCount,
+      queue: items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        size: item.size,
+        sizeLabel: item.sizeLabel,
+        status: item.status
+      }))
+    });
+  }, [auditBatch]);
+
+  useEffect(() => {
+    const batch = auditBatchRef.current;
+    if (!batch?.items?.length || batch.currentIndex < 0) return;
+    const currentIndex = Math.min(batch.currentIndex, batch.items.length - 1);
+    const nextStatus = String(auditState.status || 'idle').toLowerCase();
+    if (!['uploading', 'pending', 'running', 'done', 'failed'].includes(nextStatus)) return;
+    setAuditBatch((prev) => {
+      if (!prev.items[currentIndex] || prev.items[currentIndex].status === nextStatus) return prev;
+      const nextItems = prev.items.map((item, index) => (
+        index === currentIndex ? { ...item, status: nextStatus } : item
+      ));
+      return { ...prev, items: nextItems };
+    });
+  }, [auditState.status]);
+
+  useEffect(() => {
+    const batch = auditBatchRef.current;
+    const terminalStatus = String(auditState.status || '').toLowerCase();
+    if (!auditState.jobId || !['done', 'failed'].includes(terminalStatus)) return;
+    if (!batch?.items?.length || batch.currentIndex < 0) return;
+
+    const marker = `${auditState.jobId}:${terminalStatus}`;
+    if (auditBatchTransitionRef.current === marker) return;
+    auditBatchTransitionRef.current = marker;
+
+    const currentIndex = Math.min(batch.currentIndex, batch.items.length - 1);
+    if (terminalStatus === 'failed') {
+      setAuditBatch((prev) => ({ ...prev, active: false }));
+      if (batch.items.length > 1) {
+        showAuditNotice(`第 ${currentIndex + 1}/${batch.items.length} 份文件审单失败，批量流程已暂停。`);
+      }
+      return;
+    }
+
+    const nextIndex = batch.items.findIndex((item, index) => index > currentIndex && item.status === 'queued');
+    if (nextIndex === -1) {
+      if (batch.active && batch.items.length > 1) {
+        setAuditBatch((prev) => ({ ...prev, active: false }));
+        window.setTimeout(() => {
+          void (async () => {
+            const aggregatedResult = auditState.caseId ? await fetchAuditCaseReport(auditState.caseId) : null;
+            showAuditNotice(
+              aggregatedResult
+                ? `批量审单完成，共处理 ${batch.items.length} 份文件，已切换为整包汇总报告。`
+                : `批量审单完成，共处理 ${batch.items.length} 份文件。`
+            );
+          })();
+        }, 120);
+      }
+      return;
+    }
+
+    const nextItem = batch.items[nextIndex];
+    if (!nextItem?.file) return;
+    window.setTimeout(() => {
+      startAuditJob(nextItem.file, {
+        docTypeOverride: batch.docTypeOverride || 'auto',
+        suppressBusyCheck: true,
+        batchIndex: nextIndex
+      });
+    }, 120);
+  }, [auditState.caseId, auditState.jobId, auditState.status]);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -2355,6 +2483,102 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return null;
   };
 
+  const buildAuditBatchItems = (files) => files.map((file, index) => ({
+      id: `${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+      file,
+      name: file.name,
+      size: file.size,
+      sizeLabel: formatFileSize(file.size),
+      status: 'queued'
+  }));
+
+  const resolveAuditCaseFlags = (documents = []) => {
+      const tradeTags = new Set([
+          'invoice',
+          'packing_list',
+          'bill_of_lading',
+          'air_waybill',
+          'customs_declaration',
+          'certificate_of_origin',
+          'purchase_order',
+          'import_declaration',
+          'export_declaration',
+          'trade_case'
+      ]);
+      let hasContractDoc = false;
+      let hasTradeDoc = false;
+      for (const doc of documents) {
+          const status = String(doc?.status || '').trim().toLowerCase();
+          if (status === 'failed' || status === 'cancelled') continue;
+          const tag = String(doc?.tag || '').trim().toLowerCase();
+          const docType = String(doc?.doc_type || '').trim().toLowerCase();
+          if (tag === 'contract' || docType === 'contract') hasContractDoc = true;
+          if (tradeTags.has(tag) || tradeTags.has(docType)) hasTradeDoc = true;
+      }
+      return { hasContractDoc, hasTradeDoc };
+  };
+
+  const inferAuditUploadStep = (fileName, docTypeValue = 'auto') => {
+      const normalizedDocType = String(docTypeValue || '').trim().toLowerCase();
+      if (normalizedDocType === 'contract') return 1;
+      if (['invoice', 'packing_list', 'bill_of_lading', 'air_waybill', 'import_declaration', 'export_declaration', 'certificate_of_origin', 'trade_case'].includes(normalizedDocType)) return 2;
+      if (['payment', 'expense'].includes(normalizedDocType)) return 3;
+
+      const name = String(fileName || '');
+      const lower = name.toLowerCase();
+      if (/(销售合同|采购合同|购销合同|框架合同|服务合同|劳务合同|租赁合同|contract|agreement|协议|cont\.?\s*no)/i.test(name)) return 1;
+      if (/(预付款|付款申请|付款|支付|payment|expense|reimbursement|advance|prepayment|remittance|报销)/i.test(name)) return 3;
+      if (/(invoice|commercial invoice|proforma invoice|packing|packing list|装箱|箱单|bill of lading|提单|b\/l|awb|air waybill|运单|shipping advice|origin|原产地|certificate of origin|declaration|报关|purchase order|采购单)/i.test(lower)) return 2;
+      return 2;
+  };
+
+  const reorderAuditUploadSelection = (files, docTypeValue, existingDocs = []) => {
+      if (!Array.isArray(files) || files.length <= 1) return { files, reordered: false };
+
+      const { hasContractDoc, hasTradeDoc } = resolveAuditCaseFlags(existingDocs);
+      const rankOffset = hasContractDoc ? 1 : 0;
+      const paymentOffset = hasTradeDoc ? 2 : 0;
+      const annotated = files.map((file, index) => {
+          const step = inferAuditUploadStep(file?.name, docTypeValue);
+          let rank = step;
+          if (step === 1 && hasContractDoc) rank = 1 + rankOffset;
+          if (step === 3 && hasTradeDoc) rank = 3 - 1;
+          if (step === 3 && !hasTradeDoc) rank = 3 + paymentOffset;
+          return { file, index, step, rank };
+      });
+      const sorted = [...annotated].sort((a, b) => {
+          if (a.rank !== b.rank) return a.rank - b.rank;
+          if (a.step !== b.step) return a.step - b.step;
+          return a.index - b.index;
+      });
+      const reordered = sorted.some((item, index) => item.index !== index);
+      return {
+          files: sorted.map((item) => item.file),
+          reordered
+      };
+  };
+
+  const inspectAuditUploadSelection = (files, docTypeValue, existingDocs = []) => {
+      const { hasContractDoc: initialContractFlag, hasTradeDoc: initialTradeFlag } = resolveAuditCaseFlags(existingDocs);
+      let hasContractDoc = initialContractFlag;
+      let hasTradeDoc = initialTradeFlag;
+      const warnings = new Set();
+
+      for (const file of files) {
+          const step = inferAuditUploadStep(file?.name, docTypeValue);
+          if (!hasContractDoc && step !== 1) {
+              warnings.add('当前审单包还没有合同主文档，本次先按测试模式继续处理。');
+          }
+          if (step === 3 && !hasTradeDoc) {
+              warnings.add('当前还没有履约/贸易单据，付款类单据会先做单据内审核。');
+          }
+          if (step === 1) hasContractDoc = true;
+          if (step === 2) hasTradeDoc = true;
+      }
+
+      return Array.from(warnings).join(' ');
+  };
+
   const resetAuditState = () => {
       setAuditState({
           status: 'idle',
@@ -2368,9 +2592,18 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           error: null,
           error_message: null
       });
+      setAuditBatch({
+          active: false,
+          currentIndex: -1,
+          docTypeOverride: null,
+          items: []
+      });
       setAuditFile(null);
       setAuditNotice('');
       setIsAuditErpActionLoading(false);
+      auditBatchTransitionRef.current = '';
+      auditPollGenerationRef.current = 0;
+      auditPollFailureCountRef.current = 0;
       auditHistorySavedRef.current = null;
   };
 
@@ -2380,9 +2613,47 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setTimeout(() => setAuditNotice(''), 2500);
   };
 
-  const startAuditJob = async (file) => {
+  const fetchAuditCaseReport = async (caseId) => {
+      const normalizedCaseId = String(caseId || '').trim();
+      if (!normalizedCaseId) return null;
+      try {
+          const token = localStorage.getItem(AUTH_TOKEN_KEY);
+          const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+          const response = await fetch(`${API_BASE_URL}/api/audit/case/${normalizedCaseId}`, { headers });
+          const data = await response.json();
+          if (!response.ok) {
+              throw new Error(data.detail || data.error || '获取整包审单报告失败');
+          }
+          if (!data?.result || typeof data.result !== 'object') {
+              return null;
+          }
+          auditHistorySavedRef.current = null;
+          setAuditState((prev) => ({
+              ...prev,
+              status: 'done',
+              stage: 'done',
+              workflow_state: data.workflow_state || data.result?.workflow_state || prev.workflow_state,
+              caseId: data.case_id || prev.caseId,
+              caseDocuments: Array.isArray(data.case_documents) ? data.case_documents : prev.caseDocuments,
+              result: data.result,
+              error: null,
+              error_message: null
+          }));
+          return data.result;
+      } catch (error) {
+          console.error('Failed to load audit case report', error);
+          return null;
+      }
+  };
+
+  const startAuditJob = async (file, options = {}) => {
       if (!file) return;
-      if (['uploading', 'pending', 'running'].includes(auditState.status)) {
+      const {
+          docTypeOverride = auditDocType,
+          suppressBusyCheck = false,
+          batchIndex = -1
+      } = options;
+      if (!suppressBusyCheck && ['uploading', 'pending', 'running'].includes(auditState.status)) {
           showAuditNotice('审单进行中，请等待完成后再提交新文件。');
           return;
       }
@@ -2402,47 +2673,29 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       const currentCaseDocs = Array.isArray(auditState?.caseDocuments) ? auditState.caseDocuments : [];
-      const hasContractDoc = currentCaseDocs.some((doc) => {
-          const status = String(doc?.status || '').trim().toLowerCase();
-          if (status === 'failed' || status === 'cancelled') return false;
-          const tag = String(doc?.tag || doc?.doc_type || '').trim().toLowerCase();
-          return tag === 'contract';
-      });
-      const tradeTags = new Set([
-          'invoice',
-          'packing_list',
-          'bill_of_lading',
-          'air_waybill',
-          'customs_declaration',
-          'certificate_of_origin',
-          'purchase_order',
-          'import_declaration',
-          'export_declaration',
-          'trade_case'
-      ]);
-      const hasTradeDoc = currentCaseDocs.some((doc) => {
-          const status = String(doc?.status || '').trim().toLowerCase();
-          if (status === 'failed' || status === 'cancelled') return false;
-          const tag = String(doc?.tag || '').trim().toLowerCase();
-          const docType = String(doc?.doc_type || '').trim().toLowerCase();
-          return tradeTags.has(tag) || tradeTags.has(docType);
-      });
-      const selectedDocType = String(auditDocType || '').trim().toLowerCase();
-      const contractLikeByName = /合同|contract|agreement|协议/i.test(name);
-      const currentUploadIsContract = selectedDocType === 'contract' || ((selectedDocType === '' || selectedDocType === 'auto') && contractLikeByName);
-      const settlementLikeByName = /付款|支付|payment|expense|报销/i.test(name);
-      const currentUploadIsSettlement = ['payment', 'expense'].includes(selectedDocType) || ((selectedDocType === '' || selectedDocType === 'auto') && settlementLikeByName);
-      if (!hasContractDoc && !currentUploadIsContract) {
-          showAuditNotice('请先上传合同主文档，再按顺序上传发票/提单/装箱单/付款单等单据。');
-          return;
-      }
-      if (currentUploadIsSettlement && !hasTradeDoc) {
-          showAuditNotice('请先上传发票/提单/装箱单等履约单据，再上传付款或报销单据。');
-          return;
-      }
+      const uploadSequenceNotice = inspectAuditUploadSelection([file], docTypeOverride, currentCaseDocs);
 
       setAuditNotice('');
-      setAuditFile({ name: file.name, size: file.size, sizeLabel: formatFileSize(file.size) });
+      if (batchIndex >= 0) {
+          setAuditBatch((prev) => {
+              if (!prev.items[batchIndex]) return prev;
+              const nextItems = prev.items.map((item, index) => (
+                  index === batchIndex ? { ...item, status: 'uploading' } : item
+              ));
+              return {
+                  ...prev,
+                  currentIndex: batchIndex,
+                  items: nextItems
+              };
+          });
+      } else {
+          setAuditBatch({
+              active: false,
+              currentIndex: 0,
+              docTypeOverride,
+              items: buildAuditBatchItems([file]).map((item) => ({ ...item, status: 'uploading' }))
+          });
+      }
       setAuditState((prev) => ({
           ...prev,
           status: 'uploading',
@@ -2458,7 +2711,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       try {
           const formData = new FormData();
           formData.append('file', file);
-          if (auditDocType) formData.append('doc_type', auditDocType);
+          if (docTypeOverride) formData.append('doc_type', docTypeOverride);
           const effectiveAuditBackend = auditModelBackend === 'cloud' ? 'cloud' : 'local';
           formData.append('model_type', effectiveAuditBackend);
           formData.append('user_id', userProfile.id || 'anonymous');
@@ -2478,6 +2731,15 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               throw new Error(data.detail || data.error || '审单启动失败');
           }
 
+          if (batchIndex >= 0) {
+              setAuditBatch((prev) => {
+                  if (!prev.items[batchIndex]) return prev;
+                  const nextItems = prev.items.map((item, index) => (
+                      index === batchIndex ? { ...item, status: data.status || 'pending' } : item
+                  ));
+                  return { ...prev, items: nextItems };
+              });
+          }
           setAuditState((prev) => ({
               ...prev,
               status: data.status || 'pending',
@@ -2491,8 +2753,25 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               error: null,
               error_message: null
           }));
+          const nextNotice = data.upload_sequence_notice || uploadSequenceNotice;
+          if (nextNotice && batchIndex < 0) {
+              showAuditNotice(nextNotice);
+          }
+          return {
+              started: true,
+              notice: nextNotice || ''
+          };
       } catch (error) {
           const message = error?.message || '审单启动失败';
+          if (batchIndex >= 0) {
+              setAuditBatch((prev) => {
+                  if (!prev.items[batchIndex]) return { ...prev, active: false };
+                  const nextItems = prev.items.map((item, index) => (
+                      index === batchIndex ? { ...item, status: 'failed' } : item
+                  ));
+                  return { ...prev, active: false, items: nextItems };
+              });
+          }
           setAuditState((prev) => ({
               ...prev,
               status: 'failed',
@@ -2504,16 +2783,65 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               error: message,
               error_message: message
           }));
+          return {
+              started: false,
+              error: message
+          };
+      }
+  };
+
+  const startAuditBatch = async (files) => {
+      if (!Array.isArray(files) || !files.length) return;
+      if (['uploading', 'pending', 'running'].includes(auditState.status) || auditBatchRef.current.active) {
+          showAuditNotice('当前审单批次仍在处理中，请等待完成后再追加文件。');
+          return;
+      }
+
+      const effectiveDocType = files.length > 1 ? 'auto' : auditDocType;
+      const currentCaseDocs = Array.isArray(auditState?.caseDocuments) ? auditState.caseDocuments : [];
+      const {
+          files: orderedFiles,
+          reordered: filesReordered
+      } = reorderAuditUploadSelection(files, effectiveDocType, currentCaseDocs);
+      const uploadSequenceNotice = inspectAuditUploadSelection(orderedFiles, effectiveDocType, currentCaseDocs);
+
+      const items = buildAuditBatchItems(orderedFiles);
+      const switchedToAuto = files.length > 1 && auditDocType !== 'auto';
+      auditBatchTransitionRef.current = '';
+      setAuditBatch({
+          active: files.length > 1,
+          currentIndex: 0,
+          docTypeOverride: effectiveDocType,
+          items
+      });
+      setAuditNotice('');
+      const startResult = await startAuditJob(items[0].file, {
+          docTypeOverride: effectiveDocType,
+          suppressBusyCheck: true,
+          batchIndex: 0
+      });
+      const notices = [];
+      if (filesReordered && switchedToAuto) {
+          notices.push('批量审单已自动切换为“自动识别”，并按合同→履约→付款顺序重排提交。');
+      } else if (filesReordered) {
+          notices.push('系统已按合同→履约→付款顺序自动重排本次批量审单。');
+      } else if (switchedToAuto) {
+          notices.push('批量审单已自动切换为“自动识别”，系统会按选择顺序逐份审单。');
+      }
+      if (startResult?.notice) {
+          notices.push(startResult.notice);
+      } else if (uploadSequenceNotice) {
+          notices.push(uploadSequenceNotice);
+      }
+      if (notices.length) {
+          showAuditNotice(notices.join(' '));
       }
   };
 
   const handleAuditFileSelect = async (e) => {
       const files = Array.from(e?.target?.files || []);
       if (!files.length) return;
-      if (files.length > 1) {
-          showAuditNotice('系统按顺序处理单据包，请逐个上传（先合同，再其他单据）。');
-      }
-      await startAuditJob(files[0]);
+      await startAuditBatch(files);
       if (e?.target) e.target.value = '';
   };
 
@@ -3927,7 +4255,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     if (!files.length) return;
 
     if (isAuditMode) {
-        await startAuditJob(files[0]);
+        await startAuditBatch(files);
         if (fileInputRef.current) fileInputRef.current.value = '';
         if (e.target && e.target.value) e.target.value = '';
         return;
@@ -5582,6 +5910,39 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setShareModal({ isOpen: true, sessionId: currentSessionId, title: session ? session.title : '新聊天' });
   };
 
+  const handleSessionClickStable = useStableCallback(handleSessionClick);
+  const handleNewChatStable = useStableCallback(handleNewChat);
+  const handleSuggestionClickStable = useStableCallback(handleSuggestionClick);
+  const handleModelChangeStable = useStableCallback(handleModelChange);
+  const handleOpenSettingsModalStable = useStableCallback(handleOpenSettingsModal);
+  const handleOpenDecisionCenterStable = useStableCallback(handleOpenDecisionCenter);
+  const handleShareClickStable = useStableCallback(handleShareClick);
+  const handleModeChangeStable = useStableCallback(onModeChange);
+  const handleLogoutStable = useStableCallback(onLogout);
+
+  const handleOpenSidebar = useCallback(() => setIsSidebarOpen(true), []);
+  const handleCloseSidebar = useCallback(() => setIsSidebarOpen(false), []);
+  const handleOpenMobileSidebar = useCallback(() => setIsMobileSidebarOpen(true), []);
+  const handleCloseMobileSidebar = useCallback(() => setIsMobileSidebarOpen(false), []);
+  const handleToggleDesktopModelDropdown = useCallback(() => setIsDropdownOpen((open) => !open), []);
+  const handleToggleMobileModelDropdown = useCallback(() => setIsMobileModelDropdownOpen((open) => !open), []);
+  const handleSelectDesktopModel = useCallback((modelId) => {
+    handleModelChangeStable(modelId);
+    setIsDropdownOpen(false);
+  }, [handleModelChangeStable]);
+  const handleSelectMobileModel = useCallback((modelId) => {
+    handleModelChangeStable(modelId);
+    setIsMobileModelDropdownOpen(false);
+  }, [handleModelChangeStable]);
+  const handleHeaderOpenDecisionCenter = useCallback((event) => {
+    setIsDropdownOpen(false);
+    setIsMobileModelDropdownOpen(false);
+    handleOpenDecisionCenterStable(event);
+  }, [handleOpenDecisionCenterStable]);
+  const handleEmptyStateQuickAction = useCallback((prompt) => {
+    setInputValue(prompt);
+  }, []);
+
   // --- 动作处理程序 ---
   const trimIndexedState = (state, maxIndex) => {
       const next = {};
@@ -6264,6 +6625,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
       handleNewChat();
   };
+
+  const handleSendCurrentOcrSummaryMessage = useCallback(() => {
+      const nextMessage = (ocrSummaryInput || '').trim();
+      if (!nextMessage) return;
+      sendOcrSummaryMessage(nextMessage);
+      setOcrSummaryInput('');
+  }, [ocrSummaryInput, sendOcrSummaryMessage]);
 
   const handleOpenWritingAssistantEntry = useCallback(() => {
       setWritingEntryMode('assistant');
@@ -7388,48 +7756,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const showEmptyState = chatHistory.length === 0 && !showContentPanel && !panelContent && !isUploadingFile && pendingFiles.length === 0;
   const greetingName = userProfile?.name && userProfile.name !== 'User' ? userProfile.name : '';
   const greetingText = greetingName ? `${greetingName}，你好` : '你好';
-  const mobileQuickActions = [
-    { key: 'image', label: '公司/业务介绍', prompt: '用数据库查询一下公司的基本信息（专业语气）', Icon: ImageIcon },
-    { key: 'video', label: '流程怎么走', prompt: '请用步骤说明：合同审批流程通常包含哪些节点？每个节点的输入输出是什么？', Icon: Play },
-    { key: 'write', label: '合规与风险提示', prompt: '帮我列一份“对外合同”常见风险点清单，并给出对应的规避建议（条款层面）', Icon: FileText },
-    { key: 'learn', label: '数据库：客户TOP统计', prompt: '查询订单金额TOP10客户，并按客户汇总（订单数/总额/最近下单日期）', Icon: BookOpen },
-    { key: 'energy', label: 'HR/行政制度问答', prompt: '请给一个通用的“请假/报销/出差”制度说明模板，要求清晰可执行', Icon: Sparkles },
-  ];
-
-  const emptyStateContent = isMobileViewport ? (
-    <div className="w-full -mx-4 px-6 flex flex-col justify-start pt-4 pb-2">
-      <div>
-        <div className="home-hero-kicker text-base text-gray-500 dark:text-gray-400">{greetingText}</div>
-        <h2 className="home-hero-title mt-2 text-[26px] leading-tight text-gray-900 dark:text-white">
-          需要我为你做些什么？
-        </h2>
-      </div>
-      <div className="mt-6 flex flex-col gap-3">
-        {mobileQuickActions.map((action) => {
-          const ActionIcon = action.Icon;
-          return (
-          <button
-            key={action.key}
-            type="button"
-            onClick={() => setInputValue(action.prompt)}
-            className="w-fit max-w-[85%] inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/90 dark:bg-gray-900/60 border border-gray-200/80 dark:border-gray-700 text-sm font-medium text-gray-700 dark:text-gray-200 shadow-sm hover:shadow-md hover:bg-white dark:hover:bg-gray-900 transition-all"
-          >
-            <ActionIcon size={16} className="text-gray-500 dark:text-gray-400" />
-            {action.label}
-          </button>
-        );})}
-      </div>
-    </div>
-  ) : (
-    <div className="h-full flex flex-col items-center justify-center pt-4 sm:pt-5">
-       <div className="w-16 h-16 bg-white dark:bg-gray-800 rounded-full shadow-sm border border-gray-100 dark:border-gray-700 flex items-center justify-center mb-6">{React.createElement(selectedModelInfo.icon, { size: 32, className: "text-gray-800 dark:text-white" })}</div>
-       <h2 className="home-hero-title text-2xl text-gray-800 dark:text-white mb-8 text-center px-4">
-           {isMeetingMode ? "上传录音，一键总结" : (isAuditMode ? "智能审单 & 风险合规检测" : (isOCRMode ? "图片/PDF 转文字 & 智能分析" : "今天有什么计划？"))}
-       </h2>
-       <Suspense fallback={<div className="text-sm text-gray-400 dark:text-gray-500">加载建议中...</div>}>
-         <Suggestions onSuggestionClick={handleSuggestionClick} />
-       </Suspense>
-     </div>
+  const emptyStateContent = (
+    <DashboardEmptyState
+      isMobileViewport={isMobileViewport}
+      greetingText={greetingText}
+      selectedModelInfo={selectedModelInfo}
+      isMeetingMode={isMeetingMode}
+      isAuditMode={isAuditMode}
+      isOCRMode={isOCRMode}
+      onQuickAction={handleEmptyStateQuickAction}
+      onSuggestionClick={handleSuggestionClickStable}
+    />
   );
 
   const renderOcrWorkspace = () => {
@@ -8017,289 +8354,67 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   return (
     <div className="dashboard-unified-dark flex h-screen bg-white dark:bg-gray-950 font-sans text-gray-900 dark:text-gray-100 overflow-hidden animate-in fade-in duration-500 transition-colors">
-      {isDragActive && (
-        <div className="pointer-events-none fixed inset-0 z-[130] flex items-center justify-center bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150">
-          <div className="relative flex flex-col items-center px-8 py-10 rounded-3xl border border-blue-300/25 bg-[#121826]/85 shadow-[0_30px_80px_rgba(0,0,0,0.55)]">
-            <div className="relative h-24 w-28 mb-4">
-              <div className="absolute left-1 top-3 w-12 h-12 rounded-2xl bg-indigo-300/95 text-indigo-900 flex items-center justify-center rotate-[-14deg] shadow-lg">
-                <FileText size={20} />
-              </div>
-              <div className="absolute right-1 top-5 w-12 h-12 rounded-2xl bg-blue-300/95 text-blue-900 flex items-center justify-center rotate-[14deg] shadow-lg">
-                <ImageIcon size={20} />
-              </div>
-              <div className="absolute left-1/2 -translate-x-1/2 bottom-0 w-14 h-14 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-xl animate-pulse">
-                <FileUp size={24} />
-              </div>
-            </div>
-            <div className="text-3xl font-bold text-white tracking-tight">添加任意内容</div>
-            <div className="mt-2 text-base text-blue-100/90">将文件拖放到此处，松手即可添加到对话中</div>
-          </div>
-        </div>
-      )}
-
-      {isOcrSummaryOpen && (
-        <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-[2px] flex items-center justify-center px-4 py-6">
-          <div className="w-full max-w-3xl h-[75vh] bg-white dark:bg-gray-900 rounded-2xl shadow-2xl border border-gray-100 dark:border-gray-800 flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-800">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-full bg-indigo-50 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-300 flex items-center justify-center">
-                  <Sparkles size={16} />
-                </div>
-                <div className="text-sm font-semibold text-gray-900 dark:text-white">OCR 总结</div>
-              </div>
-              <button
-                type="button"
-                onClick={handleCloseOcrSummary}
-                className="p-2 rounded-full text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
-                title="关闭"
-              >
-                <X size={18} />
-              </button>
-            </div>
-            <div className="px-4 py-2 border-b border-gray-100 dark:border-gray-800">
-              {ocrSummaryFirstDone ? (
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                    <Cpu size={13} />
-                    <span>总结模型</span>
-                    <select
-                      value={ocrSummaryBackend}
-                      onChange={(e) => setOcrSummaryBackend(e.target.value)}
-                      disabled={isOcrSummaryLoading}
-                      className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1 text-xs text-gray-700 dark:text-gray-200 outline-none focus:ring-2 focus:ring-indigo-500/20"
-                    >
-                      {OCR_SUMMARY_BACKEND_OPTIONS.map((item) => (
-                        <option key={item.value} value={item.value}>{item.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleRegenerateOcrSummary}
-                    disabled={isOcrSummaryLoading}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium border border-indigo-200 dark:border-indigo-700 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50/80 dark:hover:bg-indigo-900/30 disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    重新总结
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-                  <Cpu size={13} />
-                  <span>首次总结默认使用 Qwen 2.5-coder</span>
-                </div>
-              )}
-            </div>
-            <div ref={ocrSummaryScrollRef} className="flex-1 overflow-auto px-4 py-3 space-y-4">
-              {ocrSummaryMessages.length === 0 && (
-                <div className="text-sm text-gray-400">正在生成总结...</div>
-              )}
-              {ocrSummaryMessages.map((msg, idx) => (
-                <div key={`ocr-summary-${idx}`} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${msg.role === 'user' ? 'bg-gray-900 text-white' : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-100'}`}>
-                    {msg.role === 'assistant' ? (
-                      <Suspense fallback={<PlainTextRenderer content={msg.content} className="text-gray-800 dark:text-gray-100" />}>
-                        <MarkdownRenderer content={msg.content} streaming={isOcrSummaryLoading && idx === ocrSummaryMessages.length - 1} />
-                      </Suspense>
-                    ) : (
-                      msg.content
-                    )}
-                  </div>
-                </div>
-              ))}
-              {isOcrSummaryLoading && (
-                <div className="text-xs text-gray-400">模型正在生成...</div>
-              )}
-            </div>
-            <div className="border-t border-gray-100 dark:border-gray-800 px-4 py-3">
-              <div className="flex items-end gap-2">
-                <textarea
-                  className="flex-1 min-h-[44px] max-h-[120px] resize-none rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400"
-                  placeholder="继续追问文档内容..."
-                  value={ocrSummaryInput}
-                  onChange={(e) => setOcrSummaryInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      sendOcrSummaryMessage(ocrSummaryInput);
-                      setOcrSummaryInput('');
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    sendOcrSummaryMessage(ocrSummaryInput);
-                    setOcrSummaryInput('');
-                  }}
-                  disabled={!ocrSummaryInput.trim() || isOcrSummaryLoading}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  发送
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      {showOnboarding && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 backdrop-blur-[2px] px-4">
-          <div className="w-full max-w-xl rounded-2xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-2xl p-5 sm:p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-9 h-9 rounded-full bg-green-500 text-white flex items-center justify-center">
-                <Bot size={18} />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-gray-900 dark:text-white">快速上手</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">入口位置一眼看懂</div>
-              </div>
-            </div>
-            <div className="space-y-3">
-              {ONBOARDING_MESSAGES.map((msg, idx) => (
-                <div key={`onboarding-${idx}`} className="rounded-xl border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/60 px-4 py-3 text-sm text-gray-700 dark:text-gray-200 leading-relaxed">
-                  {msg}
-                </div>
-              ))}
-            </div>
-            <div className="mt-4 text-right">
-              <a
-                href="#"
-                onClick={handleOnboardingStart}
-                className="text-sm font-medium text-blue-600 hover:text-blue-700 hover:underline"
-              >
-                立即开始
-              </a>
-            </div>
-          </div>
-        </div>
-      )}
-      <Suspense fallback={null}>
-        <MobileSidebar
-          isOpen={isMobileSidebarOpen}
-          onClose={() => setIsMobileSidebarOpen(false)}
-          userProfile={userProfile}
-          sessionList={sessionList}
-          currentSessionId={currentSessionId}
-          onSessionClick={handleSessionClick}
-          onNewChat={handleNewChat}
-          onLogout={onLogout}
-          onShowAppearance={handleOpenSettingsModal}
-          currentMode={currentMode}
-          onModeChange={onModeChange}
-          isLoading={isProfileLoading || isSessionsLoading}
-          selectedModel={selectedModel}
-        />
-      </Suspense>
-
-      <Suspense fallback={<div className="hidden md:block w-[280px] shrink-0 border-r border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-950" />}>
-        <Sidebar
-          isOpen={isSidebarOpen}
-          onClose={() => setIsSidebarOpen(false)}
-          onNewChat={handleNewChat}
-          sessionList={sessionList}
-          currentSessionId={currentSessionId}
-          onSessionClick={handleSessionClick}
-          userProfile={userProfile}
-          onLogout={onLogout}
-          onShowAppearance={handleOpenSettingsModal}
-          currentMode={currentMode}
-          onModeChange={onModeChange}
-          isLoadingSessions={isSessionsLoading}
-          isLoadingProfile={isProfileLoading}
-          selectedModel={selectedModel}
-        />
-      </Suspense>
+      <DashboardGlobalOverlays
+        isDragActive={isDragActive}
+        showOnboarding={showOnboarding}
+        onboardingMessages={ONBOARDING_MESSAGES}
+        onStartOnboarding={handleOnboardingStart}
+      />
+      <DashboardOcrSummaryModal
+        isOpen={isOcrSummaryOpen}
+        onClose={handleCloseOcrSummary}
+        ocrSummaryFirstDone={ocrSummaryFirstDone}
+        ocrSummaryBackend={ocrSummaryBackend}
+        backendOptions={OCR_SUMMARY_BACKEND_OPTIONS}
+        onBackendChange={setOcrSummaryBackend}
+        isLoading={isOcrSummaryLoading}
+        onRegenerate={handleRegenerateOcrSummary}
+        scrollRef={ocrSummaryScrollRef}
+        messages={ocrSummaryMessages}
+        inputValue={ocrSummaryInput}
+        onInputChange={setOcrSummaryInput}
+        onSend={handleSendCurrentOcrSummaryMessage}
+      />
+      <DashboardSidebars
+        isMobileSidebarOpen={isMobileSidebarOpen}
+        onCloseMobileSidebar={handleCloseMobileSidebar}
+        isSidebarOpen={isSidebarOpen}
+        onCloseSidebar={handleCloseSidebar}
+        userProfile={userProfile}
+        sessionList={sessionList}
+        currentSessionId={currentSessionId}
+        onSessionClick={handleSessionClickStable}
+        onNewChat={handleNewChatStable}
+        onLogout={handleLogoutStable}
+        onShowAppearance={handleOpenSettingsModalStable}
+        currentMode={currentMode}
+        onModeChange={handleModeChangeStable}
+        isProfileLoading={isProfileLoading}
+        isSessionsLoading={isSessionsLoading}
+        selectedModel={selectedModel}
+      />
 
       <div className="dashboard-main-surface flex-1 flex flex-col h-full relative bg-white dark:bg-gray-950 min-w-0 transition-colors">
-        {/* Mo 移动标头 */}
-        <div className="dashboard-topbar md:hidden fixed top-0 left-0 right-0 flex items-center justify-between px-4 py-3 bg-white/95 dark:bg-gray-950/95 backdrop-blur-sm border-b border-gray-100 dark:border-gray-800 z-40">
-          <div className="flex items-center gap-3">
-            <button onClick={() => setIsMobileSidebarOpen(true)} className="text-gray-600 dark:text-gray-300 p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"><PanelLeftOpen size={24} /></button>
-            <div className="relative" ref={mobileDropdownRef}>
-                <button onClick={() => setIsMobileModelDropdownOpen(!isMobileModelDropdownOpen)} className="flex items-center gap-1.5 font-bold text-gray-800 dark:text-white text-lg active:opacity-70 transition-opacity">
-                  {selectedModelInfo?.name.split(' ')[0]} <span className="text-xs font-normal text-gray-500 bg-gray-100 dark:bg-gray-800 dark:text-gray-400 px-1.5 py-0.5 rounded-full">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isMobileModelDropdownOpen ? 'rotate-180' : ''}`} />
-                </button>
-                {isMobileModelDropdownOpen && (
-                  <div className="dashboard-dropdown absolute top-full left-0 mt-2 w-[min(88vw,280px)] max-h-[65vh] overflow-y-auto bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 animate-in fade-in slide-in-from-top-2 duration-200 z-50">
-                    <div className="p-1.5 space-y-0.5">
-                      {models.map((model) => (
-                        <div key={model.id} className={`flex items-center gap-3 px-3 py-3 rounded-lg cursor-pointer transition-colors ${selectedModel === model.id ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { handleModelChange(model.id); setIsMobileModelDropdownOpen(false); }}>
-                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${selectedModel === model.id ? 'bg-black dark:bg-white text-white dark:text-black' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}`}><model.icon size={18} /></div>
-                          <div className="flex-1"><div className={`text-sm font-medium ${selectedModel === model.id ? 'text-gray-900 dark:text-white' : 'text-gray-700 dark:text-gray-300'}`}>{model.name}</div></div>
-                          {selectedModel === model.id && <Check size={16} className="text-gray-900 dark:text-white" />}
-                        </div>
-                      ))}
-                      <div className="my-1 h-px bg-gray-100 dark:bg-gray-700" />
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          setIsMobileModelDropdownOpen(false);
-                          handleOpenDecisionCenter(event);
-                        }}
-                        className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-cyan-50 dark:hover:bg-cyan-900/20 transition-colors text-left"
-                      >
-                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-600 dark:text-cyan-300">
-                          <Layout size={18} />
-                        </div>
-                        <div className="flex-1">
-                          <div className="text-sm font-medium text-cyan-700 dark:text-cyan-300">数据决策系统</div>
-                        </div>
-                        <ArrowRight size={16} className="text-cyan-500" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {currentSessionId && <button onClick={handleShareClick} className="text-gray-600 dark:text-gray-300 p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"><Share2 size={24} /></button>}
-            <button onClick={handleNewChat} className="text-gray-600 dark:text-gray-300 p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors"><Plus size={24} /></button>
-          </div>
-        </div>
-
-        {/* De 桌面标题 */}
-        <div className="dashboard-topbar hidden md:flex items-center p-3 sticky top-0 z-30 bg-white/80 dark:bg-gray-950/80 backdrop-blur-sm border-b border-gray-100 dark:border-gray-800/50">
-          <div className="flex items-center">
-              {!isSidebarOpen && <button onClick={() => setIsSidebarOpen(true)} className="mr-3 p-2 text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"><PanelLeftOpen size={20} /></button>}
-              <div className="relative" ref={dropdownRef}>
-                <button className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-gray-100/80 dark:hover:bg-gray-800/80 transition-colors text-lg font-semibold text-gray-700 dark:text-gray-200 group" onClick={() => setIsDropdownOpen(!isDropdownOpen)}>
-                  {selectedModelInfo?.name.split(' ')[0]} <span className="text-gray-400 text-base font-normal">2.0</span> <ChevronDown size={16} className={`text-gray-400 transition-transform duration-200 ${isDropdownOpen ? 'rotate-180' : ''}`} />
-                </button>
-                {isDropdownOpen && (
-                  <div className="dashboard-dropdown absolute top-full left-0 mt-2 w-[320px] bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-gray-700 overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 z-50">
-                    <div className="p-1.5 space-y-0.5">
-                      {models.map((model) => (
-                        <div key={model.id} className={`flex items-center gap-3 px-3 py-3 rounded-lg cursor-pointer transition-colors ${selectedModel === model.id ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { handleModelChange(model.id); setIsDropdownOpen(false); }}>
-                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${selectedModel === model.id ? 'bg-black dark:bg-white text-white dark:text-black' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}`}><model.icon size={18} /></div>
-                          <div className="flex-1"><div className={`text-sm font-medium ${selectedModel === model.id ? 'text-gray-900 dark:text-white' : 'text-gray-700 dark:text-gray-300'}`}>{model.name}</div></div>
-                          {selectedModel === model.id && <Check size={16} className="text-gray-900 dark:text-white" />}
-                        </div>
-                      ))}
-                      <div className="my-1 h-px bg-gray-100 dark:bg-gray-700" />
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          setIsDropdownOpen(false);
-                          handleOpenDecisionCenter(event);
-                        }}
-                        className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-cyan-50 dark:hover:bg-cyan-900/20 transition-colors text-left"
-                      >
-                        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-600 dark:text-cyan-300">
-                          <Layout size={18} />
-                        </div>
-                        <div className="flex-1">
-                          <div className="text-sm font-medium text-cyan-700 dark:text-cyan-300">数据决策系统</div>
-                        </div>
-                        <ArrowRight size={16} className="text-cyan-500" />
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            {currentSessionId && <button onClick={handleShareClick} className="p-2 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors flex items-center gap-2"><Share2 size={20} /><span className="text-sm font-medium hidden lg:inline">分享</span></button>}
-          </div>
-        </div>
+        <DashboardTopbar
+          isSidebarOpen={isSidebarOpen}
+          onOpenSidebar={handleOpenSidebar}
+          onOpenMobileSidebar={handleOpenMobileSidebar}
+          models={models}
+          selectedModel={selectedModel}
+          selectedModelInfo={selectedModelInfo}
+          isDropdownOpen={isDropdownOpen}
+          onToggleDropdown={handleToggleDesktopModelDropdown}
+          onSelectDesktopModel={handleSelectDesktopModel}
+          isMobileModelDropdownOpen={isMobileModelDropdownOpen}
+          onToggleMobileModelDropdown={handleToggleMobileModelDropdown}
+          onSelectMobileModel={handleSelectMobileModel}
+          onOpenDecisionCenter={handleHeaderOpenDecisionCenter}
+          currentSessionId={currentSessionId}
+          onShareClick={handleShareClickStable}
+          onNewChat={handleNewChatStable}
+          dropdownRef={dropdownRef}
+          mobileDropdownRef={mobileDropdownRef}
+        />
 
         {/* UI 隐藏文件输入（共享） */}
         <input
@@ -8308,7 +8423,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           ref={fileInputRef}
           onChange={handleFileSelect}
           disabled={isUploadingFile}
-          multiple={!isAuditMode}
+          multiple
           accept={isMeetingMode ? "audio/*,.wav,.mp3,.m4a" : (isOCRMode ? "image/*,application/pdf" : (isAuditMode ? "image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "*/*"))}
         />
 
@@ -8346,55 +8461,41 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   </div>
                 </div>
               )}
-              {shouldRenderPanel && (
-                  <Suspense fallback={
-                      <div className={`dashboard-pane w-full ${isAuditSinglePane ? 'md:w-full md:border-r-0' : 'md:w-1/2 md:border-r'} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
-                          <div className={`px-4 py-3 border-b flex justify-between items-center ${panelStyle.headerBg} ${panelStyle.border}`}>
-                              <div className="h-4 w-40 bg-gray-200 dark:bg-gray-800 rounded animate-pulse"></div>
-                              <div className="h-3 w-16 bg-gray-200 dark:bg-gray-800 rounded animate-pulse"></div>
-                          </div>
-                          <div className="flex-1 p-4">
-                              <div className="h-5 w-full bg-gray-100 dark:bg-gray-800 rounded animate-pulse"></div>
-                              <div className="h-5 w-5/6 bg-gray-100 dark:bg-gray-800 rounded animate-pulse mt-3"></div>
-                              <div className="h-5 w-2/3 bg-gray-100 dark:bg-gray-800 rounded animate-pulse mt-3"></div>
-                          </div>
-                      </div>
-                  }>
-                      <ModePanel
-                          panelStyle={panelStyle}
-                          isMeetingMode={isMeetingMode}
-                          isOCRMode={isOCRMode}
-                          isAuditMode={isAuditMode}
-                          panelContent={panelContent}
-                          setPanelContent={setPanelContent}
-                          isUploadingFile={isUploadingFile}
-                          audioFileUrl={audioFileUrl}
-                          isProcessing={isProcessing}
-                          isOcrSaving={isOcrSaving}
-                          isSavingContext={isSavingContext}
-                          handleManualSave={handleManualSaveStable}
-                          handleExportWord={handleExportWordStable}
-                          handleGenerateSummary={handleGenerateSummaryStable}
-                          onOcrStore={handleOcrStoreStable}
-                          ocrEngine={ocrEngine}
-                          onOcrEngineChange={setOcrEngine}
-                          auditState={auditState}
-                          auditDocType={auditDocType}
-                          auditDocTypes={AUDIT_DOC_TYPES}
-                          auditModelBackend={auditModelBackend}
-                          auditFile={auditFile}
-                          auditNotice={auditNotice}
-                          onAuditDocTypeChange={setAuditDocType}
-                          onAuditModelBackendChange={setAuditModelBackend}
-                          onAuditFileSelect={handleAuditFileSelectStable}
-                          onAuditReset={resetAuditStateStable}
-                          onAuditErpAction={handleAuditErpActionStable}
-                          isAuditErpActionLoading={isAuditErpActionLoading}
-                          fullWidth={isAuditSinglePane}
-                          onMeetingUploadClick={handleMeetingUploadClickStable}
-                      />
-                  </Suspense>
-              )}
+              <DashboardModePanelHost
+                  shouldRenderPanel={shouldRenderPanel}
+                  isAuditSinglePane={isAuditSinglePane}
+                  panelStyle={panelStyle}
+                  isMeetingMode={isMeetingMode}
+                  isOCRMode={isOCRMode}
+                  isAuditMode={isAuditMode}
+                  panelContent={panelContent}
+                  setPanelContent={setPanelContent}
+                  isUploadingFile={isUploadingFile}
+                  audioFileUrl={audioFileUrl}
+                  isProcessing={isProcessing}
+                  isOcrSaving={isOcrSaving}
+                  isSavingContext={isSavingContext}
+                  handleManualSave={handleManualSaveStable}
+                  handleExportWord={handleExportWordStable}
+                  handleGenerateSummary={handleGenerateSummaryStable}
+                  onOcrStore={handleOcrStoreStable}
+                  ocrEngine={ocrEngine}
+                  onOcrEngineChange={setOcrEngine}
+                  auditState={auditState}
+                  auditDocType={auditDocType}
+                  auditDocTypes={AUDIT_DOC_TYPES}
+                  auditModelBackend={auditModelBackend}
+                  auditFile={auditFile}
+                  auditNotice={auditNotice}
+                  onAuditDocTypeChange={setAuditDocType}
+                  onAuditModelBackendChange={setAuditModelBackend}
+                  onAuditFileSelect={handleAuditFileSelectStable}
+                  onAuditReset={resetAuditStateStable}
+                  onAuditErpAction={handleAuditErpActionStable}
+                  isAuditErpActionLoading={isAuditErpActionLoading}
+                  fullWidth={isAuditSinglePane}
+                  onMeetingUploadClick={handleMeetingUploadClickStable}
+              />
 
               {shouldRenderChat && (
               <div className={`flex flex-col h-full relative transition-all duration-300 ${showContentPanel ? 'w-full md:w-1/2' : 'w-full'}`}>

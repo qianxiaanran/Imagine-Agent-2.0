@@ -8,6 +8,33 @@ const MarkdownCodeBlock = React.lazy(() => import('./MarkdownCodeBlock'));
 
 const mermaidCache = {};
 let mermaidModulePromise;
+let mermaidWorkerInstance;
+let mermaidWorkerPromise;
+let mermaidWorkerRequestId = 0;
+let mermaidWorkerEnabled = typeof Worker !== 'undefined';
+const mermaidWorkerJobs = new Map();
+
+const WORKER_ENV_ERROR_PATTERNS = [
+  /document is not defined/i,
+  /window is not defined/i,
+  /dompurify/i,
+  /createelement/i,
+  /appendchild/i,
+  /html.*element/i,
+];
+
+const getMermaidTheme = () => (
+  document.documentElement.classList.contains('dark') ? 'dark' : 'default'
+);
+
+const getMermaidCacheKey = (chart, theme) => `${theme}::${chart}`;
+
+const escapeHtml = (value) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
 
 const loadMermaid = async () => {
   if (!mermaidModulePromise) {
@@ -16,34 +43,129 @@ const loadMermaid = async () => {
   return mermaidModulePromise;
 };
 
+const isWorkerEnvironmentError = (error) => {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return WORKER_ENV_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+};
+
+const destroyMermaidWorker = ({ disable = false, error } = {}) => {
+  if (disable) {
+    mermaidWorkerEnabled = false;
+  }
+
+  if (mermaidWorkerInstance) {
+    mermaidWorkerInstance.onmessage = null;
+    mermaidWorkerInstance.onerror = null;
+    mermaidWorkerInstance.terminate();
+    mermaidWorkerInstance = null;
+  }
+  mermaidWorkerPromise = null;
+
+  if (error) {
+    mermaidWorkerJobs.forEach(({ reject }) => reject(error));
+    mermaidWorkerJobs.clear();
+  }
+};
+
+const loadMermaidWorker = async () => {
+  if (!mermaidWorkerEnabled || typeof Worker === 'undefined') {
+    throw new Error('Mermaid worker unavailable');
+  }
+
+  if (!mermaidWorkerPromise) {
+    mermaidWorkerPromise = Promise.resolve().then(() => {
+      const worker = new Worker(new URL('./mermaid.worker.js', import.meta.url), { type: 'module' });
+      worker.onmessage = (event) => {
+        const { requestId, svg: renderedSvg, error } = event.data || {};
+        const job = mermaidWorkerJobs.get(requestId);
+        if (!job) {
+          return;
+        }
+        mermaidWorkerJobs.delete(requestId);
+        if (error) {
+          job.reject(new Error(error));
+          return;
+        }
+        job.resolve(renderedSvg);
+      };
+      worker.onerror = (event) => {
+        const workerError = new Error(event?.message || 'Mermaid worker crashed');
+        destroyMermaidWorker({ disable: true, error: workerError });
+      };
+      mermaidWorkerInstance = worker;
+      return worker;
+    });
+  }
+
+  return mermaidWorkerPromise;
+};
+
+const renderMermaidInWorker = async (chart, theme) => {
+  const worker = await loadMermaidWorker();
+  return new Promise((resolve, reject) => {
+    const requestId = `mermaid-worker-${++mermaidWorkerRequestId}`;
+    mermaidWorkerJobs.set(requestId, { resolve, reject });
+    worker.postMessage({ requestId, chart, theme });
+  });
+};
+
+const renderMermaidOnMainThread = async (chart, theme) => {
+  const mermaid = await loadMermaid();
+  mermaid.initialize({
+    startOnLoad: false,
+    theme,
+    securityLevel: 'loose',
+  });
+  const id = `mermaid-${Math.random().toString(36).slice(2, 11)}`;
+  const { svg } = await mermaid.render(id, chart);
+  return svg;
+};
+
 const Mermaid = ({ chart }) => {
-  const [svg, setSvg] = useState(() => mermaidCache[chart] || '');
+  const [theme, setTheme] = useState(getMermaidTheme);
+  const cacheKey = useMemo(() => getMermaidCacheKey(chart, theme), [chart, theme]);
+  const [svg, setSvg] = useState(() => mermaidCache[cacheKey] || '');
 
   useEffect(() => {
-    if (mermaidCache[chart]) {
+    if (typeof MutationObserver === 'undefined') {
       return undefined;
     }
 
+    const root = document.documentElement;
+    const syncTheme = () => setTheme(getMermaidTheme());
+    const observer = new MutationObserver(syncTheme);
+
+    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (mermaidCache[cacheKey]) {
+      setSvg(mermaidCache[cacheKey]);
+      return undefined;
+    }
+
+    setSvg('');
     let cancelled = false;
 
     const renderChart = async () => {
       try {
-        const mermaid = await loadMermaid();
+        let renderedSvg = '';
+        try {
+          renderedSvg = await renderMermaidInWorker(chart, theme);
+        } catch (workerError) {
+          if (isWorkerEnvironmentError(workerError)) {
+            destroyMermaidWorker({ disable: true, error: workerError });
+          }
+          renderedSvg = await renderMermaidOnMainThread(chart, theme);
+        }
         if (cancelled) return;
-        mermaid.initialize({
-          startOnLoad: false,
-          theme: document.documentElement.classList.contains('dark') ? 'dark' : 'default',
-          securityLevel: 'loose',
-        });
-        const id = `mermaid-${Math.random().toString(36).slice(2, 11)}`;
-        const { svg: renderedSvg } = await mermaid.render(id, chart);
-        if (cancelled) return;
-        mermaidCache[chart] = renderedSvg;
+        mermaidCache[cacheKey] = renderedSvg;
         setSvg(renderedSvg);
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : 'Unknown mermaid render error';
-        setSvg(`<div class="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-500">Mermaid Render Error: ${message}</div>`);
+        setSvg(`<div class="rounded border border-red-200 bg-red-50 p-2 text-xs text-red-500">Mermaid Render Error: ${escapeHtml(message)}</div>`);
       }
     };
 
@@ -54,7 +176,7 @@ const Mermaid = ({ chart }) => {
     return () => {
       cancelled = true;
     };
-  }, [chart]);
+  }, [cacheKey, chart, theme]);
 
   return (
     <div

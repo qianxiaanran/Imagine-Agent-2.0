@@ -1,6 +1,8 @@
 import React, { useRef, useState } from "react";
 import {
   AlertTriangle,
+  CheckCircle2,
+  Clock3,
   FileUp,
   Loader2,
   Search,
@@ -38,6 +40,7 @@ const SOURCE_LABEL = {
   ai: "AI语义",
   cross_doc: "跨单据核对",
   anomaly: "异常检测",
+  history: "历史相似",
 };
 
 const escapeRegExp = (v = "") => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -81,6 +84,27 @@ const formatValue = (value) => {
   }
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+};
+
+const formatDateTime = (value) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
+
+const historyVendorStatusLabel = (value = "") => {
+  if (value === "stable") return "稳定主体";
+  if (value === "watch") return "关注主体";
+  if (value === "active") return "活跃主体";
+  if (value === "new") return "新主体";
+  return value || "-";
 };
 
 const BASE_FIELD_SECTIONS = [
@@ -179,6 +203,37 @@ const DOC_FIELD_SECTIONS = {
   ],
 };
 
+const AUDIT_PROGRESS_STEPS = [
+  { key: "upload", label: "任务建档", note: "接收文件并建立案件上下文" },
+  { key: "ocr", label: "文本解析", note: "执行文档解析与 OCR 预处理" },
+  { key: "extract", label: "字段抽取", note: "提取主体、金额、单号与履约要素" },
+  { key: "rules", label: "规则校核", note: "规则、跨单据、ERP 与历史信号联合检查" },
+  { key: "ai", label: "AI 复核", note: "进行语义审查与风险归纳" },
+  { key: "report", label: "报告输出", note: "汇总结论、建议动作与回写状态" },
+];
+
+const AUDIT_STAGE_STEP_MAP = {
+  uploading: "upload",
+  pending: "upload",
+  pending_docs: "upload",
+  ocr: "ocr",
+  extract: "extract",
+  extracting: "extract",
+  rules: "rules",
+  rule_checking: "rules",
+  ai: "ai",
+  ai_review: "ai",
+  review: "report",
+  report: "report",
+  aggregating: "report",
+  review_required: "report",
+  review_optional: "report",
+  ready_for_erp: "report",
+  erp_pending_sync: "report",
+  done: "report",
+  failed: "report",
+};
+
 const AuditWorkspace = ({
   panelStyle,
   panelContent,
@@ -207,6 +262,13 @@ const AuditWorkspace = ({
   const isDone = status === "done";
   const isFailed = status === "failed";
   const progress = Math.max(0, Math.min(100, Number(auditState?.progress) || 0));
+  const auditQueue = Array.isArray(auditFile?.queue) ? auditFile.queue : [];
+  const isBatchUpload = Boolean(auditFile?.isBatch && auditQueue.length > 1);
+  const batchTotalCount = Number(auditFile?.totalCount) || auditQueue.length;
+  const batchCurrentIndex = Number(auditFile?.currentIndex) || (auditQueue.length ? 1 : 0);
+  const batchCompletedCount = Number(auditFile?.completedCount) || auditQueue.filter((item) => item?.status === "done").length;
+  const batchFailedCount = Number(auditFile?.failedCount) || auditQueue.filter((item) => item?.status === "failed").length;
+  const batchQueuedCount = auditQueue.filter((item) => item?.status === "queued").length;
 
   const result = auditState?.result || {};
   const findings = Array.isArray(result.findings) ? result.findings : [];
@@ -233,8 +295,14 @@ const AuditWorkspace = ({
   const caseSummary = result.case_summary || {};
   const caseCompleteness = caseSummary.completeness || {};
   const caseDocuments = Array.isArray(caseSummary.documents) ? caseSummary.documents : [];
+  const documentReports = Array.isArray(caseSummary.document_reports) ? caseSummary.document_reports : [];
+  const isCaseAggregateReport = Boolean(result?.is_case_report || documentReports.length > 0);
   const erpContext = result.erp_context || {};
   const findingBreakdown = result.finding_breakdown || {};
+  const historyIntelligence = result.history_intelligence || {};
+  const similarCases = Array.isArray(historyIntelligence.similar_cases) ? historyIntelligence.similar_cases : [];
+  const duplicateSignals = Array.isArray(historyIntelligence.duplicate_signals) ? historyIntelligence.duplicate_signals : [];
+  const vendorHistory = (historyIntelligence.vendor_history && typeof historyIntelligence.vendor_history === "object") ? historyIntelligence.vendor_history : {};
   const recognizedDocType = String(result.recognized_doc_type || extracted.doc_type || "").toLowerCase();
   const docFieldSections = [...BASE_FIELD_SECTIONS, ...(DOC_FIELD_SECTIONS[recognizedDocType] || [])];
 
@@ -246,13 +314,16 @@ const AuditWorkspace = ({
     })
     .map((item, idx) => {
       const evidence = item?.evidence || {};
+      const docName = typeof item?.document_name === "string" ? item.document_name.trim() : "";
+      const baseTitle = item?.message || "规则命中";
+      const resolvedTitle = docName && !String(baseTitle).startsWith(`${docName}：`) ? `${docName}：${baseTitle}` : baseTitle;
       return {
         id: `${item?.rule_id || item?.type || "risk"}-${idx}`,
         index: idx + 1,
         level: String(item?.severity || "low").toLowerCase(),
         levelLabel: String(item?.severity || "low").toLowerCase() === "high" ? "高风险" : (String(item?.severity || "low").toLowerCase() === "medium" ? "中风险" : "低风险"),
         source: SOURCE_LABEL[String(item?.source || "rule").toLowerCase()] || "风险项",
-        title: item?.message || "规则命中",
+        title: resolvedTitle,
         reason: item?.reason || "",
         suggestion: item?.suggestion || "",
         confidence: confidenceText(item?.confidence),
@@ -341,19 +412,129 @@ const AuditWorkspace = ({
       highlight: formatValue(erpContext.expected_vendor),
     },
   ];
-  const reportRows = [...fieldChecks, ...erpRows, ...caseRows];
+  const historyRows = [
+    {
+      id: "history-duplicate-signals",
+      group: "历史画像",
+      name: "重复预警",
+      value: `${duplicateSignals.length || 0} 项`,
+      requirement: "历史中不应存在重复申请或高置信重复单据",
+      pass: duplicateSignals.length === 0,
+      actual: duplicateSignals.map((item) => item?.message || "").filter(Boolean).join(" / ") || "未发现",
+      expected: "无重复预警",
+      evidence: duplicateSignals.map((item) => `${item?.message || "重复预警"}：${item?.reason || "-"}`).join("\n") || "未发现高置信重复信号",
+      highlight: duplicateSignals[0]?.highlight || "",
+    },
+    {
+      id: "history-similar-cases",
+      group: "历史画像",
+      name: "相似历史单据",
+      value: `${similarCases.length || 0} 条`,
+      requirement: "如存在相似历史单据，应提供可追溯案例",
+      pass: true,
+      actual: similarCases.map((item) => item?.file_name || item?.job_id || "").filter(Boolean).join(" / ") || "未发现",
+      expected: "提供历史相似案例线索",
+      evidence: similarCases.map((item) => `${item?.file_name || item?.job_id || "历史单据"} · 相似度${Math.round((Number(item?.score) || 0) * 100)}% · ${((item?.reasons) || []).join(" / ") || "无"}`).join("\n") || "未发现明显相似案例",
+      highlight: similarCases[0]?.contract_no || similarCases[0]?.invoice_no || similarCases[0]?.request_no || "",
+    },
+    {
+      id: "history-vendor-profile",
+      group: "历史画像",
+      name: "供应商历史画像",
+      value: vendorHistory?.name ? `${vendorHistory.name} · ${historyVendorStatusLabel(vendorHistory.status)}` : "未形成画像",
+      requirement: "历史主体应尽量形成画像",
+      pass: true,
+      actual: vendorHistory?.name || "未识别主体",
+      expected: "主体历史可追溯",
+      evidence: [
+        `主体：${formatValue(vendorHistory?.name)}`,
+        `历史单据：${formatValue(vendorHistory?.total_documents)}`,
+        `平均金额：${formatValue(vendorHistory?.average_amount)}`,
+        `最近出现：${formatDateTime(vendorHistory?.last_seen_at)}`,
+        `风险分布：高${vendorHistory?.risk_breakdown?.high || 0} / 中${vendorHistory?.risk_breakdown?.medium || 0} / 低${vendorHistory?.risk_breakdown?.low || 0}`,
+      ].join("\n"),
+      highlight: vendorHistory?.name || "",
+    },
+  ];
+  const reportRows = [...fieldChecks, ...erpRows, ...caseRows, ...historyRows];
   const effectiveReportId = selectedReportId || reportRows[0]?.id || "";
   const selectedReport = reportRows.find((r) => r.id === effectiveReportId) || null;
   const previewText = [result.summary, ...sortedFindings.slice(0, 8).map((f) => f?.message)].filter(Boolean).join("\n");
   const reportSummaryCards = [
+    ...(isCaseAggregateReport ? [{
+      label: "文档结论",
+      value: `${documentReports.filter((item) => String(item?.status || "").toLowerCase() === "done").length}/${documentReports.length || caseDocuments.length || 0}`,
+      hint: `失败 ${caseSummary?.failed_count || 0} / 待完成 ${caseSummary?.pending_count || 0}`,
+    }] : []),
     { label: "审单分数", value: formatValue(result.audit_score), hint: "综合规则、跨单据与AI语义" },
     { label: "风险分布", value: `高${findingBreakdown?.by_severity?.high || 0} / 中${findingBreakdown?.by_severity?.medium || 0} / 低${findingBreakdown?.by_severity?.low || 0}`, hint: "按严重级别汇总" },
     { label: "字段提取", value: `${fieldChecks.filter((item) => item.pass).length}/${fieldChecks.length}`, hint: "当前页面可核对字段" },
     { label: "ERP检查", value: `${erpRows.filter((item) => item.pass).length}/${erpRows.length}`, hint: "规则与ERP回写前校验" },
+    { label: "相似案例", value: `${similarCases.length || 0}`, hint: duplicateSignals.length > 0 ? `重复预警 ${duplicateSignals.length} 项` : "历史相似单据检索" },
   ];
 
   const widthClass = fullWidth ? "md:w-full md:border-r-0" : "md:w-1/2 md:border-r";
-  const workflow = String(result.workflow_state || auditState?.workflow_state || status || "idle");
+  const workflow = String(result.workflow_state || auditState?.workflow_state || status || "idle").toLowerCase();
+  const workflowLabelMap = {
+    idle: "待处理",
+    uploading: "文件上传中",
+    pending: "排队中",
+    pending_docs: "待补件",
+    ocr: "文本解析中",
+    extract: "字段抽取中",
+    extracting: "字段抽取中",
+    rules: "规则校核中",
+    rule_checking: "规则校核中",
+    ai: "AI复核中",
+    ai_review: "AI复核中",
+    review: "结果汇总中",
+    report: "报告输出中",
+    aggregating: "报告输出中",
+    review_required: "需人工复核",
+    review_optional: "建议抽检",
+    ready_for_erp: "可回写ERP",
+    erp_pending_sync: "ERP同步中",
+    done: "已完成",
+    failed: "失败",
+  };
+  const workflowLabel = workflowLabelMap[workflow] || workflow || "待处理";
+  const selectedDocTypeLabel = (docTypes || []).find((item) => item.value === docType)?.label || "自动识别";
+  const modelLabel = auditModelBackend === "cloud" ? "云端审单" : "本地审单";
+  const progressFallbackKey = progress < 10
+    ? "upload"
+    : progress < 30
+      ? "ocr"
+      : progress < 55
+        ? "extract"
+        : progress < 78
+          ? "rules"
+          : progress < 94
+            ? "ai"
+            : "report";
+  const activeProgressKey = AUDIT_STAGE_STEP_MAP[String(auditState?.stage || workflow || status).toLowerCase()] || progressFallbackKey;
+  const activeProgressIndex = Math.max(0, AUDIT_PROGRESS_STEPS.findIndex((item) => item.key === activeProgressKey));
+  const currentProgressStep = AUDIT_PROGRESS_STEPS[activeProgressIndex] || AUDIT_PROGRESS_STEPS[0];
+  const progressHeadline = status === "uploading"
+    ? "正在接收文件并创建审单任务"
+    : (status === "pending"
+      ? "任务已进入队列，正在等待审单资源"
+      : `${currentProgressStep.label}中`);
+  const progressSubline = workflow === "pending_docs"
+    ? "系统会先聚合案件上下文，再进入多单据核对。"
+    : currentProgressStep.note;
+  const progressMetaCards = [
+    ...(isBatchUpload ? [{ label: "当前批次", value: `第 ${batchCurrentIndex}/${batchTotalCount} 份` }] : []),
+    { label: "当前文件", value: auditFile?.name || "等待上传" },
+    { label: "单据类型", value: selectedDocTypeLabel },
+    { label: "审单模型", value: modelLabel },
+    { label: "工作流", value: workflowLabel },
+  ];
+  const progressSideNotes = [
+    workflow === "pending_docs" ? "若是贸易案件，建议先上传合同，再补票据和付款文件。" : "",
+    isBatchUpload ? `本批次已完成 ${batchCompletedCount} 份，待处理 ${batchQueuedCount} 份${batchFailedCount > 0 ? `，失败 ${batchFailedCount} 份` : ""}。` : "",
+    duplicateSignals.length > 0 ? `已提前发现 ${duplicateSignals.length} 项历史重复信号。` : "",
+    auditState?.caseId ? `当前 Case：${auditState.caseId}` : "",
+  ].filter(Boolean);
 
   return (
     <div className={`w-full ${widthClass} flex flex-col flex-shrink-0 border-b md:border-b-0 border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
@@ -362,7 +543,7 @@ const AuditWorkspace = ({
         <h2 className="mt-1 text-2xl md:text-3xl font-black text-slate-900 dark:text-slate-100">AI合同审校与履约风控中台</h2>
         <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">合同上传识别、风险预警、审核报告、溯源分析一体化工作台</div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
-          <span className="px-2 py-1 rounded-full border border-slate-300 dark:border-slate-700 bg-white/85 dark:bg-slate-900 text-slate-700 dark:text-slate-100">流程状态：{workflow}</span>
+          <span className="px-2 py-1 rounded-full border border-slate-300 dark:border-slate-700 bg-white/85 dark:bg-slate-900 text-slate-700 dark:text-slate-100">流程状态：{workflowLabel}</span>
           {isDone && <span className={`px-2 py-1 rounded-full border ${riskClass}`}>{riskLabel}</span>}
           {isBusy && <span className="px-2 py-1 rounded-full border border-cyan-200 text-cyan-700 dark:border-cyan-800 dark:text-cyan-300"><Loader2 size={12} className="inline mr-1 animate-spin" />处理中</span>}
         </div>
@@ -420,10 +601,10 @@ const AuditWorkspace = ({
                 点击整个区域上传审单文件
               </div>
               <div className="mt-1 max-w-md text-sm text-slate-600 dark:text-slate-300">
-                请按顺序上传：先合同，再发票/提单/装箱单，最后付款/报销单据
+                支持一次选择多份文件，系统会按顺序逐份审单：先合同，再发票/提单/装箱单，最后付款/报销单据
               </div>
               <div className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-                支持图片、PDF、Word
+                支持图片、PDF、Word，多选后自动串行提交
               </div>
               <button
                 type="button"
@@ -437,19 +618,132 @@ const AuditWorkspace = ({
                 选择文件
               </button>
               {auditFile && (
-                <span className="mt-3 max-w-full truncate text-xs text-slate-500 dark:text-slate-400">
-                  {auditFile.name} · {auditFile.sizeLabel}
-                </span>
+                <div className="mt-3 w-full max-w-xl space-y-2">
+                  <div className="max-w-full truncate text-xs text-slate-500 dark:text-slate-400">
+                    {isBatchUpload ? `当前处理：${auditFile.name} · ${auditFile.sizeLabel}` : `${auditFile.name} · ${auditFile.sizeLabel}`}
+                  </div>
+                  {auditQueue.length > 0 && (
+                    <div className="flex flex-wrap justify-center gap-2">
+                      {auditQueue.map((item, index) => {
+                        const itemStatus = String(item?.status || "queued").toLowerCase();
+                        const statusClass = itemStatus === "done"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300"
+                          : itemStatus === "failed"
+                            ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+                            : ["uploading", "pending", "running"].includes(itemStatus)
+                              ? "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/50 dark:bg-cyan-950/30 dark:text-cyan-300"
+                              : "border-slate-200 bg-white text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300";
+                        const statusLabel = itemStatus === "done"
+                          ? "已完成"
+                          : itemStatus === "failed"
+                            ? "失败"
+                            : ["uploading", "pending", "running"].includes(itemStatus)
+                              ? "处理中"
+                              : "待处理";
+                        return (
+                          <div key={item?.id || `${item?.name || "file"}-${index}`} className={`max-w-full rounded-full border px-3 py-1 text-[11px] ${statusClass}`}>
+                            <span className="font-medium">{index + 1}. {item?.name || "未命名文件"}</span>
+                            <span className="ml-2 opacity-80">{statusLabel}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               )}
             </div>
-            <input ref={fileInputRef} type="file" className="hidden" accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={onFileSelect} disabled={isBusy} />
+            <input ref={fileInputRef} type="file" className="hidden" multiple accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={onFileSelect} disabled={isBusy} />
           </div>
         </section>
 
         {isBusy && (
-          <section className="rounded-2xl border border-cyan-200 dark:border-cyan-900/60 bg-cyan-50/60 dark:bg-cyan-950/20 p-4">
-            <div className="flex justify-between text-sm text-cyan-800 dark:text-cyan-200"><span>AI 正在执行审单流程</span><span>{progress}%</span></div>
-            <div className="mt-2 h-2 rounded-full bg-cyan-100 dark:bg-cyan-950/60 overflow-hidden"><div className="h-full bg-cyan-500" style={{ width: `${progress}%` }} /></div>
+          <section className="rounded-[28px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-[0_20px_50px_-24px_rgba(15,23,42,0.35)]">
+            <div className="px-4 md:px-5 py-4 border-b border-slate-200 dark:border-slate-800 bg-gradient-to-r from-slate-50 via-white to-cyan-50 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
+              <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.18em] uppercase text-slate-500 dark:text-slate-400">
+                    <Clock3 size={13} />
+                    Live Audit Progress
+                  </div>
+                  <div className="mt-3 flex items-end gap-3">
+                    <div className="text-3xl md:text-4xl font-black text-slate-900 dark:text-slate-100">{Math.round(progress)}%</div>
+                    <div className="pb-1 text-sm font-medium text-slate-700 dark:text-slate-300">{progressHeadline}</div>
+                  </div>
+                  <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{progressSubline}</div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 w-full xl:w-[360px]">
+                  {progressMetaCards.map((card) => (
+                    <div key={card.label} className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-950/60 px-3 py-2">
+                      <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">{card.label}</div>
+                      <div className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100 truncate">{card.value}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="mt-4">
+                <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-400 transition-all duration-500"
+                    style={{ width: `${Math.max(8, progress)}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px]">
+              <div className="p-4 md:p-5">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {AUDIT_PROGRESS_STEPS.map((step, idx) => {
+                    const isComplete = isDone || idx < activeProgressIndex;
+                    const isCurrent = !isDone && idx === activeProgressIndex;
+                    const cardClass = isComplete
+                      ? "border-emerald-200 bg-emerald-50/80 dark:border-emerald-900/60 dark:bg-emerald-950/20"
+                      : (isCurrent
+                        ? "border-cyan-200 bg-cyan-50 dark:border-cyan-800/70 dark:bg-cyan-950/20"
+                        : "border-slate-200 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-950/40");
+                    const dotClass = isComplete
+                      ? "bg-emerald-500 border-emerald-500 text-white"
+                      : (isCurrent
+                        ? "border-cyan-500 text-cyan-600 dark:text-cyan-300"
+                        : "border-slate-300 dark:border-slate-700 text-slate-400 dark:text-slate-500");
+                    return (
+                      <div key={step.key} className={`rounded-2xl border px-3.5 py-3 ${cardClass}`}>
+                        <div className="flex items-start gap-3">
+                          <div className={`w-7 h-7 rounded-full border flex items-center justify-center flex-shrink-0 ${dotClass}`}>
+                            {isComplete ? <CheckCircle2 size={14} /> : <span className="text-[11px] font-semibold">{idx + 1}</span>}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{step.label}</div>
+                            <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{step.note}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <aside className="border-t xl:border-t-0 xl:border-l border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-4 md:p-5 space-y-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">Current Step</div>
+                  <div className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">{currentProgressStep.label}</div>
+                  <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{currentProgressStep.note}</div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">Queue Hint</div>
+                  <div className="mt-1 text-sm text-slate-700 dark:text-slate-300">
+                    {status === "pending" ? "任务已进入队列，后端会自动开始审单并持续回传进度。" : "系统会在阶段完成后自动汇总结论，无需手动刷新。"}
+                  </div>
+                </div>
+                {progressSideNotes.length > 0 && (
+                  <div className="space-y-2">
+                    {progressSideNotes.map((item, idx) => (
+                      <div key={`${item}-${idx}`} className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3.5 py-2.5 text-xs leading-5 text-slate-600 dark:text-slate-300">
+                        {item}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </aside>
+            </div>
           </section>
         )}
 
@@ -502,6 +796,52 @@ const AuditWorkspace = ({
 
                 {module === "report" && (
                   <div className="space-y-4">
+                    {documentReports.length > 0 && (
+                      <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">整包文档摘要</div>
+                            <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">每份单据的结论、风险级别和摘要都会一起展示。</div>
+                          </div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400">Case：{caseSummary?.case_id || auditState?.caseId || "-"}</div>
+                        </div>
+                        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                          {documentReports.map((item, idx) => {
+                            const itemRisk = String(item?.risk_level || "low").toLowerCase();
+                            const itemStatus = String(item?.status || "pending").toLowerCase();
+                            const statusLabel = itemStatus === "done"
+                              ? "已完成"
+                              : itemStatus === "failed"
+                                ? "失败"
+                                : itemStatus === "running"
+                                  ? "处理中"
+                                  : itemStatus === "pending"
+                                    ? "排队中"
+                                    : "待处理";
+                            return (
+                              <div key={`${item?.job_id || item?.file_name || "doc"}-${idx}`} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 space-y-2">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">{item?.file_name || `文档${idx + 1}`}</div>
+                                    <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                      {item?.doc_type_label || item?.doc_type || "-"}{item?.doc_subtype_label ? ` · ${item.doc_subtype_label}` : ""}
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-col items-end gap-1">
+                                    <span className={`px-2 py-0.5 rounded-full border text-[11px] ${riskBadgeClass(itemRisk)}`}>
+                                      {itemRisk === "high" ? "高风险" : itemRisk === "medium" ? "中风险" : "低风险"}
+                                    </span>
+                                    <span className="text-[11px] text-slate-500 dark:text-slate-400">{statusLabel}</span>
+                                  </div>
+                                </div>
+                                <div className="text-xs text-slate-600 dark:text-slate-300">结论：{item?.pass ? "通过" : "待复核"} · 风险项 {item?.findings_count || 0} · 分数 {formatValue(item?.audit_score)}</div>
+                                <div className="text-xs leading-5 text-slate-500 dark:text-slate-400 max-h-[72px] overflow-hidden">{item?.summary || "暂无摘要"}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
                       {reportSummaryCards.map((card) => (
                         <div key={card.label} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 px-4 py-3">
@@ -549,7 +889,7 @@ const AuditWorkspace = ({
                 )}
 
                 {module === "trace" && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
                     <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-slate-50 dark:bg-slate-900/60">
                       <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-2">决策链路</div>
                       <div className="space-y-2 max-h-[320px] overflow-y-auto custom-scrollbar">
@@ -568,6 +908,44 @@ const AuditWorkspace = ({
                         <div>风险分布：高{findingBreakdown?.by_severity?.high || 0} / 中{findingBreakdown?.by_severity?.medium || 0} / 低{findingBreakdown?.by_severity?.low || 0}</div>
                         <div>审查建议：{result.next_action || "建议人工复核"}</div>
                       </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-slate-50 dark:bg-slate-900/60">
+                      <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-2">历史相似单据</div>
+                      <div className="space-y-2 max-h-[320px] overflow-y-auto custom-scrollbar">
+                        {similarCases.map((item, idx) => (
+                          <div key={`${item?.job_id || "history"}-${idx}`} className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-xs font-medium text-slate-900 dark:text-slate-100 truncate">{item?.file_name || item?.job_id || "历史单据"}</div>
+                              <span className="text-[11px] text-cyan-700 dark:text-cyan-300">{Math.round((Number(item?.score) || 0) * 100)}%</span>
+                            </div>
+                            <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{item?.doc_type_label || item?.doc_type || "-"}</div>
+                            <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">{((item?.reasons) || []).join(" / ") || "暂无相似原因"}</div>
+                            <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">时间：{formatDateTime(item?.created_at)}</div>
+                          </div>
+                        ))}
+                        {similarCases.length === 0 && <div className="text-xs text-slate-400">暂无高置信历史相似单据</div>}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-slate-50 dark:bg-slate-900/60">
+                      <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-2">供应商历史画像</div>
+                      {vendorHistory?.name ? (
+                        <div className="space-y-2 text-xs text-slate-600 dark:text-slate-300">
+                          <div>主体：{vendorHistory.name}</div>
+                          <div>状态：{historyVendorStatusLabel(vendorHistory.status)}</div>
+                          <div>历史单据：{formatValue(vendorHistory.total_documents)}</div>
+                          <div>平均金额：{formatValue(vendorHistory.average_amount)}</div>
+                          <div>最近出现：{formatDateTime(vendorHistory.last_seen_at)}</div>
+                          <div>风险分布：高{vendorHistory?.risk_breakdown?.high || 0} / 中{vendorHistory?.risk_breakdown?.medium || 0} / 低{vendorHistory?.risk_breakdown?.low || 0}</div>
+                          <div className="pt-1 space-y-1">
+                            {(vendorHistory?.recent_jobs || []).map((item, idx) => (
+                              <div key={`${item?.job_id || "recent"}-${idx}`} className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-3 py-2">
+                                <div className="text-[11px] font-medium text-slate-900 dark:text-slate-100 truncate">{item?.file_name || item?.job_id || "历史单据"}</div>
+                                <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{item?.doc_type_label || item?.doc_type || "-"} · {formatDateTime(item?.created_at)}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : <div className="text-xs text-slate-400">当前主体历史较少，尚未形成稳定画像</div>}
                     </div>
                   </div>
                 )}
