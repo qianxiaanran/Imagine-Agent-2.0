@@ -20,7 +20,6 @@ backoff==2.2.1
 bce-python-sdk==0.9.53
 beautifulsoup4==4.14.3
 blinker==1.9.0
-Brotli==1.1.0
 cachetools==6.2.2
 certifi==2025.11.12
 cffi==2.0.0
