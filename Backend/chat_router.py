@@ -1302,7 +1302,7 @@ def _normalize_weather_city_name(text: Optional[str], default: str = "") -> str:
 
     city = urllib.parse.unquote(raw)
     city = re.sub(
-        r"(今天|今日|明天|后天|昨天|昨日|今晚|今早|今晨|当前|现在|实时|最新|最近|这几天|这两天|本周|下周|周末|天天|当天)",
+        r"(今天|今日|明天|后天|昨天|昨日|今晚|今早|今晨|当前|现在|实时|最新|最近|这几天|这两天|本周|下周|周末|(?:下|本|这)?周[一二三四五六日天]|(?:下|本|这)?星期[一二三四五六日天]|(?:下|本|这)?礼拜[一二三四五六日天]|天天|当天)",
         " ",
         city,
     )
@@ -1346,6 +1346,39 @@ _WEATHER_DAY_ALIASES = {
     "昨日": "昨天",
 }
 
+_WEATHER_WEEKDAY_CHAR_MAP = {
+    "一": "一",
+    "二": "二",
+    "三": "三",
+    "四": "四",
+    "五": "五",
+    "六": "六",
+    "日": "日",
+    "天": "日",
+}
+
+
+def _normalize_weather_day_label(text: Optional[str], default: str = "") -> str:
+    raw = str(text or "")
+    picked: Optional[Tuple[int, int, str]] = None
+    for token, normalized in _WEATHER_DAY_ALIASES.items():
+        pos = raw.rfind(token)
+        if pos < 0:
+            continue
+        candidate = (pos, len(token), normalized)
+        if picked is None or candidate[0] > picked[0] or (candidate[0] == picked[0] and candidate[1] > picked[1]):
+            picked = candidate
+
+    weekday_picked: Optional[Tuple[int, str]] = None
+    for match in re.finditer(r"(?:下|本|这)?(?:周|星期|礼拜)([一二三四五六日天])", raw):
+        weekday_picked = (match.start(), _WEATHER_WEEKDAY_CHAR_MAP.get(match.group(1), match.group(1)))
+
+    if weekday_picked and (picked is None or weekday_picked[0] >= picked[0]):
+        return f"周{weekday_picked[1]}"
+    if picked:
+        return picked[2]
+    return default
+
 _EXCHANGE_CURRENCY_ALIASES = [
     ("CNY", "人民币", ("人民币", "cny", "rmb", "中国人民币")),
     ("JPY", "日元", ("日元", "日币", "jpy")),
@@ -1364,18 +1397,7 @@ _EXCHANGE_CURRENCY_ALIASES = [
 
 
 def _detect_weather_target_day(text: Optional[str], default: str = "今天") -> str:
-    raw = str(text or "")
-    picked: Optional[Tuple[int, int, str]] = None
-    for token, normalized in _WEATHER_DAY_ALIASES.items():
-        pos = raw.rfind(token)
-        if pos < 0:
-            continue
-        candidate = (pos, len(token), normalized)
-        if picked is None or candidate[0] > picked[0] or (candidate[0] == picked[0] and candidate[1] > picked[1]):
-            picked = candidate
-    if picked:
-        return picked[2]
-    return default
+    return _normalize_weather_day_label(text, default=default)
 
 
 def _looks_like_exchange_rate_query(text: Optional[str]) -> bool:
@@ -3574,10 +3596,7 @@ def tool_get_weather(city_name: str) -> List[dict]:
                 for idx, day_node in enumerate(day_nodes[:7]):
                     heading = day_node.select_one("h1")
                     label_text = heading.get_text(" ", strip=True) if heading else ""
-                    day_label = ""
-                    for token, normalized in _WEATHER_DAY_ALIASES.items():
-                        if token in label_text:
-                            day_label = normalized
+                    day_label = _normalize_weather_day_label(label_text, default="")
                     if not day_label:
                         day_label = label_text or ("今天" if idx == 0 else "")
                     if not day_label:

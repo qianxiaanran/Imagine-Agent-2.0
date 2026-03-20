@@ -2045,6 +2045,7 @@ def _prepare_extraction_text(raw_text: str) -> str:
     prepared = re.sub(r"(签订时间[:：]?\s*(?:19|20)\d{2}\s*-\s*\d)\s*\n\s*(\d\s*-\s*\d{1,2})", r"\1\2", prepared)
     prepared = re.sub(r"(预计付款日期\s*(?:19|20)\d{2}\s*-\s*\d)\s*\n\s*(\d\s*-\s*\d{1,2})", r"\1\2", prepared)
     prepared = re.sub(r"(要求付款日期\s*(?:19|20)\d{2}\s*-\s*\d)\s*\n\s*(\d\s*-\s*\d{1,2})", r"\1\2", prepared)
+    prepared = re.sub(r"(?<=\d\.)\s*\n\s*(?=\d)", "", prepared)
     prepared = re.sub(r"(?<=\d)\s*\n\s*(?=\d)", "", prepared)
     prepared = re.sub(r"[ \t]+", " ", prepared)
     return prepared
@@ -2061,31 +2062,142 @@ def _extract_text_by_patterns(text: str, patterns: List[str], flags: int = re.IG
     return ""
 
 
-def _extract_contract_table_amounts(text: str) -> Dict[str, float]:
+CONTRACT_QUANTITY_UNIT_PATTERN = r"(pcs|piece(?:s)?|条|件|kg|公斤|千克|套|箱|个|双|台|米|吨|只)"
+
+
+def _normalize_quantity_unit(value: Any) -> str:
+    text = _safe_text(value).lower()
+    if not text:
+        return ""
+    mapping = {
+        "piece": "pcs",
+        "pieces": "pcs",
+        "公斤": "kg",
+        "千克": "kg",
+    }
+    return mapping.get(text, text)
+
+
+def _extract_contract_line_item(text: str) -> Dict[str, Any]:
     source = text or ""
     if not source:
         return {}
 
     lines = [line.strip() for line in source.splitlines() if line.strip()]
+    if not lines:
+        return {}
+
+    def _clean_commodity_name(value: str) -> str:
+        candidate = _safe_text(value)
+        if not candidate:
+            return ""
+        candidate = re.sub(r"\s{2,}", " ", candidate)
+        candidate = re.sub(r"\s+\d[\d,]*(?:\.\d+)?$", "", candidate).strip(" ,，.:：")
+        if len(candidate) < 2 or len(candidate) > 40:
+            return ""
+        if _looks_like_header_noise(candidate):
+            return ""
+        return candidate
+
+    def _parse_chinese_row(row_head: str, row_tail: str) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        commodity_match = re.search(r"^([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9()（）/& -]{1,40}?)(?=\s+\d)", row_head)
+        commodity_name = _clean_commodity_name(commodity_match.group(1) if commodity_match else re.split(r"\s{2,}", row_head, maxsplit=1)[0])
+        if commodity_name:
+            values["commodity_name"] = commodity_name
+
+        merged = f"{row_head} {row_tail}".strip()
+        unit_match = re.search(
+            rf"(\d+(?:\.\d+)?)\s*{CONTRACT_QUANTITY_UNIT_PATTERN}",
+            merged,
+            flags=re.IGNORECASE,
+        )
+        if unit_match:
+            quantity_value = _normalize_amount_value(unit_match.group(1))
+            if quantity_value is not None:
+                values["quantity"] = quantity_value
+            values["quantity_unit"] = _normalize_quantity_unit(unit_match.group(2))
+
+        row_amounts = _extract_amounts(merged)
+        quantity_value = _safe_float(values.get("quantity"))
+        if row_amounts and quantity_value is not None:
+            unit_price = next((amt for amt in row_amounts if abs(amt - quantity_value) > 1e-6), None)
+            if unit_price is not None and unit_price > 0:
+                values["unit_price"] = unit_price
+        if len(row_amounts) >= 5:
+            values["total_amount"] = row_amounts[-1]
+            values["tax_amount"] = row_amounts[-2]
+            values["vat_amount"] = row_amounts[-2]
+        return values
+
+    def _parse_english_row(block: str) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        match = re.search(
+            rf"([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9()（）/& -]{{1,40}}?)\s+(\d+(?:\.\d+)?)\s*{CONTRACT_QUANTITY_UNIT_PATTERN}",
+            block,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            commodity_name = _clean_commodity_name(match.group(1))
+            if commodity_name:
+                values["commodity_name"] = commodity_name
+            quantity_value = _normalize_amount_value(match.group(2))
+            if quantity_value is not None:
+                values["quantity"] = quantity_value
+            values["quantity_unit"] = _normalize_quantity_unit(match.group(3))
+
+        row_amounts = _extract_amounts(block)
+        if len(row_amounts) >= 2:
+            values["unit_price"] = row_amounts[1]
+        if len(row_amounts) >= 3:
+            values["total_amount"] = row_amounts[-1]
+        return values
+
+    for idx, line in enumerate(lines):
+        upper_line = line.upper()
+        if "品名" in line and "数量" in line and "金额" in line and ("单位" in line or "单价" in line):
+            row_head = _safe_text(lines[idx + 1]) if idx + 1 < len(lines) else ""
+            row_tail = _safe_text(lines[idx + 2]) if idx + 2 < len(lines) else ""
+            return _parse_chinese_row(row_head, row_tail)
+        if "SPECIFICATION" in upper_line and "QUANTITY" in upper_line and "AMOUNT" in upper_line:
+            block = " ".join(lines[idx + 1 : idx + 4])
+            return _parse_english_row(block)
+
+    return {}
+
+
+def _extract_contract_table_amounts(text: str) -> Dict[str, Any]:
+    source = text or ""
+    if not source:
+        return {}
+
+    lines = [line.strip() for line in source.splitlines() if line.strip()]
+    line_item = _extract_contract_line_item(source)
+    if line_item:
+        return line_item
 
     for idx, line in enumerate(lines):
         if "增值税额" in line and ("价税合计" in line or "价税总计" in line or "合计" in line):
             for candidate in lines[idx + 1 : idx + 4]:
                 row_amounts = _extract_amounts(candidate)
                 if len(row_amounts) >= 5:
-                    return {
+                    values: Dict[str, Any] = {
                         "unit_price": row_amounts[0],
                         "quantity": row_amounts[1],
                         "tax_amount": row_amounts[-2],
                         "vat_amount": row_amounts[-2],
                         "total_amount": row_amounts[-1],
                     }
+                    values.update({k: v for k, v in line_item.items() if v not in (None, "")})
+                    return values
                 if len(row_amounts) >= 4:
-                    return {
+                    values = {
                         "tax_amount": row_amounts[-2],
                         "vat_amount": row_amounts[-2],
                         "total_amount": row_amounts[-1],
                     }
+                    values.update({k: v for k, v in line_item.items() if v not in (None, "")})
+                    return values
 
     for idx, line in enumerate(lines):
         upper_line = line.upper()
@@ -2093,16 +2205,17 @@ def _extract_contract_table_amounts(text: str) -> Dict[str, float]:
             for candidate in lines[idx + 1 : idx + 4]:
                 row_amounts = _extract_amounts(candidate)
                 if len(row_amounts) >= 3:
-                    values: Dict[str, float] = {
+                    values: Dict[str, Any] = {
                         "total_amount": row_amounts[-1],
                     }
                     if len(row_amounts) >= 2:
                         values["unit_price"] = row_amounts[-2]
                     if len(row_amounts) >= 3:
                         values["quantity"] = row_amounts[0]
+                    values.update({k: v for k, v in line_item.items() if v not in (None, "")})
                     return values
 
-    return {}
+    return line_item
 
 
 def _normalize_contract_reference(value: Any) -> Optional[str]:
@@ -2368,6 +2481,14 @@ def _post_process_fields(fields: Dict[str, Any], raw_text: str) -> Dict[str, Any
             quantity = contract_table_amounts.get("quantity")
             if quantity is not None and quantity > 0:
                 normalized["quantity"] = quantity
+        if not _safe_text(normalized.get("quantity_unit")):
+            quantity_unit = _normalize_quantity_unit(contract_table_amounts.get("quantity_unit"))
+            if quantity_unit:
+                normalized["quantity_unit"] = quantity_unit
+        if not _safe_text(normalized.get("commodity_name")):
+            commodity_name = _safe_text(contract_table_amounts.get("commodity_name")) or _extract_contract_commodity_name(prepared_text)
+            if commodity_name:
+                normalized["commodity_name"] = commodity_name
         if _safe_float(normalized.get("unit_price")) in (None, 0):
             unit_price = contract_table_amounts.get("unit_price")
             if unit_price is not None and unit_price > 0:
@@ -3831,6 +3952,8 @@ def _run_ai_review(
 4) findings 要简洁、可核验、有证据。
 5) 如果 high_risk_rule 为 true，除非证据充分，否则 pass 必须为 false。
 6) summary、message、reason、suggestion、action 必须使用简体中文（保留编号/金额等原始值）。
+7) 如果提取字段里已经有 commodity_name、quantity、quantity_unit、contract_no，就不要再把这些字段说成“缺失”。
+8) 如果确定性规则结果里没有“字段缺失”类命中，不要凭主观猜测重复生成同类缺失结论。
 
 单据类型：{doc_type}
 是否命中高风险规则：{high_risk_rule}
