@@ -448,20 +448,36 @@ const buildConversationPath = (sessionId) => {
 };
 
 const PRESENTON_PROXY_PREFIX = '/api/presentation/presenton/proxy';
+const PRESENTON_EMBED_PREFIX = '/api/presentation/presenton/embed';
 const PRESENTON_LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '0.0.0.0', 'host.docker.internal']);
+
+const buildPresentonEmbedUrl = (targetUrl) => {
+    const value = String(targetUrl || '').trim();
+    if (!value) return '';
+    if (value.startsWith(PRESENTON_EMBED_PREFIX)) {
+        return value;
+    }
+    return `${PRESENTON_EMBED_PREFIX}?target=${encodeURIComponent(value)}`;
+};
 
 const normalizePresentonEditUrl = (rawUrl) => {
     const value = String(rawUrl || '').trim();
     if (!value) return '';
-    if (value.startsWith(PRESENTON_PROXY_PREFIX) || value.startsWith('/')) {
+    if (value.startsWith(PRESENTON_EMBED_PREFIX)) {
         return value;
+    }
+    if (value.startsWith(PRESENTON_PROXY_PREFIX)) {
+        return buildPresentonEmbedUrl(value);
+    }
+    if (value.startsWith('/')) {
+        return buildPresentonEmbedUrl(value);
     }
     try {
         const parsed = new URL(value);
         if (!PRESENTON_LOCAL_HOSTS.has((parsed.hostname || '').toLowerCase())) {
             return value;
         }
-        return `${PRESENTON_PROXY_PREFIX}${parsed.pathname}${parsed.search || ''}`;
+        return buildPresentonEmbedUrl(`${PRESENTON_PROXY_PREFIX}${parsed.pathname}${parsed.search || ''}`);
     } catch {
         return value;
     }
@@ -1139,7 +1155,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     analysisInput: "",
     documentName: "",
     requireMetrics: getStandalonePptContentFocusConfig(STANDALONE_PPT_DEFAULT_CONTENT_FOCUS).emphasizeMetrics,
-    includeImages: false,
+    includeImages: true,
     template: 'general',
   });
   const [standalonePptOutline, setStandalonePptOutline] = useState(null);
@@ -3304,7 +3320,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             contentFocus: restoredFocus.key,
             requireMetrics: !!restoredFocus.emphasizeMetrics,
             template: restoredTemplate,
-            includeImages: false,
+            includeImages: true,
           }));
           setStandalonePptOutline(restoredOutline);
           setStandalonePptResult(restoredResult);
@@ -5319,17 +5335,20 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               .filter((item) => !STANDALONE_PPT_AGENDA_TITLE_RE.test(item))
               .slice(0, 5);
 
-          const bulletCandidates = slideRole === "agenda" && agendaPoints.length
-              ? agendaPoints.map((item, orderIdx) => `第 ${orderIdx + 1} 部分：${item}`)
-              : expandedPoints.slice();
+            const bulletCandidates = slideRole === "agenda" && agendaPoints.length
+                ? agendaPoints.map((item, orderIdx) => `第 ${orderIdx + 1} 部分：${item}`)
+                : expandedPoints.slice();
+            const shouldBackfillContext = points.length < 2 && slideRole !== "cover" && slideRole !== "agenda";
 
-          if (notes && bulletCandidates.length < 6) {
-              bulletCandidates.push(notes);
-          }
-          fallbackSourceHints.forEach((item) => {
-              if (bulletCandidates.length >= 6) return;
-              bulletCandidates.push(item);
-          });
+            if (shouldBackfillContext && notes && bulletCandidates.length < 6) {
+                bulletCandidates.push(notes);
+            }
+            if (shouldBackfillContext) {
+                fallbackSourceHints.forEach((item) => {
+                    if (bulletCandidates.length >= 6) return;
+                    bulletCandidates.push(item);
+                });
+            }
 
           const normalizedBullets = Array.from(new Set(
               bulletCandidates
@@ -5606,7 +5625,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setStandalonePptForm((prev) => ({
           ...prev,
           template: selectedId,
-          includeImages: false,
+          includeImages: true,
       }));
       setStandaloneTemplateCatalog((prev) => {
           const existing = Array.isArray(prev) ? prev : [];
@@ -5640,8 +5659,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const handleGeneratePresentonOutline = async () => {
       if (isOutlineGenerating || isPresentonGenerating) return;
-      setStandalonePptForm((prev) => (prev.includeImages ? { ...prev, includeImages: false } : prev));
-      const resolved = resolveStandalonePptInput();
+        const resolved = resolveStandalonePptInput();
       if (resolved.error) {
           setStandalonePptResult({ error: resolved.error });
           return null;
@@ -5710,9 +5728,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               n_slides: resolved.slideCount,
               language: "Chinese",
               require_metrics: !!standalonePptForm.requireMetrics,
-              include_images: false,
-              model_backend: llmBackend === "cloud" ? "cloud" : "local",
-          });
+                include_images: !!standalonePptForm.includeImages,
+                model_backend: llmBackend === "cloud" ? "cloud" : "local",
+            });
 
           const normalizedOutline = normalizeOutline(outlineResp?.outline, resolved.typedInput || resolved.documentName || "业务汇报");
           const outlineData = {
@@ -5843,10 +5861,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               verbosity: "standard",
               provider: "cloud_async",
               slides_markdown: slidesMarkdown,
-              image_type: "none",
-              web_search: false,
-              include_title_slide: false,
-              include_table_of_contents: false,
+                include_images: !!standalonePptForm.includeImages,
+                web_search: false,
+                include_title_slide: false,
+                include_table_of_contents: false,
               allow_access_to_user_info: false,
               trigger_webhook: false,
           };
@@ -5906,8 +5924,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const handleGeneratePresentonPpt = async () => {
       if (isPresentonGenerating || isOutlineGenerating) return;
-      setStandalonePptForm((prev) => (prev.includeImages ? { ...prev, includeImages: false } : prev));
-      const resolved = resolveStandalonePptInput();
+        const resolved = resolveStandalonePptInput();
       if (resolved.error) {
           setStandalonePptResult({ error: resolved.error });
           return;
@@ -6267,7 +6284,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           analysisInput: "",
           documentName: "",
           requireMetrics: !!defaultFocus.emphasizeMetrics,
-          includeImages: false,
+           includeImages: true,
           template: 'general',
       };
   };

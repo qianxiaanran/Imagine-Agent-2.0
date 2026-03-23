@@ -16,7 +16,7 @@ from urllib.parse import quote, unquote, urlparse
 import requests
 from requests.adapters import HTTPAdapter
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from admin_utils import ROLE_ADMIN, require_role
@@ -134,7 +134,7 @@ PROXY_CACHE_RESPONSE_HEADERS = {
     "last-modified",
     "expires",
 }
-PROXY_REWRITE_CONTENT_TYPES = ("text/html", "text/css")
+PROXY_REWRITE_CONTENT_TYPES = ("text/html", "text/css", "application/javascript", "text/javascript")
 LOCAL_HOST_CANDIDATES = {"127.0.0.1", "localhost", "0.0.0.0", "host.docker.internal"}
 ROOT_RELATIVE_REF_RE = re.compile(
     rf"([\"'])/(?!/|{re.escape(PRESENTON_PROXY_PREFIX.lstrip('/'))})(?=[A-Za-z0-9._~%?-])([^\"']*)"
@@ -233,7 +233,7 @@ class PresentonGenerateRequest(BaseModel):
     export_as: str = Field(default="pptx", max_length=16)
     tone: str = Field(default="professional", max_length=32)
     verbosity: str = Field(default="standard", max_length=32)
-    image_type: Optional[str] = Field(default="none", max_length=32)
+    image_type: Optional[str] = Field(default=None, max_length=32)
     content_generation: Optional[str] = Field(default=None, max_length=32)
     markdown_emphasis: Optional[str] = Field(default=None, max_length=32)
     web_search: Optional[bool] = None
@@ -265,6 +265,26 @@ class PresentonTemplateImportRequest(BaseModel):
     template_id: str = Field(..., min_length=1, max_length=120)
     alias: Optional[str] = Field(default=None, max_length=120)
     description: Optional[str] = Field(default=None, max_length=300)
+
+
+def _normalize_requested_image_type(image_type: Optional[str]) -> str:
+    value = str(image_type or "").strip().lower()
+    if value in {"", "off", "false", "disabled", "0", "no"}:
+        return ""
+    return value
+
+
+def _images_enabled(req: PresentonGenerateRequest) -> bool:
+    resolved_image_type = _normalize_requested_image_type(req.image_type)
+    if resolved_image_type == "none":
+        return False
+    if resolved_image_type:
+        return True
+    return bool(getattr(req, "include_images", False))
+
+
+def _prefer_no_image(req: PresentonGenerateRequest) -> bool:
+    return not _images_enabled(req)
 
 
 OUTLINE_CONTENT_FOCUS_CONFIG: Dict[str, Dict[str, Any]] = {
@@ -381,7 +401,7 @@ def _supports_ordered_pipeline_template(raw_template: Any, prefer_no_image: bool
 def _ordered_pipeline_skip_reason(req: PresentonGenerateRequest) -> Optional[str]:
     if not isinstance(req.slides_markdown, list) or not req.slides_markdown:
         return "missing_slide_markdown"
-    prefer_no_image = str(req.image_type or "none").strip().lower() == "none"
+    prefer_no_image = _prefer_no_image(req)
     if not _supports_ordered_pipeline_template(req.template, prefer_no_image=prefer_no_image):
         return "compatibility_policy"
     cooldown = _get_ordered_template_cooldown(req.template, prefer_no_image)
@@ -808,11 +828,18 @@ def _build_presenton_proxy_url(target_url: Optional[str], base_url: str) -> Opti
     return f"{PRESENTON_PROXY_PREFIX}{path}{query}"
 
 
+def _build_presenton_embed_url(target_url: Optional[str], base_url: str) -> Optional[str]:
+    proxied_target = _build_presenton_proxy_url(target_url, base_url)
+    if not proxied_target:
+        return None
+    return f"/api/presentation/presenton/embed?target={quote(proxied_target, safe='')}"
+
+
 def _decorate_result_urls(result: Dict[str, Any], base_url: str) -> Dict[str, Any]:
     raw_download = result.get("download_url")
     raw_edit = result.get("edit_url")
     proxied_download = _build_download_proxy_url(raw_download)
-    proxied_edit = _build_presenton_proxy_url(raw_edit, base_url)
+    proxied_edit = _build_presenton_embed_url(raw_edit, base_url)
     decorated = dict(result)
     if raw_download:
         decorated["download_url_raw"] = raw_download
@@ -986,9 +1013,28 @@ def _rewrite_presenton_text_payload(content: str, base_url: str, content_type: s
             lambda match: f"{match.group(1)}{PRESENTON_PROXY_PREFIX}/{match.group(2)}",
             rewritten,
         )
+        # Next.js App Router uses assetPrefix to resolve deferred chunk URLs. Keep it on the
+        # proxy prefix so runtime-loaded scripts do not escape to frontend `/_next/*`.
+        rewritten = rewritten.replace(
+            '\\"assetPrefix\\":\\"\\"',
+            f'\\"assetPrefix\\":\\"{PRESENTON_PROXY_PREFIX}\\"',
+        )
+        rewritten = rewritten.replace(
+            '"assetPrefix":""',
+            f'"assetPrefix":"{PRESENTON_PROXY_PREFIX}"',
+        )
         for source_text, target_text in PRESENTON_UI_TRANSLATIONS:
             if source_text in rewritten:
                 rewritten = rewritten.replace(source_text, target_text)
+    elif "javascript" in lowered_content_type:
+        rewritten = rewritten.replace(
+            'd.p="/_next/"',
+            f'd.p="{PRESENTON_PROXY_PREFIX}/_next/"',
+        )
+        rewritten = rewritten.replace(
+            '__webpack_require__.p="/_next/"',
+            f'__webpack_require__.p="{PRESENTON_PROXY_PREFIX}/_next/"',
+        )
     elif "text/css" in lowered_content_type:
         rewritten = ROOT_RELATIVE_REF_RE.sub(
             lambda match: f"{match.group(1)}{PRESENTON_PROXY_PREFIX}/{match.group(2)}",
@@ -1123,6 +1169,23 @@ def _inject_presenton_proxy_bootstrap_script(html: str) -> str:
     window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {{
       return originalOpen.call(this, method, rewriteUrl(url), ...rest);
     }};
+  }}
+
+  if (window.EventSource) {{
+    const OriginalEventSource = window.EventSource;
+    const ProxyEventSource = function(url, config) {{
+      return new OriginalEventSource(rewriteUrl(url), config);
+    }};
+    try {{
+      ProxyEventSource.prototype = OriginalEventSource.prototype;
+      Object.setPrototypeOf(ProxyEventSource, OriginalEventSource);
+      ProxyEventSource.CONNECTING = OriginalEventSource.CONNECTING;
+      ProxyEventSource.OPEN = OriginalEventSource.OPEN;
+      ProxyEventSource.CLOSED = OriginalEventSource.CLOSED;
+    }} catch (_error) {{
+      // Some browsers limit constructor mutation; the wrapper still works without these assignments.
+    }}
+    window.EventSource = ProxyEventSource;
   }}
 
   if (window.history && window.history.pushState) {{
@@ -1697,8 +1760,12 @@ def _score_layout_candidate(
     if prefer_no_image and _layout_requires_image(layout):
         score -= 10
     if wants_cover and any(token in meta_text for token in ("intro", "title", "cover", "pitchdeck")):
-        score += 15
-    if wants_toc and any(token in meta_text for token in ("table-of-contents", "contents", "agenda", "sections", "list")):
+        score += 24
+    if wants_cover and any(token in meta_text for token in ("chart", "metric", "table", "bullet", "grid")):
+        score -= 18
+    if wants_toc and any(token in meta_text for token in ("table-of-contents", "contents")):
+        score -= 16
+    if wants_toc and any(token in meta_text for token in ("agenda", "sections", "list")):
         score += 18
     if wants_metrics and any(token in meta_text for token in ("chart", "metric", "table", "stats", "data")):
         score += 12
@@ -1731,7 +1798,7 @@ def _build_ordered_layout_payload(req: PresentonGenerateRequest, layout_payload:
     if not isinstance(source_layouts, list) or not source_layouts:
         raise HTTPException(status_code=502, detail="Presenton template layout is empty")
 
-    prefer_no_image = str(req.image_type or "none").strip().lower() == "none"
+    prefer_no_image = _prefer_no_image(req)
     image_safe_layouts = [item for item in source_layouts if isinstance(item, dict) and not _layout_requires_image(item)]
     all_layouts = [item for item in source_layouts if isinstance(item, dict)]
     used_counts: Dict[str, int] = {}
@@ -1739,7 +1806,7 @@ def _build_ordered_layout_payload(req: PresentonGenerateRequest, layout_payload:
     previous_layout_id: Optional[str] = None
 
     for index, slide_markdown in enumerate(slides_markdown):
-        pool = image_safe_layouts or all_layouts
+        pool = (image_safe_layouts or all_layouts) if prefer_no_image else all_layouts
         chosen = max(
             pool,
             key=lambda item: _score_layout_candidate(
@@ -2337,9 +2404,8 @@ def _fetch_template_detail_from_presenton(base_url: str, headers: Dict[str, str]
 
 
 def _build_generation_payload(req: PresentonGenerateRequest) -> Dict[str, Any]:
-    resolved_image_type = str(req.image_type or "none").strip().lower()
-    if resolved_image_type in {"", "off", "false", "disabled", "0", "no"}:
-        resolved_image_type = "none"
+    resolved_image_type = _normalize_requested_image_type(req.image_type)
+    images_enabled = _images_enabled(req)
 
     prompt_text = str(req.prompt or "").strip()
 
@@ -2353,21 +2419,23 @@ def _build_generation_payload(req: PresentonGenerateRequest) -> Dict[str, Any]:
         "export_as": req.export_as,
         "tone": req.tone,
         "verbosity": req.verbosity,
-        "image_type": resolved_image_type,
     }
 
-    if resolved_image_type == "none":
+    if not images_enabled:
+        payload["image_type"] = "none"
         payload["web_search"] = False
         payload["include_images"] = False
         payload["enable_images"] = False
         payload["disable_image_generation"] = True
         payload["image_provider"] = "none"
+    elif resolved_image_type:
+        payload["image_type"] = resolved_image_type
 
     if req.content_generation:
         payload["content_generation"] = req.content_generation
     if req.markdown_emphasis:
         payload["markdown_emphasis"] = req.markdown_emphasis
-    if req.web_search is not None and resolved_image_type != "none":
+    if req.web_search is not None and images_enabled:
         payload["web_search"] = bool(req.web_search)
     if req.include_table_of_contents is not None:
         payload["include_table_of_contents"] = bool(req.include_table_of_contents)
@@ -2591,7 +2659,7 @@ def _handoff_ordered_task_to_cloud_async(
     req: PresentonGenerateRequest,
     reason: str,
 ) -> Dict[str, Any]:
-    prefer_no_image = str(req.image_type or "none").strip().lower() == "none"
+    prefer_no_image = _prefer_no_image(req)
     _mark_ordered_template_cooldown(req.template, prefer_no_image, reason)
     handoff_req = _copy_presenton_request(req, prompt=_build_ordered_runtime_prompt(req))
     submit_data = _submit_cloud_async_task(base_url, headers, handoff_req)
@@ -2633,7 +2701,7 @@ def _run_ordered_presenton_task(task_id: str, base_url: str, req: PresentonGener
             "instructions": ordered_runtime_prompt,
             "include_table_of_contents": bool(req.include_table_of_contents),
             "include_title_slide": bool(req.include_title_slide),
-            "web_search": False if str(req.image_type or "none").strip().lower() == "none" else bool(req.web_search),
+                "web_search": False if _prefer_no_image(req) else bool(req.web_search),
         }
         if isinstance(req.files, list) and req.files:
             create_payload["file_paths"] = [str(item).strip() for item in req.files if str(item).strip()]
@@ -2696,7 +2764,7 @@ def _run_ordered_presenton_task(task_id: str, base_url: str, req: PresentonGener
         )
         _clear_ordered_template_cooldown(
             req.template,
-            str(req.image_type or "none").strip().lower() == "none",
+            _prefer_no_image(req),
         )
         _upsert_ordered_task(
             task_id,
@@ -3198,6 +3266,81 @@ def proxy_presenton_download(
     return Response(content=upstream.content, media_type=content_type, headers=headers_out)
 
 
+@router.get("/presenton/embed")
+def render_presenton_embed(
+    target: str,
+):
+    decoded_target = unquote(str(target or "").strip())
+    if not decoded_target.startswith(PRESENTON_PROXY_PREFIX):
+        raise HTTPException(status_code=400, detail="Invalid embed target")
+
+    safe_target = json.dumps(decoded_target, ensure_ascii=False)
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Presenton Embed</title>
+  <style>
+    html, body {{
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #f8fafc;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }}
+    .shell {{
+      position: relative;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+    }}
+    .frame {{
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #ffffff;
+    }}
+    .loading {{
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(180deg, rgba(248,250,252,0.96) 0%, rgba(238,242,255,0.92) 100%);
+      color: #334155;
+      letter-spacing: 0.02em;
+      transition: opacity 180ms ease;
+      z-index: 1;
+    }}
+    .loading.hidden {{
+      opacity: 0;
+      pointer-events: none;
+    }}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="loading" id="loading">正在加载在线编辑器...</div>
+    <iframe class="frame" id="frame" src={safe_target} title="Presenton Embed"></iframe>
+  </div>
+  <script>
+    (function() {{
+      const frame = document.getElementById('frame');
+      const loading = document.getElementById('loading');
+      const hideLoading = () => loading.classList.add('hidden');
+      frame.addEventListener('load', () => {{
+        window.setTimeout(hideLoading, 300);
+      }});
+      window.setTimeout(hideLoading, 8000);
+    }})();
+  </script>
+</body>
+</html>"""
+    return Response(content=html, media_type="text/html; charset=utf-8")
+
+
 @router.api_route("/presenton/proxy/{proxy_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def proxy_presenton_path(
     proxy_path: str,
@@ -3214,6 +3357,7 @@ async def proxy_presenton_path(
     headers = _build_proxy_upstream_headers(request)
     body = await request.body()
     payload = body if body else None
+    expects_event_stream = "text/event-stream" in str(request.headers.get("accept") or "").lower()
 
     try:
         upstream = _PRESENTON_SESSION.request(
@@ -3221,7 +3365,8 @@ async def proxy_presenton_path(
             url=upstream_url,
             headers=headers,
             data=payload,
-            timeout=max(REQUEST_TIMEOUT_SEC, 120),
+            timeout=(10, max(REQUEST_TIMEOUT_SEC, 120)) if expects_event_stream else max(REQUEST_TIMEOUT_SEC, 120),
+            stream=expects_event_stream,
             allow_redirects=False,
         )
     except requests.RequestException as exc:
@@ -3229,6 +3374,27 @@ async def proxy_presenton_path(
 
     upstream_headers = _filter_proxy_response_headers(dict(upstream.headers), resolved_base_url)
     content_type = upstream.headers.get("content-type", "")
+
+    if "text/event-stream" in content_type.lower():
+        def stream_content():
+            try:
+                # SSE needs the first bytes to reach the browser immediately; large chunk sizes can stall forever.
+                for chunk in upstream.iter_content(chunk_size=None):
+                    if chunk:
+                        yield chunk
+            finally:
+                upstream.close()
+
+        stream_headers = {key: value for key, value in upstream_headers.items() if str(key).lower() != "content-type"}
+        stream_headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        stream_headers["X-Accel-Buffering"] = "no"
+        return StreamingResponse(
+            stream_content(),
+            status_code=upstream.status_code,
+            headers=stream_headers,
+            media_type=content_type.split(";", 1)[0].strip() or "text/event-stream",
+        )
+
     content = upstream.content
 
     if any(token in content_type.lower() for token in PROXY_REWRITE_CONTENT_TYPES):

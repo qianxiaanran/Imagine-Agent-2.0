@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Bot, Menu, X, Sun, Moon, ChevronRight, ArrowRight,
+  Bot, Menu, X, Sun, Moon, ArrowRight,
   Database, FileText, LayoutTemplate, Search, Cpu, Globe, Lock, ShieldCheck, Mic, Sparkles, ClipboardCheck, Share2, Rocket
 } from 'lucide-react';
 import Button from '../components/Button';
@@ -132,15 +132,6 @@ const LandingPage = ({ onOpenLogin }) => {
         <div className="absolute top-60 left-0 w-[400px] h-[400px] bg-purple-50/50 dark:bg-purple-900/20 rounded-full blur-3xl -z-10 opacity-60 animate-pulse-soft" style={{animationDelay: '1s'}}></div>
 
         <div className="max-w-5xl mx-auto px-4 text-center relative z-10">
-          <Reveal>
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-xs font-semibold text-gray-600 dark:text-gray-300 mb-8 shadow-sm hover:border-gray-300 dark:hover:border-gray-600 transition-colors cursor-pointer">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-              </span>
-              v2.0 已上线：支持语音、OCR、审单、知识库与数据库协同 <ChevronRight size={14} className="text-gray-400" />
-            </div>
-          </Reveal>
           <Reveal delay={100}>
             <h1 className="text-5xl md:text-7xl font-bold tracking-tight text-gray-900 dark:text-white mb-8 leading-[1.15]">
               让企业知识库 <br className="hidden md:block" />
