@@ -96,6 +96,23 @@ const WARNING_STYLE_MAP = {
   },
 };
 
+const BREAKDOWN_COLORS = ['#0ea5e9', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6'];
+const RISK_TILE_COLORS = ['#0ea5e9', '#f59e0b', '#ef4444', '#22c55e'];
+const STATUS_LABEL_MAP = {
+  pending: '待处理',
+  unpaid: '未付款',
+  partial: '部分付款',
+  paid: '已付款',
+  delivered: '已交付',
+  shipped: '已发货',
+  shipping: '运输中',
+  processing: '处理中',
+  completed: '已完成',
+  cancelled: '已取消',
+  canceled: '已取消',
+  active: '活跃',
+};
+
 function formatMetric(value, unit) {
   const numeric = Number(value || 0);
   if (unit === 'CNY') return compactCurrencyFormatter.format(numeric);
@@ -115,6 +132,10 @@ function formatCurrency(value) {
   return currencyFormatter.format(Number(value || 0));
 }
 
+function formatCompactCurrency(value) {
+  return compactCurrencyFormatter.format(Number(value || 0));
+}
+
 function formatTrendMonth(value, withYear = false) {
   const match = String(value || '').match(/^(\d{4})-(\d{1,2})$/);
   if (!match) return String(value || '-');
@@ -129,6 +150,25 @@ function formatDateTime(value) {
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) return String(value || '-');
   return dateTimeFormatter.format(parsed).replace(/\//g, '-');
+}
+
+function clampNumber(value, min = 0, max = 100) {
+  return Math.min(max, Math.max(min, Number(value || 0)));
+}
+
+function sumBy(items = [], key) {
+  return items.reduce((sum, item) => sum + Number(item?.[key] || 0), 0);
+}
+
+function resolveBreakdownCount(item = {}) {
+  return Number(item?.order_count ?? item?.purchase_count ?? item?.count ?? 0);
+}
+
+function formatStatusLabel(status) {
+  const normalized = String(status || '').trim();
+  if (!normalized) return '未分类';
+  const mapped = STATUS_LABEL_MAP[normalized.toLowerCase()];
+  return mapped || normalized;
 }
 
 function escapeHtml(value) {
@@ -201,6 +241,17 @@ function buildTableHtml(headers = [], rows = [], emptyText = '暂无数据') {
       </tbody>
     </table>
   `;
+}
+
+function useEntranceAnimation(delay = 0) {
+  const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setIsReady(true), delay);
+    return () => window.clearTimeout(timer);
+  }, [delay]);
+
+  return isReady;
 }
 
 function buildDecisionFinancialReportHtml({ dashboardData, aiAnalysis, backendLabel }) {
@@ -742,9 +793,10 @@ function buildDecisionFinancialReportHtml({ dashboardData, aiAnalysis, backendLa
 }
 
 function ScoreRing({ score = 0 }) {
+  const isReady = useEntranceAnimation(120);
   const radius = 54;
   const stroke = 10;
-  const normalizedScore = Math.max(0, Math.min(100, Number(score || 0)));
+  const normalizedScore = clampNumber(score);
   const circumference = 2 * Math.PI * radius;
   const dash = (normalizedScore / 100) * circumference;
 
@@ -760,7 +812,9 @@ function ScoreRing({ score = 0 }) {
           stroke="url(#decisionRing)"
           strokeWidth={stroke}
           strokeLinecap="round"
-          strokeDasharray={`${dash} ${circumference - dash}`}
+          strokeDasharray={`${circumference} ${circumference}`}
+          strokeDashoffset={isReady ? circumference - dash : circumference}
+          style={{ transition: 'stroke-dashoffset 900ms cubic-bezier(0.22,1,0.36,1)' }}
         />
         <defs>
           <linearGradient id="decisionRing" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -771,13 +825,604 @@ function ScoreRing({ score = 0 }) {
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
         <div className="text-xs uppercase tracking-[0.18em] text-slate-500">经营评分</div>
-        <div className="mt-1 text-3xl font-semibold text-slate-800 dark:text-slate-100">{normalizedScore.toFixed(1)}</div>
+        <div
+          className="mt-1 text-3xl font-semibold text-slate-800 transition-all duration-700 dark:text-slate-100"
+          style={{ opacity: isReady ? 1 : 0.3, transform: isReady ? 'translateY(0)' : 'translateY(8px)' }}
+        >
+          {normalizedScore.toFixed(1)}
+        </div>
       </div>
     </div>
   );
 }
 
+function EmptyChartState({ label = '暂无可视化数据', heightClassName = 'h-56' }) {
+  return (
+    <div
+      className={`flex ${heightClassName} items-center justify-center rounded-2xl border border-dashed border-slate-300/70 bg-white/50 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-950/30 dark:text-slate-400`}
+    >
+      {label}
+    </div>
+  );
+}
+
+function StatusDonutCard({ title, subtitle, items = [], palette = BREAKDOWN_COLORS, delay = 0 }) {
+  const isReady = useEntranceAnimation(delay);
+  const radius = 44;
+  const stroke = 12;
+  const circumference = 2 * Math.PI * radius;
+
+  const normalizedItems = useMemo(() => {
+    const source = Array.isArray(items) ? items : [];
+    const rows = source
+      .map((item, index) => ({
+        key: `${item?.status || 'unknown'}-${index}`,
+        label: formatStatusLabel(item?.status),
+        status: item?.status,
+        value: Number(item?.amount || 0),
+        count: resolveBreakdownCount(item),
+        color: palette[index % palette.length],
+      }))
+      .filter((item) => item.value > 0 || item.count > 0);
+
+    const total = sumBy(rows, 'value');
+    return rows.map((item) => ({
+      ...item,
+      share: total > 0 ? item.value / total : 0,
+    }));
+  }, [items, palette]);
+
+  const totalValue = sumBy(normalizedItems, 'value');
+  const totalCount = sumBy(normalizedItems, 'count');
+
+  const arcSegments = useMemo(() => {
+    let offset = 0;
+    return normalizedItems.map((item) => {
+      const dash = item.share * circumference;
+      const segment = {
+        ...item,
+        dash,
+        offset,
+      };
+      offset += dash;
+      return segment;
+    });
+  }, [circumference, normalizedItems]);
+
+  if (!normalizedItems.length) {
+    return (
+      <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-slate-800 dark:bg-slate-900/80">
+        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</div>
+        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{subtitle}</div>
+        <div className="mt-4">
+          <EmptyChartState label={`${title} 暂无数据`} heightClassName="h-52" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-[0_8px_24px_rgba(15,23,42,0.05)] dark:border-slate-800 dark:bg-slate-900/80">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</div>
+          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{subtitle}</div>
+        </div>
+        <div className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+          {compactNumberFormatter.format(totalCount)} 条
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-[150px_1fr] sm:items-center">
+        <div className="flex justify-center">
+          <div className="relative h-36 w-36">
+            <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90">
+              <circle cx="60" cy="60" r={radius} fill="none" stroke="rgba(148,163,184,0.16)" strokeWidth={stroke} />
+              {arcSegments.map((item, index) => (
+                <circle
+                  key={item.key}
+                  cx="60"
+                  cy="60"
+                  r={radius}
+                  fill="none"
+                  stroke={item.color}
+                  strokeWidth={stroke}
+                  strokeLinecap="round"
+                  strokeDasharray={`${isReady ? item.dash : 0} ${circumference}`}
+                  strokeDashoffset={-item.offset}
+                  style={{
+                    transition: 'stroke-dasharray 800ms cubic-bezier(0.22,1,0.36,1)',
+                    transitionDelay: `${delay + index * 90}ms`,
+                  }}
+                />
+              ))}
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500">总金额</div>
+              <div className="mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">{formatCompactCurrency(totalValue)}</div>
+              <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{compactNumberFormatter.format(totalCount)} 笔记录</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2.5">
+          {arcSegments.map((item, index) => (
+            <div key={`${item.key}-legend`}>
+              <div className="flex items-center justify-between gap-3 text-xs">
+                <span className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-200">
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                  {item.label}
+                </span>
+                <span className="text-slate-500 dark:text-slate-400">{(item.share * 100).toFixed(1)}%</span>
+              </div>
+              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: isReady ? `${Math.max(item.share * 100, 5)}%` : '0%',
+                    backgroundColor: item.color,
+                    transition: 'width 800ms cubic-bezier(0.22,1,0.36,1)',
+                    transitionDelay: `${delay + index * 90 + 120}ms`,
+                  }}
+                />
+              </div>
+              <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                <span>{formatCompactCurrency(item.value)}</span>
+                <span>{compactNumberFormatter.format(item.count)} 笔</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatusSegmentsCard({ title, subtitle, items = [], palette = BREAKDOWN_COLORS, delay = 0 }) {
+  const isReady = useEntranceAnimation(delay);
+  const normalizedItems = useMemo(() => {
+    const source = Array.isArray(items) ? items : [];
+    const rows = source
+      .map((item, index) => ({
+        key: `${item?.status || 'unknown'}-${index}`,
+        label: formatStatusLabel(item?.status),
+        value: Number(item?.amount || 0),
+        count: resolveBreakdownCount(item),
+        color: palette[index % palette.length],
+      }))
+      .filter((item) => item.value > 0 || item.count > 0);
+
+    const total = sumBy(rows, 'value');
+    return rows.map((item) => ({
+      ...item,
+      share: total > 0 ? item.value / total : 0,
+    }));
+  }, [items, palette]);
+
+  if (!normalizedItems.length) {
+    return (
+      <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 dark:border-slate-800 dark:bg-slate-900/80">
+        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</div>
+        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{subtitle}</div>
+        <div className="mt-4">
+          <EmptyChartState label={`${title} 暂无数据`} heightClassName="h-52" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-[0_8px_24px_rgba(15,23,42,0.05)] dark:border-slate-800 dark:bg-slate-900/80">
+      <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</div>
+      <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{subtitle}</div>
+
+      <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200/70 bg-slate-50 p-1.5 dark:border-slate-800 dark:bg-slate-950/40">
+        <div className="flex h-16 items-stretch gap-1 overflow-hidden rounded-xl">
+          {normalizedItems.map((item, index) => (
+            <div
+              key={`${item.key}-segment`}
+              className="relative flex min-w-[64px] flex-1 items-end overflow-hidden rounded-xl p-2 text-white"
+              style={{
+                background: `linear-gradient(135deg, ${item.color}, ${item.color}CC)`,
+                flexBasis: isReady ? `${Math.max(item.share * 100, 14)}%` : '0%',
+                transition: 'flex-basis 800ms cubic-bezier(0.22,1,0.36,1)',
+                transitionDelay: `${delay + index * 80}ms`,
+              }}
+            >
+              <div className="relative z-10">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.14em]">{item.label}</div>
+                <div className="mt-1 text-sm font-semibold">{formatCompactCurrency(item.value)}</div>
+              </div>
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.25),transparent_58%)]" />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-2">
+        {normalizedItems.map((item) => (
+          <div key={`${item.key}-row`} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/70 px-3 py-2 text-xs dark:border-slate-800">
+            <span className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-200">
+              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+              {item.label}
+            </span>
+            <span className="text-slate-500 dark:text-slate-400">
+              {compactNumberFormatter.format(item.count)} 笔 / {(item.share * 100).toFixed(1)}%
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RiskHeatGrid({ rows = [] }) {
+  const isReady = useEntranceAnimation(160);
+  const groups = useMemo(() => {
+    const source = Array.isArray(rows) ? rows : [];
+    const map = new Map();
+
+    source.forEach((row) => {
+      const key = String(row?.category || '未分类').trim() || '未分类';
+      const current = map.get(key) || {
+        key,
+        label: key,
+        value: 0,
+        count: 0,
+        examples: [],
+      };
+
+      current.value += Number(row?.value || 0);
+      current.count += Number(row?.count || 0);
+      if (row?.name && current.examples.length < 2) {
+        current.examples.push(String(row.name));
+      }
+      map.set(key, current);
+    });
+
+    const list = Array.from(map.values()).sort((a, b) => b.value - a.value);
+    const total = sumBy(list, 'value');
+    return list.map((item, index) => ({
+      ...item,
+      color: RISK_TILE_COLORS[index % RISK_TILE_COLORS.length],
+      share: total > 0 ? item.value / total : 0,
+    }));
+  }, [rows]);
+
+  if (!groups.length) {
+    return <EmptyChartState label="暂无风险分类数据" heightClassName="h-48" />;
+  }
+
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {groups.map((group, index) => (
+        <div
+          key={group.key}
+          className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white/95 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.05)] dark:border-slate-800 dark:bg-slate-900/90"
+        >
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              background: `radial-gradient(circle at top right, ${group.color}30, transparent 62%)`,
+              opacity: isReady ? 1 : 0.25,
+              transition: 'opacity 700ms ease',
+              transitionDelay: `${index * 80}ms`,
+            }}
+          />
+          <div className="relative z-10">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">{group.label}</div>
+            <div className="mt-2 text-xl font-semibold text-slate-900 dark:text-slate-100">{formatCompactCurrency(group.value)}</div>
+            <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{compactNumberFormatter.format(group.count)} 个风险对象</div>
+            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: isReady ? `${Math.max(group.share * 100, 8)}%` : '0%',
+                  backgroundColor: group.color,
+                  transition: 'width 800ms cubic-bezier(0.22,1,0.36,1)',
+                  transitionDelay: `${index * 90 + 100}ms`,
+                }}
+              />
+            </div>
+            <div className="mt-2 text-[11px] leading-5 text-slate-500 dark:text-slate-400">
+              {(group.examples || []).length ? group.examples.join(' · ') : '暂无代表对象'}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function OrderVolumeChart({ rows = [] }) {
+  const isReady = useEntranceAnimation(140);
+  const containerRef = useRef(null);
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const [chartSize, setChartSize] = useState({ width: 0, height: 0 });
+
+  const width = 820;
+  const height = 320;
+  const padLeft = 56;
+  const padRight = 24;
+  const padTop = 18;
+  const padBottom = 42;
+  const maxValue = Math.max(1, ...rows.map((item) => Math.max(Number(item.sales_orders || 0), Number(item.purchase_orders || 0))));
+  const innerWidth = width - padLeft - padRight;
+  const innerHeight = height - padTop - padBottom;
+  const groupWidth = innerWidth / Math.max(rows.length, 1);
+  const barWidth = Math.min(16, Math.max(10, groupWidth * 0.22));
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return undefined;
+
+    const updateSize = () => {
+      const nextWidth = node.clientWidth;
+      const nextHeight = node.clientHeight;
+      setChartSize((current) => {
+        if (current.width === nextWidth && current.height === nextHeight) return current;
+        return { width: nextWidth, height: nextHeight };
+      });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateSize);
+      return () => window.removeEventListener('resize', updateSize);
+    }
+
+    const observer = new ResizeObserver(() => updateSize());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  const xForIndex = (index) => padLeft + groupWidth * index + groupWidth / 2;
+  const yForValue = (value) => height - padBottom - (Number(value || 0) / maxValue) * innerHeight;
+  const yTicks = Array.from({ length: 5 }, (_, index) => (maxValue * (4 - index)) / 4);
+  const tickStep = Math.max(1, Math.ceil((rows.length - 1) / 5));
+  const xTickIndexes = [];
+  for (let index = 0; index < rows.length; index += tickStep) {
+    xTickIndexes.push(index);
+  }
+  if (rows.length > 0 && xTickIndexes[xTickIndexes.length - 1] !== rows.length - 1) {
+    xTickIndexes.push(rows.length - 1);
+  }
+
+  const activeIndex = hoveredIndex == null ? null : Math.max(0, Math.min(hoveredIndex, rows.length - 1));
+  const activeRow = activeIndex == null ? null : rows[activeIndex];
+  const activeX = activeIndex == null ? null : xForIndex(activeIndex);
+
+  const handlePointerMove = useCallback(
+    (event) => {
+      const rect = event.currentTarget.getBoundingClientRect();
+      if (!rect.width) return;
+      const rawX = ((event.clientX - rect.left) / rect.width) * width;
+      const clampedX = Math.max(padLeft, Math.min(rawX, width - padRight));
+      const nextIndex = Math.min(rows.length - 1, Math.max(0, Math.floor((clampedX - padLeft) / Math.max(groupWidth, 1))));
+      setHoveredIndex(nextIndex);
+    },
+    [groupWidth, rows.length]
+  );
+
+  const handlePointerLeave = useCallback(() => {
+    setHoveredIndex(null);
+  }, []);
+
+  if (!rows.length) {
+    return <EmptyChartState label="暂无订单量趋势数据" heightClassName="h-72" />;
+  }
+
+  const tooltipMetrics =
+    activeRow && activeX != null && chartSize.width && chartSize.height
+      ? (() => {
+          const tooltipWidth = 188;
+          const tooltipHeight = 110;
+          const pointX = (activeX / width) * chartSize.width;
+          const top = 14;
+          const left =
+            pointX > chartSize.width * 0.6
+              ? Math.max(12, pointX - tooltipWidth - 18)
+              : Math.min(chartSize.width - tooltipWidth - 12, pointX + 18);
+          return { left, top };
+        })()
+      : null;
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative h-72 w-full overflow-hidden rounded-2xl border border-slate-200/70 bg-slate-950/[0.03] dark:border-slate-800"
+    >
+      {activeRow && tooltipMetrics && (
+        <div
+          className="pointer-events-none absolute z-10 w-48 rounded-2xl border border-slate-200/90 bg-white/95 p-3 text-xs shadow-[0_18px_40px_rgba(15,23,42,0.18)] backdrop-blur dark:border-slate-700 dark:bg-slate-900/95"
+          style={{ left: tooltipMetrics.left, top: tooltipMetrics.top }}
+        >
+          <div className="font-semibold text-slate-900 dark:text-slate-100">{formatTrendMonth(activeRow.month, true)}</div>
+          <div className="mt-2 space-y-1.5 text-slate-600 dark:text-slate-300">
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-cyan-500" />
+                销售单量
+              </span>
+              <span className="font-medium text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(activeRow.sales_orders || 0))}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-violet-500" />
+                采购单量
+              </span>
+              <span className="font-medium text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(activeRow.purchase_orders || 0))}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-slate-200/80 pt-1.5 dark:border-slate-700">
+              <span>净额</span>
+              <span className="font-semibold text-slate-900 dark:text-slate-100">{formatCompactCurrency(activeRow.net_amount)}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full">
+        {yTicks.map((value, index) => {
+          const y = yForValue(value);
+          return (
+            <g key={`orders-tick-${index}`}>
+              <line x1={padLeft} y1={y} x2={width - padRight} y2={y} stroke="rgba(100,116,139,0.16)" strokeDasharray="4 6" />
+              <text x={padLeft - 10} y={y + 4} textAnchor="end" fontSize="11" fill="#64748b">
+                {compactNumberFormatter.format(value)}
+              </text>
+            </g>
+          );
+        })}
+
+        {xTickIndexes.map((index) => (
+          <text
+            key={`orders-x-${index}`}
+            x={xForIndex(index)}
+            y={height - 12}
+            textAnchor="middle"
+            fontSize="11"
+            fill="#64748b"
+          >
+            {formatTrendMonth(rows[index].month, index === 0 || String(rows[index].month || '').endsWith('-01'))}
+          </text>
+        ))}
+
+        {rows.map((row, index) => {
+          const centerX = xForIndex(index);
+          const salesHeight = ((Number(row.sales_orders || 0) / maxValue) * innerHeight);
+          const purchaseHeight = ((Number(row.purchase_orders || 0) / maxValue) * innerHeight);
+          const salesY = height - padBottom - salesHeight;
+          const purchaseY = height - padBottom - purchaseHeight;
+          return (
+            <g key={`order-bar-${row.month}`}>
+              <rect
+                x={centerX - barWidth - 3}
+                y={isReady ? salesY : height - padBottom}
+                width={barWidth}
+                height={isReady ? salesHeight : 0}
+                rx="6"
+                fill="#06b6d4"
+                opacity={activeIndex === index ? 1 : 0.9}
+                style={{
+                  transition: 'all 800ms cubic-bezier(0.22,1,0.36,1)',
+                  transitionDelay: `${index * 30}ms`,
+                }}
+              />
+              <rect
+                x={centerX + 3}
+                y={isReady ? purchaseY : height - padBottom}
+                width={barWidth}
+                height={isReady ? purchaseHeight : 0}
+                rx="6"
+                fill="#8b5cf6"
+                opacity={activeIndex === index ? 1 : 0.85}
+                style={{
+                  transition: 'all 800ms cubic-bezier(0.22,1,0.36,1)',
+                  transitionDelay: `${index * 30 + 80}ms`,
+                }}
+              />
+            </g>
+          );
+        })}
+
+        {activeX != null && (
+          <line
+            x1={activeX}
+            y1={padTop}
+            x2={activeX}
+            y2={height - padBottom}
+            stroke="rgba(15,23,42,0.28)"
+            strokeDasharray="4 5"
+          />
+        )}
+
+        <rect
+          x={padLeft}
+          y={padTop}
+          width={innerWidth}
+          height={innerHeight}
+          fill="transparent"
+          style={{ cursor: 'crosshair' }}
+          onPointerMove={handlePointerMove}
+          onPointerDown={handlePointerMove}
+          onPointerLeave={handlePointerLeave}
+        />
+      </svg>
+    </div>
+  );
+}
+
+function CategoryProfitChart({ rows = [] }) {
+  const isReady = useEntranceAnimation(180);
+  const maxSales = Math.max(1, ...rows.map((row) => Number(row.sales_amount || 0)));
+
+  if (!rows.length) {
+    return <EmptyChartState label="暂无品类盈利数据" heightClassName="h-72" />;
+  }
+
+  return (
+    <div className="space-y-3">
+      {rows.map((row, index) => {
+        const salesWidth = (Number(row.sales_amount || 0) / maxSales) * 100;
+        const costRatio = Number(row.sales_amount || 0) > 0 ? (Number(row.cost_amount || 0) / Number(row.sales_amount || 0)) * 100 : 0;
+        const marginValue = Number(row.margin_rate || 0);
+        const marginTone =
+          marginValue >= 0.35 ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:border-emerald-900/60'
+            : marginValue >= 0.2
+            ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-900/60'
+            : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/30 dark:text-rose-300 dark:border-rose-900/60';
+
+        return (
+          <div
+            key={row.category}
+            className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 transition-transform duration-300 hover:-translate-y-0.5 dark:border-slate-800 dark:bg-slate-950/30"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-slate-900 dark:text-slate-100">{row.category}</div>
+                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">利润 {formatCompactCurrency(row.profit_amount)}</div>
+              </div>
+              <span className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${marginTone}`}>
+                毛利率 {percentFormatter.format(marginValue)}
+              </span>
+            </div>
+
+            <div className="mt-3 rounded-full bg-slate-100 p-1 dark:bg-slate-800">
+              <div className="relative h-3 overflow-hidden rounded-full bg-slate-200/80 dark:bg-slate-900">
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-cyan-200/70 dark:bg-cyan-900/40"
+                  style={{
+                    width: isReady ? `${Math.max(salesWidth, 12)}%` : '0%',
+                    transition: 'width 850ms cubic-bezier(0.22,1,0.36,1)',
+                    transitionDelay: `${index * 70}ms`,
+                  }}
+                />
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-cyan-500/85"
+                  style={{
+                    width: isReady ? `${Math.max((Math.max(salesWidth, 12) * Math.min(costRatio, 100)) / 100, 6)}%` : '0%',
+                    transition: 'width 850ms cubic-bezier(0.22,1,0.36,1)',
+                    transitionDelay: `${index * 70 + 90}ms`,
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+              <span>销售 {formatCompactCurrency(row.sales_amount)}</span>
+              <span>成本 {formatCompactCurrency(row.cost_amount)}</span>
+              <span>利润 {formatCompactCurrency(row.profit_amount)}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DualLineChart({ rows = [] }) {
+  const isReady = useEntranceAnimation(80);
   const containerRef = useRef(null);
   const [hoveredIndex, setHoveredIndex] = useState(null);
   const [chartSize, setChartSize] = useState({ width: 0, height: 0 });
@@ -972,9 +1617,33 @@ function DualLineChart({ rows = [] }) {
         <path
           d={`${salesPath} L${chartPoints[chartPoints.length - 1].x},${height - padBottom} L${chartPoints[0].x},${height - padBottom} Z`}
           fill="url(#decision-sales-fill)"
+          opacity={isReady ? 1 : 0}
+          style={{ transition: 'opacity 600ms ease' }}
         />
-        <path d={salesPath} fill="none" stroke="#0ea5e9" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-        <path d={purchasePath} fill="none" stroke="#f97316" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+        <path
+          d={salesPath}
+          fill="none"
+          stroke="#0ea5e9"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          pathLength="1"
+          strokeDasharray="1"
+          strokeDashoffset={isReady ? 0 : 1}
+          style={{ transition: 'stroke-dashoffset 900ms cubic-bezier(0.22,1,0.36,1)' }}
+        />
+        <path
+          d={purchasePath}
+          fill="none"
+          stroke="#f97316"
+          strokeWidth="3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          pathLength="1"
+          strokeDasharray="1"
+          strokeDashoffset={isReady ? 0 : 1}
+          style={{ transition: 'stroke-dashoffset 900ms cubic-bezier(0.22,1,0.36,1)', transitionDelay: '120ms' }}
+        />
 
         {activePoint && (
           <>
@@ -995,8 +1664,22 @@ function DualLineChart({ rows = [] }) {
 
         {chartPoints.map((point, index) => (
           <g key={`point-${index}`}>
-            <circle cx={point.x} cy={point.salesY} r="3.5" fill="#0ea5e9" opacity={activeIndex === index ? 0 : 1} />
-            <circle cx={point.x} cy={point.purchaseY} r="3.5" fill="#f97316" opacity={activeIndex === index ? 0 : 1} />
+            <circle
+              cx={point.x}
+              cy={point.salesY}
+              r="3.5"
+              fill="#0ea5e9"
+              opacity={activeIndex === index ? 0 : (isReady ? 1 : 0)}
+              style={{ transition: 'opacity 500ms ease', transitionDelay: `${index * 25}ms` }}
+            />
+            <circle
+              cx={point.x}
+              cy={point.purchaseY}
+              r="3.5"
+              fill="#f97316"
+              opacity={activeIndex === index ? 0 : (isReady ? 1 : 0)}
+              style={{ transition: 'opacity 500ms ease', transitionDelay: `${index * 25 + 80}ms` }}
+            />
           </g>
         ))}
 
@@ -1157,16 +1840,30 @@ function DecisionCenterPage() {
   const aiPending = Boolean(aiAnalysis?.pending);
   const trends = dashboardData?.trends || [];
   const cockpit = dashboardData?.cockpit || {};
+  const cockpitMeta = cockpit?.meta || {};
   const capabilities = cockpit?.capabilities || [];
+  const breakdowns = dashboardData?.breakdowns || {};
+  const paymentBreakdown = breakdowns?.payment || [];
+  const deliveryBreakdown = breakdowns?.delivery || [];
+  const purchaseStatusBreakdown = breakdowns?.purchase_status || [];
   const riskTable = dashboardData?.risk_table || [];
   const topProducts = dashboardData?.top_products || [];
   const warehouseRows = dashboardData?.warehouses || [];
   const categoryProfitRows = dashboardData?.category_profit || [];
+  const totals = dashboardData?.totals || {};
   const dataCache = dashboardData?.cache || {};
   const preaggregationPending = Boolean(dataCache?.preaggregation_pending_refresh);
   const preaggregationAgeSeconds = Number(dataCache?.preaggregation_age_seconds || 0);
 
   const displayKpis = useMemo(() => kpis.slice(0, 8), [kpis]);
+  const topProductMaxRevenue = useMemo(() => Math.max(1, ...topProducts.map((item) => Number(item.revenue || 0))), [topProducts]);
+  const warehouseMaxUnits = useMemo(() => Math.max(1, ...warehouseRows.map((item) => Number(item.units || 0))), [warehouseRows]);
+  const warehouseTotalUnits = useMemo(() => sumBy(warehouseRows, 'units'), [warehouseRows]);
+  const employeeActiveRate = useMemo(() => {
+    const totalEmployees = Number(cockpitMeta?.total_employees || 0);
+    if (!totalEmployees) return 0;
+    return Number(cockpitMeta?.active_employees || 0) / totalEmployees;
+  }, [cockpitMeta?.active_employees, cockpitMeta?.total_employees]);
   const analysisBackendLabel = useMemo(() => (backend === 'cloud' ? '云端模型' : '本地模型'), [backend]);
   const preaggregationText = useMemo(() => {
     if (!dataCache?.preaggregation_enabled) return '实时聚合';
@@ -1181,6 +1878,28 @@ function DecisionCenterPage() {
     const minutes = Math.ceil(seconds / 60);
     return `${minutes} 分钟后自动刷新`;
   }, [aiAnalysis]);
+  const visualsReady = useEntranceAnimation(60);
+  const summaryBadges = useMemo(
+    () => [
+      {
+        label: '近30日销售',
+        value: formatCompactCurrency(cockpitMeta?.sales_30d || 0),
+      },
+      {
+        label: '近30日采购',
+        value: formatCompactCurrency(cockpitMeta?.purchase_30d || 0),
+      },
+      {
+        label: '库存估值',
+        value: formatCompactCurrency(cockpitMeta?.inventory_value || 0),
+      },
+      {
+        label: '员工活跃率',
+        value: percentFormatter.format(employeeActiveRate),
+      },
+    ],
+    [cockpitMeta?.inventory_value, cockpitMeta?.purchase_30d, cockpitMeta?.sales_30d, employeeActiveRate]
+  );
 
   useEffect(() => {
     if (!aiPending) return undefined;
@@ -1329,7 +2048,7 @@ function DecisionCenterPage() {
             return (
               <article
                 key={item.key}
-                className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/95 dark:bg-slate-900/80 p-4 shadow-[0_8px_28px_rgba(15,23,42,0.06)]"
+                className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white/95 dark:bg-slate-900/80 p-4 shadow-[0_8px_28px_rgba(15,23,42,0.06)] transition-transform duration-300 hover:-translate-y-1"
               >
                 <div className="flex items-start justify-between">
                   <div className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500">{item.label}</div>
@@ -1342,10 +2061,16 @@ function DecisionCenterPage() {
                   {isPositive ? <TrendingUp size={13} /> : <TrendingDown size={13} />}
                   {formatTrend(item.trend)}
                 </div>
+                <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  目标完成度 {(Number(item.target_progress || 0) * 100).toFixed(0)}%
+                </div>
                 <div className="mt-3 h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
                   <div
                     className={`h-full rounded-full ${isPositive ? 'bg-emerald-400' : 'bg-rose-400'}`}
-                    style={{ width: `${Math.max(6, Math.min(Number(item.target_progress || 0) * 100, 100))}%` }}
+                    style={{
+                      width: visualsReady ? `${Math.max(6, Math.min(Number(item.target_progress || 0) * 100, 100))}%` : '0%',
+                      transition: 'width 800ms cubic-bezier(0.22,1,0.36,1)',
+                    }}
                   />
                 </div>
               </article>
@@ -1353,47 +2078,97 @@ function DecisionCenterPage() {
           })}
         </section>
 
-        <section className="grid grid-cols-1 xl:grid-cols-[1.25fr_1fr] gap-4">
-          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">经营驾驶舱评分</h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400">盈利、运营、供应、库存、财务、增长六维能力</p>
+        <section className="grid grid-cols-1 xl:grid-cols-[1.18fr_0.92fr] gap-4 items-start">
+          <div className="space-y-4">
+            <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">经营驾驶舱评分</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">盈利、运营、供应、库存、财务、增长六维能力协同评分</p>
+                </div>
+                <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                  <BarChart3 size={13} />
+                  总评分 {Number(cockpit.score || 0).toFixed(1)}
+                </div>
               </div>
-              <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-3 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                <BarChart3 size={13} />
-                总评分 {Number(cockpit.score || 0).toFixed(1)}
-              </div>
-            </div>
 
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-[170px_1fr] gap-4 items-center">
-              <div className="flex justify-center">
-                <ScoreRing score={cockpit.score || 0} />
+              <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[180px_1fr] lg:items-center">
+                <div className="flex justify-center">
+                  <ScoreRing score={cockpit.score || 0} />
+                </div>
+
+                <div className="space-y-3">
+                  {capabilities.map((item, index) => (
+                    <div key={item.key || item.label}>
+                      <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
+                        <span className="font-semibold">{item.label}</span>
+                        <span>{Number(item.score || 0).toFixed(1)}</span>
+                      </div>
+                      <div className="mt-1 h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: visualsReady ? `${Math.max(4, Math.min(Number(item.score || 0), 100))}%` : '0%',
+                            backgroundColor: CAPABILITY_COLORS[index % CAPABILITY_COLORS.length],
+                            transition: 'width 800ms cubic-bezier(0.22,1,0.36,1)',
+                            transitionDelay: `${index * 70}ms`,
+                          }}
+                        />
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-slate-400">{item.desc}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div className="space-y-2">
-                {capabilities.map((item, index) => (
-                  <div key={item.key || item.label}>
-                    <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                      <span className="font-semibold">{item.label}</span>
-                      <span>{Number(item.score || 0).toFixed(1)}</span>
-                    </div>
-                    <div className="mt-1 h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${Math.max(4, Math.min(Number(item.score || 0), 100))}%`,
-                          backgroundColor: CAPABILITY_COLORS[index % CAPABILITY_COLORS.length],
-                        }}
-                      />
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-slate-400">{item.desc}</div>
+
+              <div className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                {summaryBadges.map((item) => (
+                  <div key={item.label} className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/40">
+                    <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">{item.label}</div>
+                    <div className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{item.value}</div>
                   </div>
                 ))}
               </div>
-            </div>
-          </article>
+            </article>
 
-          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
+            <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">经营结构拆解</h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">把回款、履约、采购状态拆成不同图表类型，便于快速识别结构问题</p>
+                </div>
+                <div className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-3 py-1.5 text-[11px] font-medium text-slate-600 dark:text-slate-300">
+                  三种可视化
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 gap-4 2xl:grid-cols-3">
+                <StatusDonutCard
+                  title="回款结构"
+                  subtitle="按订单金额拆分付款状态"
+                  items={paymentBreakdown}
+                  palette={['#0ea5e9', '#22c55e', '#f59e0b', '#ef4444']}
+                  delay={40}
+                />
+                <StatusDonutCard
+                  title="履约结构"
+                  subtitle="按金额拆分交付状态"
+                  items={deliveryBreakdown}
+                  palette={['#06b6d4', '#10b981', '#8b5cf6', '#f97316']}
+                  delay={120}
+                />
+                <StatusSegmentsCard
+                  title="采购状态"
+                  subtitle="在途、处理中与已完成采购的金额构成"
+                  items={purchaseStatusBreakdown}
+                  palette={['#6366f1', '#8b5cf6', '#14b8a6', '#f59e0b']}
+                  delay={180}
+                />
+              </div>
+            </article>
+          </div>
+
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:sticky xl:top-6">
             <div className="flex items-center justify-between gap-2">
               <div>
                 <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">AI 经营分析</h2>
@@ -1403,6 +2178,18 @@ function DecisionCenterPage() {
                 <Clock3 size={12} />
                 {aiRefreshText}
               </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+              <span className="rounded-full border border-cyan-200 bg-cyan-50 px-2.5 py-1 text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/30 dark:text-cyan-300">
+                模型: {analysisBackendLabel}
+              </span>
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
+                预警 {warnings.length} 项
+              </span>
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
+                风险订单 {compactNumberFormatter.format(Number(totals.at_risk_orders || 0))}
+              </span>
             </div>
 
             <div className="mt-4 rounded-xl border border-cyan-200/70 dark:border-cyan-900/50 bg-cyan-50/50 dark:bg-cyan-950/20 p-3 text-sm leading-relaxed text-slate-700 dark:text-slate-200">
@@ -1417,38 +2204,54 @@ function DecisionCenterPage() {
 
             <div className="mt-4 grid grid-cols-1 gap-3">
               <div className="rounded-xl border border-slate-200/70 dark:border-slate-800 p-3">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">关键洞察</div>
-                <ul className="mt-2 space-y-1 text-sm text-slate-700 dark:text-slate-200">
-                  {(aiAnalysis.insights || []).map((item, idx) => (
-                    <li key={`insight-${idx}`} className="flex gap-2">
-                      <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-sky-500 shrink-0" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">关键洞察</div>
+                  <div className="text-[11px] text-slate-400">{(aiAnalysis.insights || []).length} 条</div>
+                </div>
+                <ul className="mt-2 space-y-1.5 text-sm text-slate-700 dark:text-slate-200">
+                  {(aiAnalysis.insights || []).length ? (
+                    (aiAnalysis.insights || []).map((item, idx) => (
+                      <li key={`insight-${idx}`} className="flex gap-2">
+                        <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-sky-500 shrink-0" />
+                        <span>{item}</span>
+                      </li>
+                    ))
+                  ) : (
+                    <li className="text-sm text-slate-500 dark:text-slate-400">暂无关键洞察</li>
+                  )}
                 </ul>
               </div>
 
               <div className="rounded-xl border border-slate-200/70 dark:border-slate-800 p-3">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">建议动作</div>
-                <ul className="mt-2 space-y-1 text-sm text-slate-700 dark:text-slate-200">
-                  {(aiAnalysis.actions || []).map((item, idx) => (
-                    <li key={`action-${idx}`} className="flex gap-2">
-                      <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">建议动作</div>
+                  <div className="text-[11px] text-slate-400">{(aiAnalysis.actions || []).length} 条</div>
+                </div>
+                <ul className="mt-2 space-y-1.5 text-sm text-slate-700 dark:text-slate-200">
+                  {(aiAnalysis.actions || []).length ? (
+                    (aiAnalysis.actions || []).map((item, idx) => (
+                      <li key={`action-${idx}`} className="flex gap-2">
+                        <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
+                        <span>{item}</span>
+                      </li>
+                    ))
+                  ) : (
+                    <li className="text-sm text-slate-500 dark:text-slate-400">暂无建议动作</li>
+                  )}
                 </ul>
               </div>
             </div>
 
-            <div className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-              风险展望: {aiAnalysis.risk_outlook || '暂无'}
+            <div className="mt-3 rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-3 text-xs leading-6 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
+              <span className="font-semibold text-slate-800 dark:text-slate-100">风险展望：</span>
+              {aiAnalysis.risk_outlook || '暂无'}
             </div>
           </article>
         </section>
 
-        <section className="grid grid-cols-1 xl:grid-cols-[1.45fr_1fr] gap-4">
-          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
+        <div className="space-y-4 xl:space-y-0 xl:columns-2 xl:gap-4">
+        <section className="grid grid-cols-1 gap-4 xl:contents">
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">销售 vs 采购趋势</h2>
@@ -1480,26 +2283,136 @@ function DecisionCenterPage() {
             </div>
           </article>
 
-          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
-            <h2 className="text-lg font-semibold">数据预警</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">结合经营规则自动生成</p>
+          <div className="xl:contents">
+            <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
+              <h2 className="text-lg font-semibold">数据预警</h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">结合经营规则自动生成</p>
 
-            <div className="mt-4 space-y-2">
-              {warnings.map((item, idx) => {
-                const style = WARNING_STYLE_MAP[item.level] || WARNING_STYLE_MAP.medium;
-                const Icon = style.icon;
-                return (
-                  <div key={`${item.title}-${idx}`} className={`rounded-xl px-3 py-2 ${style.row}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Icon size={14} className="shrink-0 text-slate-600 dark:text-slate-300" />
-                        <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 truncate">{item.title}</div>
+              <div className="mt-4 space-y-2">
+                {warnings.map((item, idx) => {
+                  const style = WARNING_STYLE_MAP[item.level] || WARNING_STYLE_MAP.medium;
+                  const Icon = style.icon;
+                  return (
+                    <div key={`${item.title}-${idx}`} className={`rounded-xl px-3 py-2 ${style.row}`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Icon size={14} className="shrink-0 text-slate-600 dark:text-slate-300" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-slate-800 dark:text-slate-100 truncate">{item.title}</div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400">{item.module}</div>
+                          </div>
+                        </div>
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${style.badge}`}>
+                          {item.level}
+                        </span>
                       </div>
-                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase ${style.badge}`}>
-                        {item.level}
-                      </span>
+                      <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">{item.description}</div>
                     </div>
-                    <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">{item.description}</div>
+                  );
+                })}
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section className="grid grid-cols-1 gap-4 xl:contents">
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">风险结构热力图</h3>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">按客户回款、库存缺口、采购积压分类聚合</p>
+              </div>
+              <div className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                {riskTable.length} 条明细
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <RiskHeatGrid rows={riskTable} />
+            </div>
+          </article>
+        </section>
+
+        <section className="grid grid-cols-1 gap-4 xl:contents">
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">订单活跃度</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">近12个月销售单量与采购单量柱状对比</p>
+              </div>
+              <div className="flex items-center gap-3 text-xs text-slate-500">
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-cyan-500" />
+                  销售单量
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-violet-500" />
+                  采购单量
+                </span>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <OrderVolumeChart rows={trends} />
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 gap-3">
+              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">销售订单</div>
+                <div className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(totals.order_count || 0))}</div>
+              </div>
+              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">采购订单</div>
+                <div className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(totals.purchase_count || 0))}</div>
+              </div>
+              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">活跃客户</div>
+                <div className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(totals.active_customers_90d || 0))}</div>
+              </div>
+            </div>
+          </article>
+
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold">Top 商品销售</h3>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">按近180日销售额排序，补充销量与品类信息</p>
+              </div>
+              <div className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                Top {Math.min(topProducts.length, 6)}
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {topProducts.slice(0, 6).map((row, idx) => {
+                const width = (Number(row.revenue || 0) / topProductMaxRevenue) * 100;
+                return (
+                  <div key={`${row.prod_name}-${idx}`} className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/30">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-[11px] font-semibold text-white dark:bg-slate-100 dark:text-slate-900">
+                            {idx + 1}
+                          </span>
+                          <span className="truncate font-semibold text-slate-800 dark:text-slate-100">{row.prod_name}</span>
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{row.category || '未分类'} · 销量 {compactNumberFormatter.format(Number(row.sold_units || 0))}</div>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{formatCompactCurrency(row.revenue)}</div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">销售额</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 h-2 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-cyan-500"
+                        style={{
+                          width: visualsReady ? `${Math.max(width, 6)}%` : '0%',
+                          transition: 'width 850ms cubic-bezier(0.22,1,0.36,1)',
+                          transitionDelay: `${idx * 70}ms`,
+                        }}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -1507,8 +2420,91 @@ function DecisionCenterPage() {
           </article>
         </section>
 
-        <section className="grid grid-cols-1 xl:grid-cols-[1.3fr_1fr] gap-4">
-          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] overflow-x-auto">
+        <section className="grid grid-cols-1 gap-4 xl:contents">
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
+            <h2 className="text-lg font-semibold">品类盈利结构</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">用销售额、成本额和毛利率的叠层结构看出利润贡献与承压位置</p>
+
+            <div className="mt-4">
+              <CategoryProfitChart rows={categoryProfitRows} />
+            </div>
+          </article>
+
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-semibold">仓库库存分布</h3>
+                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">查看库存集中度、仓库体量与明细行数</p>
+              </div>
+              <div className="text-right">
+                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(warehouseTotalUnits)}</div>
+                <div className="text-[11px] text-slate-500 dark:text-slate-400">总库存件数</div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">库存估值</div>
+                <div className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{formatCompactCurrency(cockpitMeta.inventory_value || 0)}</div>
+              </div>
+              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">供应活跃度</div>
+                <div className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  {compactNumberFormatter.format(Number(totals.active_suppliers_90d || 0))}/{compactNumberFormatter.format(Number(totals.total_suppliers || 0))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 overflow-hidden rounded-full bg-slate-100 p-1 dark:bg-slate-800">
+              <div className="flex h-4 items-stretch gap-1 overflow-hidden rounded-full">
+                {warehouseRows.map((row, idx) => {
+                  const share = warehouseTotalUnits > 0 ? Number(row.units || 0) / warehouseTotalUnits : 0;
+                  return (
+                    <div
+                      key={`${row.warehouse}-strip`}
+                      className="rounded-full"
+                      style={{
+                        flexBasis: visualsReady ? `${Math.max(share * 100, 8)}%` : '0%',
+                        backgroundColor: CAPABILITY_COLORS[idx % CAPABILITY_COLORS.length],
+                        transition: 'flex-basis 800ms cubic-bezier(0.22,1,0.36,1)',
+                        transitionDelay: `${idx * 70}ms`,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {warehouseRows.map((row, idx) => {
+                const width = (Number(row.units || 0) / warehouseMaxUnits) * 100;
+                return (
+                  <div key={`${row.warehouse}-${idx}`} className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/30">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="font-medium text-slate-700 dark:text-slate-200">{row.warehouse}</span>
+                      <span className="text-slate-500 dark:text-slate-400">
+                        {compactNumberFormatter.format(Number(row.units || 0))} 件 · {compactNumberFormatter.format(Number(row.line_count || 0))} 行
+                      </span>
+                    </div>
+                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200/80 dark:bg-slate-800">
+                      <div
+                        className="h-full rounded-full bg-emerald-500"
+                        style={{
+                          width: visualsReady ? `${Math.max(width, 6)}%` : '0%',
+                          transition: 'width 850ms cubic-bezier(0.22,1,0.36,1)',
+                          transitionDelay: `${idx * 70 + 60}ms`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </article>
+        </section>
+
+        <section className="grid grid-cols-1 gap-4 xl:contents">
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] overflow-x-auto xl:mb-4 xl:break-inside-avoid">
             <h2 className="text-lg font-semibold">风险明细</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">客户回款、库存缺口与采购积压重点对象</p>
 
@@ -1538,78 +2534,35 @@ function DecisionCenterPage() {
             </table>
           </article>
 
-          <div className="space-y-4">
-            <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
-              <h3 className="text-base font-semibold">Top 商品销售</h3>
-              <div className="mt-3 space-y-2">
-                {topProducts.slice(0, 6).map((row, idx) => {
-                  const maxRevenue = Math.max(...topProducts.map((item) => Number(item.revenue || 0)), 1);
-                  const width = (Number(row.revenue || 0) / maxRevenue) * 100;
-                  return (
-                    <div key={`${row.prod_name}-${idx}`}>
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-medium text-slate-700 dark:text-slate-200 truncate pr-2">{row.prod_name}</span>
-                        <span className="text-slate-500">{formatMetric(row.revenue, 'CNY')}</span>
-                      </div>
-                      <div className="mt-1 h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                        <div className="h-full rounded-full bg-cyan-500" style={{ width: `${Math.max(width, 4)}%` }} />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </article>
+          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] overflow-x-auto xl:mb-4 xl:break-inside-avoid">
+            <h2 className="text-lg font-semibold">品类盈利台账</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">保留明细表，便于进一步人工复核和导出核对</p>
 
-            <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)]">
-              <h3 className="text-base font-semibold">仓库库存分布</h3>
-              <div className="mt-3 space-y-2">
-                {warehouseRows.map((row, idx) => {
-                  const maxUnits = Math.max(...warehouseRows.map((item) => Number(item.units || 0)), 1);
-                  const width = (Number(row.units || 0) / maxUnits) * 100;
-                  return (
-                    <div key={`${row.warehouse}-${idx}`}>
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-medium text-slate-700 dark:text-slate-200">{row.warehouse}</span>
-                        <span className="text-slate-500">{compactNumberFormatter.format(Number(row.units || 0))}</span>
-                      </div>
-                      <div className="mt-1 h-2 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
-                        <div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.max(width, 5)}%` }} />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </article>
-          </div>
-        </section>
-
-        <section className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] overflow-x-auto">
-          <h2 className="text-lg font-semibold">品类盈利分析</h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">销售额、成本额与毛利率对比</p>
-
-          <table className="mt-4 min-w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs uppercase tracking-[0.08em] text-slate-500 border-b border-slate-200 dark:border-slate-800">
-                <th className="px-2 py-2">品类</th>
-                <th className="px-2 py-2">销售额</th>
-                <th className="px-2 py-2">成本额</th>
-                <th className="px-2 py-2">利润额</th>
-                <th className="px-2 py-2">毛利率</th>
-              </tr>
-            </thead>
-            <tbody>
-              {categoryProfitRows.map((row) => (
-                <tr key={row.category} className="border-b border-slate-100 dark:border-slate-800/70">
-                  <td className="px-2 py-2 font-medium text-slate-700 dark:text-slate-200">{row.category}</td>
-                  <td className="px-2 py-2 text-slate-700 dark:text-slate-200">{formatCurrency(row.sales_amount)}</td>
-                  <td className="px-2 py-2 text-slate-600 dark:text-slate-300">{formatCurrency(row.cost_amount)}</td>
-                  <td className="px-2 py-2 text-slate-700 dark:text-slate-200">{formatCurrency(row.profit_amount)}</td>
-                  <td className="px-2 py-2 text-slate-700 dark:text-slate-200">{percentFormatter.format(Number(row.margin_rate || 0))}</td>
+            <table className="mt-4 min-w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-[0.08em] text-slate-500 border-b border-slate-200 dark:border-slate-800">
+                  <th className="px-2 py-2">品类</th>
+                  <th className="px-2 py-2">销售额</th>
+                  <th className="px-2 py-2">成本额</th>
+                  <th className="px-2 py-2">利润额</th>
+                  <th className="px-2 py-2">毛利率</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {categoryProfitRows.map((row) => (
+                  <tr key={row.category} className="border-b border-slate-100 dark:border-slate-800/70">
+                    <td className="px-2 py-2 font-medium text-slate-700 dark:text-slate-200">{row.category}</td>
+                    <td className="px-2 py-2 text-slate-700 dark:text-slate-200">{formatCurrency(row.sales_amount)}</td>
+                    <td className="px-2 py-2 text-slate-600 dark:text-slate-300">{formatCurrency(row.cost_amount)}</td>
+                    <td className="px-2 py-2 text-slate-700 dark:text-slate-200">{formatCurrency(row.profit_amount)}</td>
+                    <td className="px-2 py-2 text-slate-700 dark:text-slate-200">{percentFormatter.format(Number(row.margin_rate || 0))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </article>
         </section>
+        </div>
       </main>
     </div>
   );

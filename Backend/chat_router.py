@@ -9,7 +9,8 @@ import urllib.parse
 import os
 import hashlib
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional, List, Dict, Any
 from uuid import uuid4
 
@@ -3193,14 +3194,14 @@ def tool_get_exchange_rate(query: str) -> List[dict]:
     }
     providers = [
         {
-            "name": "Frankfurter",
-            "link": f"https://api.frankfurter.app/latest?from={base_code}&to={quote_code}",
-            "fetch": lambda: _fetch_exchange_rate_from_frankfurter(base_code, quote_code, headers),
-        },
-        {
             "name": "ExchangeRate-API",
             "link": f"https://open.er-api.com/v6/latest/{base_code}",
             "fetch": lambda: _fetch_exchange_rate_from_er_api(base_code, quote_code, headers),
+        },
+        {
+            "name": "Frankfurter",
+            "link": f"https://api.frankfurter.app/latest?from={base_code}&to={quote_code}",
+            "fetch": lambda: _fetch_exchange_rate_from_frankfurter(base_code, quote_code, headers),
         },
     ]
 
@@ -3239,6 +3240,36 @@ def tool_get_exchange_rate(query: str) -> List[dict]:
     return []
 
 
+def _normalize_exchange_rate_updated_at(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+
+    try:
+        parsed = parsedate_to_datetime(text)
+        if parsed is not None:
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        pass
+
+    if text.isdigit():
+        try:
+            return datetime.fromtimestamp(int(text), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            pass
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return text
+
+
 def _fetch_exchange_rate_from_frankfurter(
     base_code: str,
     quote_code: str,
@@ -3263,7 +3294,7 @@ def _fetch_exchange_rate_from_frankfurter(
             reverse_rate = _format_decimal_text(str(1 / numeric))
     except Exception:
         reverse_rate = ""
-    updated_at = str(data.get("date") or "").strip()
+    updated_at = _normalize_exchange_rate_updated_at(data.get("date"))
     return direct_rate, reverse_rate, updated_at
 
 
@@ -3298,7 +3329,7 @@ def _fetch_exchange_rate_from_er_api(
         str(data.get("time_last_update_utc") or "").strip()
         or str(data.get("time_last_update_unix") or "").strip()
     )
-    return direct_rate, reverse_rate, updated_at
+    return direct_rate, reverse_rate, _normalize_exchange_rate_updated_at(updated_at)
 
 
 def _canonicalize_link(link: str) -> str:

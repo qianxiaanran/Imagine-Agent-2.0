@@ -1,5 +1,12 @@
 import apiClient from "./apiClient";
 
+const buildSearch = (params = {}) => {
+  const normalized = Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== "")
+  );
+  return new URLSearchParams(normalized).toString();
+};
+
 const adminApi = {
   createUser: (payload) =>
     apiClient(`/api/admin/users`, {
@@ -7,7 +14,7 @@ const adminApi = {
       body: JSON.stringify(payload),
     }),
   listUsers: (params = {}) => {
-    const search = new URLSearchParams(params).toString();
+    const search = buildSearch(params);
     return apiClient(`/api/admin/users${search ? `?${search}` : ""}`, { method: "GET" });
   },
   updateUserRole: (userId, role) =>
@@ -28,7 +35,7 @@ const adminApi = {
   deleteUser: (userId) =>
     apiClient(`/api/admin/users/${userId}`, { method: "DELETE" }),
   listAuditRecords: (params = {}) => {
-    const search = new URLSearchParams(params).toString();
+    const search = buildSearch(params);
     return apiClient(`/api/admin/audit/records${search ? `?${search}` : ""}`, { method: "GET" });
   },
   getAuditDetail: (jobId) =>
@@ -46,7 +53,7 @@ const adminApi = {
       body: JSON.stringify({ rules }),
     }),
   listJobs: (params = {}) => {
-    const search = new URLSearchParams(params).toString();
+    const search = buildSearch(params);
     return apiClient(`/api/admin/jobs${search ? `?${search}` : ""}`, { method: "GET" });
   },
   cancelJob: (jobId) =>
@@ -54,7 +61,7 @@ const adminApi = {
   retryJob: (jobId) =>
     apiClient(`/api/admin/jobs/${jobId}/retry`, { method: "POST" }),
   listKbDocuments: (params = {}) => {
-    const search = new URLSearchParams(params).toString();
+    const search = buildSearch(params);
     return apiClient(`/api/admin/kb/documents${search ? `?${search}` : ""}`, { method: "GET" });
   },
   updateKbStatus: (payload) =>
@@ -73,7 +80,7 @@ const adminApi = {
       body: JSON.stringify(payload),
     }),
   listAdminLogs: (params = {}) => {
-    const search = new URLSearchParams(params).toString();
+    const search = buildSearch(params);
     return apiClient(`/api/admin/logs${search ? `?${search}` : ""}`, { method: "GET" });
   },
 };

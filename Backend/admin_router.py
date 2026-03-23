@@ -369,7 +369,7 @@ def _load_db_audit_record_rows(
               )
           AND (
                 :query_like = ''
-                OR LOWER(COALESCE(j.job_id, '')) LIKE :query_like
+                OR LOWER(COALESCE(CAST(j.job_id AS TEXT), '')) LIKE :query_like
                 OR LOWER(COALESCE(j.user_id, '')) LIKE :query_like
                 OR LOWER(COALESCE(j.file_name, '')) LIKE :query_like
                 OR LOWER(COALESCE(r.result_json ->> 'summary', '')) LIKE :query_like

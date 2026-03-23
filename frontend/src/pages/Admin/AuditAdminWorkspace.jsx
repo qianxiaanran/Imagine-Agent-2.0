@@ -200,13 +200,13 @@ const DetailModal = ({
         <div className="grid grid-cols-1 xl:grid-cols-[1.3fr_0.9fr]">
           <div className="p-6 space-y-5">
             <div className="flex flex-wrap gap-2">
-              <span className={cn("inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium", riskTone(record?.risk_level))}>
+              <span className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-full border px-3 py-1 text-xs font-medium leading-none", riskTone(record?.risk_level))}>
                 {riskLabel(record?.risk_level)}
               </span>
-              <span className={cn("inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium", reviewTone(record?.review_status))}>
+              <span className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-full border px-3 py-1 text-xs font-medium leading-none", reviewTone(record?.review_status))}>
                 {reviewLabel(record?.review_status)}
               </span>
-              <span className="inline-flex items-center rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:text-slate-300">
+              <span className="inline-flex items-center justify-center whitespace-nowrap rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:text-slate-300">
                 流程：{record?.workflow_state || processLabel(record?.status)}
               </span>
             </div>
@@ -237,7 +237,7 @@ const DetailModal = ({
                   findings.slice(0, 12).map((item, idx) => (
                     <div key={`${item?.type || item?.message || idx}`} className="px-4 py-4 border-t first:border-t-0 border-slate-100 dark:border-slate-800">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium", riskTone(item?.severity))}>
+                        <span className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-medium leading-none", riskTone(item?.severity))}>
                           {riskLabel(item?.severity)}
                         </span>
                         <div className="text-sm font-semibold text-slate-800 dark:text-slate-100">{item?.message || "未命名风险"}</div>
@@ -336,18 +336,18 @@ const DetailModal = ({
 
 const WarningTable = ({ records, onOpenDetail }) => (
   <div className="overflow-x-auto">
-    <table className="min-w-full text-sm text-slate-700 dark:text-slate-200">
+    <table className="min-w-[1080px] w-full text-sm text-slate-700 dark:text-slate-200">
       <thead>
         <tr className="text-left text-xs text-slate-500 border-b border-slate-200 dark:text-slate-400 dark:border-slate-800">
           <th className="py-3 pr-4">序号</th>
-          <th className="py-3 pr-4">单据类型</th>
+          <th className="py-3 pr-4 whitespace-nowrap">单据类型</th>
           <th className="py-3 pr-4">单据标题</th>
-          <th className="py-3 pr-4">业务公司</th>
-          <th className="py-3 pr-4">单据日期</th>
-          <th className="py-3 pr-4">风险级别</th>
-          <th className="py-3 pr-4">处置情况</th>
-          <th className="py-3 pr-4">当前流程</th>
-          <th className="py-3 pr-0 text-right">操作</th>
+          <th className="py-3 pr-4 whitespace-nowrap">业务公司</th>
+          <th className="py-3 pr-4 whitespace-nowrap">单据日期</th>
+          <th className="py-3 pr-4 whitespace-nowrap">风险级别</th>
+          <th className="py-3 pr-4 whitespace-nowrap">处置情况</th>
+          <th className="py-3 pr-4 whitespace-nowrap">当前流程</th>
+          <th className="py-3 pr-0 text-right whitespace-nowrap">操作</th>
         </tr>
       </thead>
       <tbody>
@@ -364,13 +364,13 @@ const WarningTable = ({ records, onOpenDetail }) => (
               <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{record.counterparty_name || "-"}</div>
             </td>
             <td className="py-4 pr-4 whitespace-nowrap">{formatDate(record.document_date || record.created_at)}</td>
-            <td className="py-4 pr-4">
-              <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-xs font-medium", riskTone(record.risk_level))}>
+            <td className="py-4 pr-4 whitespace-nowrap">
+              <span className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium leading-none", riskTone(record.risk_level))}>
                 {riskLabel(record.risk_level)}
               </span>
             </td>
-            <td className="py-4 pr-4">
-              <div className={cn("inline-flex rounded-full border px-2.5 py-1 text-xs font-medium", reviewTone(record.review_status))}>
+            <td className="py-4 pr-4 whitespace-nowrap">
+              <div className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-medium leading-none", reviewTone(record.review_status))}>
                 {reviewLabel(record.review_status)}
               </div>
             </td>
@@ -406,7 +406,7 @@ const ReportCards = ({ records, onOpenDetail }) => (
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <div className="text-lg font-semibold text-slate-900 dark:text-slate-100">{record.document_title}</div>
-              <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-[11px] font-medium", riskTone(record.risk_level))}>
+              <span className={cn("inline-flex items-center justify-center whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-medium leading-none", riskTone(record.risk_level))}>
                 {riskLabel(record.risk_level)}
               </span>
             </div>
@@ -459,6 +459,7 @@ const AuditAdminWorkspace = () => {
   const [view, setView] = useState("warnings");
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [page, setPage] = useState(0);
   const [meta, setMeta] = useState({
     count: 0,
@@ -484,6 +485,7 @@ const AuditAdminWorkspace = () => {
 
   const loadRecords = useCallback(async () => {
     setLoading(true);
+    setLoadError("");
     const effectiveQuery = (deferredQuery || filters.query || "").trim();
     try {
       const res = await adminApi.listAuditRecords({
@@ -514,6 +516,7 @@ const AuditAdminWorkspace = () => {
         limit: AUDIT_RECORD_PAGE_SIZE,
         has_more: false,
       });
+      setLoadError("审单记录加载失败，请检查当前账号权限、登录状态或后端接口。");
     } finally {
       setLoading(false);
     }
@@ -750,6 +753,12 @@ const AuditAdminWorkspace = () => {
           <div className="p-6">
             {loading ? (
               <AuditAdminSkeleton />
+            ) : loadError ? (
+              <div className="rounded-[28px] border border-amber-200 bg-amber-50 px-6 py-10 text-center dark:border-amber-900/60 dark:bg-amber-950/20">
+                <AlertCircle className="mx-auto text-amber-500 dark:text-amber-300" size={34} />
+                <div className="mt-4 text-lg font-medium text-amber-900 dark:text-amber-100">审单记录暂时无法加载</div>
+                <div className="mt-2 text-sm text-amber-700 dark:text-amber-300">{loadError}</div>
+              </div>
             ) : visibleRecords.length === 0 ? (
               <div className="rounded-[28px] border border-dashed border-slate-300 bg-white px-6 py-20 text-center dark:border-slate-700 dark:bg-slate-900">
                 <FileSearch className="mx-auto text-slate-300 dark:text-slate-600" size={34} />
