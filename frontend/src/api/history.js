@@ -59,6 +59,13 @@ const historyApi = {
       body: JSON.stringify({ title: newTitle })
     }),
 
+  setSessionPinned: (sessionId, pinned, userId) =>
+    apiClient(`/api/history/${sessionId}/pin?user_id=${userId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: Boolean(pinned) })
+    }),
+
   // ✨ 修改: 保存会话上下文 (转写框内容)，增加 contextType 参数
   // contextType 建议: 'voice_context' | 'ocr_context'
   saveContext: (sessionId, content, userId, contextType = 'context_save') =>

@@ -87,6 +87,7 @@ from history_manager import (
     get_history_page,
     get_user_sessions,
     rename_session,
+    set_session_pinned,
 )
 from deepseek_llm import ask_llm_stream_async, ask_llm
 from admin_utils import require_active_user
@@ -182,6 +183,10 @@ class ChatRequest(BaseModel):
 
 class RenameRequest(BaseModel):
     title: str
+
+
+class SessionPinRequest(BaseModel):
+    pinned: bool = False
 
 
 class ChatFeedbackRequest(BaseModel):
@@ -6333,6 +6338,14 @@ def rename_session_api(session_id: str, user_id: str, req: RenameRequest):
     if not success:
         raise HTTPException(status_code=500, detail="Failed to rename session")
     return {"status": "ok", "message": "Session renamed", "title": req.title}
+
+
+@router.patch("/history/{session_id}/pin")
+def pin_session_api(session_id: str, user_id: str, req: SessionPinRequest):
+    success = set_session_pinned(user_id, session_id, req.pinned)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update session pin state")
+    return {"status": "ok", "message": "Session pin updated", "pinned": bool(req.pinned)}
 
 
 @router.get("/chat/feedback/{session_id}")

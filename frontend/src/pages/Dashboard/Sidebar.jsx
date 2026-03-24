@@ -71,15 +71,8 @@ const Sidebar = ({
     }
   }, [isLoadingProfile]);
 
-  // 固定会话状态（本地存储）
-  const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`);
-      return new Set(saved ? JSON.parse(saved) : []);
-    } catch {
-      return new Set();
-    }
-  });
+  // 固定会话状态（服务端持久化 + 本地乐观更新）
+  const [pinnedSessionIds, setPinnedSessionIds] = useState(new Set());
 
   // 搜索相关
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -108,16 +101,24 @@ const Sidebar = ({
 
   const profileMenuRef = useRef(null);
 
-  // 更新固定状态并在本地保留
-  const togglePinSession = (sessionId) => {
-    const newPinned = new Set(pinnedSessionIds);
-    if (newPinned.has(sessionId)) {
-      newPinned.delete(sessionId);
+  const togglePinSession = async (sessionId) => {
+    const previousPinned = new Set(pinnedSessionIds);
+    const nextPinned = new Set(previousPinned);
+    const shouldPin = !previousPinned.has(sessionId);
+    if (shouldPin) {
+      nextPinned.add(sessionId);
     } else {
-      newPinned.add(sessionId);
+      nextPinned.delete(sessionId);
     }
-    setPinnedSessionIds(newPinned);
-    localStorage.setItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`, JSON.stringify([...newPinned]));
+    setPinnedSessionIds(nextPinned);
+
+    try {
+      await historyApi.setSessionPinned(sessionId, shouldPin, localUserProfile?.id || "anonymous");
+      onSessionListUpdate?.();
+    } catch (error) {
+      console.error("Pin update failed:", error);
+      setPinnedSessionIds(previousPinned);
+    }
   };
 
   // 排序：删除已删除 -> 固定在第一位 -> 原始时间顺序
@@ -159,15 +160,17 @@ const Sidebar = ({
   useEffect(() => {
     if (userProfile) {
       setLocalUserProfile((prev) => ({ ...prev, ...userProfile }));
-      // 用户更改时重新加载固定配置
-      try {
-        const saved = localStorage.getItem(`pinned_sessions_${userProfile.id}`);
-        setPinnedSessionIds(new Set(saved ? JSON.parse(saved) : []));
-      } catch {
-        setPinnedSessionIds(new Set());
-      }
     }
   }, [userProfile]);
+
+  useEffect(() => {
+    const serverPinnedIds = new Set(
+      (Array.isArray(sessionList) ? sessionList : [])
+        .filter((session) => Boolean(session?.pinned))
+        .map((session) => session.id)
+    );
+    setPinnedSessionIds(serverPinnedIds);
+  }, [sessionList, localUserProfile?.id]);
 
   useEffect(() => {
     setOptimisticDeletedIds(new Set());

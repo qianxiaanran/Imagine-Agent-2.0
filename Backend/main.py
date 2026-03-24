@@ -40,6 +40,7 @@ user_router = None
 chat_router = None
 audit_router = None
 admin_router = None
+tasks_router = None
 decision_router = None
 presentation_router = None
 warmup_decision_cache = None
@@ -53,6 +54,7 @@ get_task_result = None
 submit_supabase_task = None
 get_file_signed_url = None
 upload_bytes_to_supabase = None
+create_instant_task = None
 OCRManager = None
 get_shared_ocr_manager = None
 ocr_agent = None
@@ -63,6 +65,10 @@ generate_email_draft = None
 parse_ocr_content = None
 save_ocr_record = None
 warmup_embeddings = None
+register_ocr_task = None
+complete_ocr_task = None
+fail_ocr_task = None
+set_ocr_task_runner = None
 # 添加了可选的同步 ASR 可调用功能
 baidu_asr_from_bytes = None
 get_cached_sms_session = None
@@ -112,6 +118,42 @@ def _get_cached_user_status_profile(user_id: str) -> Optional[Dict[str, Any]]:
                 _USER_STATUS_CACHE.pop(key, None)
     return profile
 
+
+def _resolve_request_user_id(
+    request: Request,
+    provided_user_id: Optional[str] = None,
+    *,
+    allow_anonymous: bool = True,
+) -> Optional[str]:
+    resolved_user_id = str(provided_user_id or "").strip()
+    token = _bearer_token(request.headers.get("authorization")) if "_bearer_token" in globals() else None
+    if token:
+        try:
+            token_user_id = None
+            if len(token) > 100 and "_get_user_from_token" in globals():
+                token_user = _get_user_from_token(token)
+                token_user_id = getattr(token_user, "id", None)
+            elif token.startswith("sms-token-") and get_cached_sms_session:
+                sms_session = get_cached_sms_session(token)
+                if sms_session:
+                    token_user_id = sms_session.get("user_id")
+
+            if token_user_id:
+                token_user_id = str(token_user_id).strip()
+                if resolved_user_id and resolved_user_id != token_user_id:
+                    raise ValueError("user_id does not match session token")
+                resolved_user_id = token_user_id
+            elif not resolved_user_id and not allow_anonymous:
+                raise ValueError("Invalid session token")
+        except ValueError:
+            raise
+        except Exception:
+            if not allow_anonymous:
+                raise ValueError("Invalid session token")
+    if resolved_user_id:
+        return resolved_user_id
+    return "anonymous" if allow_anonymous else None
+
 try:
     from auth_router import router as auth_router, user_router
     from chat_router import router as chat_router
@@ -120,8 +162,9 @@ try:
     from decision_router import router as decision_router, warmup_decision_cache
     from documents_processing import upload_document_to_vector_store, delete_user_documents, store_text_to_vector_store, warmup_embeddings
     from document_upload_tasks import submit_document_upload_task, get_document_upload_task
-    from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase
+    from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase, create_instant_task
     from ocr_manager import OCRManager, get_shared_ocr_manager
+    from ocr_task_manager import register_ocr_task, complete_ocr_task, fail_ocr_task, set_ocr_task_runner
     from history_manager import save_context
     import share_manager
     from report_email_manager import generate_report_outline, generate_email_draft
@@ -146,6 +189,13 @@ try:
 except Exception as e:
     presentation_router = None
     print(f"[Presentation] presentation_router unavailable: {e}")
+
+try:
+    from tasks_router import router as tasks_router
+    print("[Tasks] tasks_router loaded")
+except Exception as e:
+    tasks_router = None
+    print(f"[Tasks] tasks_router unavailable: {e}")
 
 # 单独的负载共享模块
 share_manager = None
@@ -203,6 +253,23 @@ if OCRManager:
         traceback.print_exc()
 else:
     print("[OCR] module not loaded, skip init")
+
+
+def _run_ocr_recognition(content: bytes, filename: str, engine_value: str) -> Dict[str, Any]:
+    if not ocr_agent:
+        raise RuntimeError("OCR service unavailable")
+    result = ocr_agent.recognize(content, filename, engine=engine_value)
+    text_value = str(result.get("text") or "")
+    if text_value and not (text_value.startswith("\u274c") or text_value.startswith("[ERROR]")):
+        ocr_agent.store(text_value, filename)
+    return result
+
+
+if set_ocr_task_runner:
+    try:
+        set_ocr_task_runner(_run_ocr_recognition)
+    except Exception:
+        pass
 
 
 @app.middleware("http")
@@ -275,6 +342,10 @@ if admin_router:
     app.include_router(admin_router)
 else:
     print("[Warn] Admin Router not loaded, /api/admin endpoints unavailable")
+if tasks_router:
+    app.include_router(tasks_router)
+else:
+    print("[Warn] Tasks Router not loaded, /api/tasks endpoints unavailable")
 if decision_router:
     app.include_router(decision_router)
 else:
@@ -391,27 +462,54 @@ async def save_session_context(session_id: str, payload: ContextPayload, user_id
 
 
 @app.post("/api/ocr/recognize")
-async def ocr_recognize(file: UploadFile = File(...), engine: Optional[str] = Form(None)):
+async def ocr_recognize(
+    request: Request,
+    file: UploadFile = File(...),
+    engine: Optional[str] = Form(None),
+):
     if not ocr_agent:
         return {"error": "OCR service unavailable"}
+    task_record = None
     try:
         engine_value = (engine or "standard").strip().lower()
         if engine_value not in ("vl", "standard"):
             engine_value = "standard"
+        try:
+            resolved_user_id = _resolve_request_user_id(request, allow_anonymous=True)
+        except ValueError as exc:
+            return JSONResponse(status_code=401, content={"error": str(exc)})
         content = await file.read()
         if not content:
             return {"error": "Empty file"}
         file_url = _save_ocr_upload(content, file.filename)
-        result = ocr_agent.recognize(content, file.filename, engine=engine_value)
+        if register_ocr_task:
+            task_record = register_ocr_task(
+                file_bytes=content,
+                filename=file.filename,
+                user_id=resolved_user_id or "anonymous",
+                engine=engine_value,
+                file_url=file_url,
+                file_type=file.content_type or "",
+            )
+        result = _run_ocr_recognition(content, file.filename, engine_value)
         result["file_url"] = file_url
         result["file_name"] = file.filename
         result["file_type"] = file.content_type or ""
-        text_value = str(result.get("text") or "")
-        if text_value and not (text_value.startswith("\u274c") or text_value.startswith("[ERROR]")):
-            ocr_agent.store(text_value, file.filename)
-        return {"success": True, "data": result}
+        if complete_ocr_task and isinstance(task_record, dict):
+            complete_ocr_task(str(task_record.get("task_id") or ""), result)
+        return {
+            "success": True,
+            "task_id": task_record.get("task_id") if isinstance(task_record, dict) else None,
+            "result_link": task_record.get("result_link") if isinstance(task_record, dict) else None,
+            "data": result,
+        }
     except Exception as e:
         print(f"[OCR] API error: {e}")
+        if fail_ocr_task and isinstance(task_record, dict):
+            try:
+                fail_ocr_task(str(task_record.get("task_id") or ""), str(e))
+            except Exception:
+                pass
         return {"error": str(e)}
 
 
@@ -479,13 +577,17 @@ async def ocr_submit(payload: OCRSubmitPayload):
 
 
 @app.post("/api/voice/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(request: Request, file: UploadFile = File(...)):
     """
     [File mode] upload file -> store -> async transcription (for long recordings)
     """
     if not submit_file_task: return {"error": "Voice Service Unavailable"}
     try:
-        task_id = await submit_file_task(file)
+        try:
+            resolved_user_id = _resolve_request_user_id(request, allow_anonymous=True)
+        except ValueError as exc:
+            return JSONResponse(status_code=401, content={"error": str(exc)})
+        task_id = await submit_file_task(file, user_id=resolved_user_id)
         task_info = get_task_result(task_id)
         file_path = task_info.get('file_path')
 
@@ -493,7 +595,8 @@ async def transcribe(file: UploadFile = File(...)):
         return {
             "task_id": task_id,
             "message": "Task submitted via direct upload",
-            "file_path": file_path
+            "file_path": file_path,
+            "result_link": f"/tasks?task={task_id}",
         }
     except Exception as e:
         print(f"[Voice] API error: {e}")
@@ -504,12 +607,16 @@ async def transcribe(file: UploadFile = File(...)):
 
 # 新增：实时语音/短音频端点
 @app.post("/api/voice/instant")
-async def transcribe_instant(file: UploadFile = File(...)):
+async def transcribe_instant(request: Request, file: UploadFile = File(...)):
     """
     [Realtime mode] upload bytes directly -> return text synchronously (for short recordings)
     """
     if not baidu_asr_from_bytes: return {"error": "Voice Manager Unavailable"}
     try:
+        try:
+            resolved_user_id = _resolve_request_user_id(request, allow_anonymous=True)
+        except ValueError as exc:
+            return JSONResponse(status_code=401, content={"error": str(exc)})
         content = await file.read()
         stored_path = None
         if upload_bytes_to_supabase:
@@ -520,18 +627,55 @@ async def transcribe_instant(file: UploadFile = File(...)):
             )
         # 在 voice_manager 中调用同步 ASR 助手
         text = baidu_asr_from_bytes(content, file.filename)
-        return {"success": True, "text": text, "file_path": stored_path}
+        task_record = (
+            create_instant_task(
+                original_name=file.filename or "instant.wav",
+                file_path=stored_path,
+                user_id=resolved_user_id,
+                result_text=text,
+                error_message=None if text and not str(text).startswith("❌") and not str(text).startswith("[ERROR]") else str(text or "转写失败"),
+            )
+            if create_instant_task
+            else None
+        )
+        return {
+            "success": True,
+            "text": text,
+            "file_path": stored_path,
+            "task_id": task_record.get("task_id") if isinstance(task_record, dict) else None,
+            "result_link": f"/tasks?task={task_record.get('task_id')}" if isinstance(task_record, dict) else None,
+        }
     except Exception as e:
         print(f"[Voice] realtime API error: {e}")
+        if create_instant_task:
+            try:
+                task_record = create_instant_task(
+                    original_name=file.filename or "instant.wav",
+                    file_path=None,
+                    user_id=locals().get("resolved_user_id"),
+                    result_text=None,
+                    error_message=str(e),
+                )
+                return {
+                    "error": str(e),
+                    "task_id": task_record.get("task_id") if isinstance(task_record, dict) else None,
+                    "result_link": f"/tasks?task={task_record.get('task_id')}" if isinstance(task_record, dict) else None,
+                }
+            except Exception:
+                pass
         return {"error": str(e)}
 
 
 @app.post("/api/voice/transcribe_supabase")
-async def transcribe_via_supabase(req: TranscribeRequest):
+async def transcribe_via_supabase(request: Request, req: TranscribeRequest):
     if not submit_supabase_task: return {"error": "Voice Service Unavailable"}
     try:
-        task_id = await submit_supabase_task(req.file_path, req.original_name)
-        return {"task_id": task_id, "message": "Task submitted via Supabase"}
+        try:
+            resolved_user_id = _resolve_request_user_id(request, allow_anonymous=True)
+        except ValueError as exc:
+            return JSONResponse(status_code=401, content={"error": str(exc)})
+        task_id = await submit_supabase_task(req.file_path, req.original_name, user_id=resolved_user_id)
+        return {"task_id": task_id, "message": "Task submitted via Supabase", "result_link": f"/tasks?task={task_id}"}
     except Exception as e:
         print(f"[Voice] Supabase API error: {e}")
         return {"error": str(e)}

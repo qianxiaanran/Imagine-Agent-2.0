@@ -1,11 +1,12 @@
 import React, { memo } from "react";
-import { ArrowRight, Check, ChevronDown, Layout, PanelLeftOpen, Plus, Share2 } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Clock3, Layout, PanelLeftOpen, Plus, Share2 } from "lucide-react";
 
 const ModelMenu = memo(function ModelMenu({
   models,
   selectedModel,
   onSelectModel,
   onOpenDecisionCenter,
+  onGotoTaskCenter,
   mobile = false,
 }) {
   return (
@@ -42,9 +43,22 @@ const ModelMenu = memo(function ModelMenu({
             <Layout size={18} />
           </div>
           <div className="flex-1">
-            <div className="text-sm font-medium text-cyan-700 dark:text-cyan-300">数据决策系统</div>
+          <div className="text-sm font-medium text-cyan-700 dark:text-cyan-300">数据决策系统</div>
           </div>
           <ArrowRight size={16} className="text-cyan-500" />
+        </button>
+        <button
+          type="button"
+          onClick={onGotoTaskCenter}
+          className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-700/60 transition-colors text-left"
+        >
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
+            <Clock3 size={18} />
+          </div>
+          <div className="flex-1">
+            <div className="text-sm font-medium text-slate-700 dark:text-slate-200">任务中心</div>
+          </div>
+          <ArrowRight size={16} className="text-slate-400" />
         </button>
       </div>
     </div>
@@ -65,6 +79,9 @@ const DashboardTopbar = memo(function DashboardTopbar({
   onToggleMobileModelDropdown,
   onSelectMobileModel,
   onOpenDecisionCenter,
+  onOpenTaskCenter,
+  onGotoTaskCenter,
+  isTaskCenterOpen = false,
   currentSessionId,
   onShareClick,
   onNewChat,
@@ -91,11 +108,22 @@ const DashboardTopbar = memo(function DashboardTopbar({
                 selectedModel={selectedModel}
                 onSelectModel={onSelectMobileModel}
                 onOpenDecisionCenter={onOpenDecisionCenter}
+                onGotoTaskCenter={onGotoTaskCenter}
               />
             )}
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={onOpenTaskCenter}
+            className={`p-1 rounded-md transition-colors ${
+              isTaskCenterOpen
+                ? "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                : "text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+            }`}
+          >
+            <Clock3 size={24} />
+          </button>
           {currentSessionId && (
             <button onClick={onShareClick} className="text-gray-600 dark:text-gray-300 p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-md transition-colors">
               <Share2 size={24} />
@@ -126,11 +154,23 @@ const DashboardTopbar = memo(function DashboardTopbar({
                 selectedModel={selectedModel}
                 onSelectModel={onSelectDesktopModel}
                 onOpenDecisionCenter={onOpenDecisionCenter}
+                onGotoTaskCenter={onGotoTaskCenter}
               />
             )}
           </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={onOpenTaskCenter}
+            className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${
+              isTaskCenterOpen
+                ? "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                : "text-gray-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+            }`}
+          >
+            <Clock3 size={20} />
+            <span className="text-sm font-medium hidden lg:inline">任务中心</span>
+          </button>
           {currentSessionId && (
             <button onClick={onShareClick} className="p-2 text-gray-500 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors flex items-center gap-2">
               <Share2 size={20} />

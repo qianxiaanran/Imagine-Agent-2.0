@@ -14,6 +14,7 @@ const loadCapabilitiesPage = () => import('./pages/CapabilitiesPage');
 const loadQuickStartPage = () => import('./pages/QuickStartPage');
 const loadDashboardPage = () => import('./pages/Dashboard/DashboardPage');
 const loadDecisionPage = () => import('./pages/DecisionCenterPage');
+const loadTaskCenterPage = () => import('./pages/TaskCenterPage');
 const loadSharedPage = () => import('./pages/Dashboard/SharedChatPage');
 const loadAdminPage = () => import('./pages/Admin/AdminPage');
 const loadLoginModal = () => import('./pages/Login/LoginModal');
@@ -24,6 +25,7 @@ const CapabilitiesPage = React.lazy(loadCapabilitiesPage);
 const QuickStartPage = React.lazy(loadQuickStartPage);
 const DashboardPage = React.lazy(loadDashboardPage);
 const DecisionCenterPage = React.lazy(loadDecisionPage);
+const TaskCenterPage = React.lazy(loadTaskCenterPage);
 const SharedChatPage = React.lazy(loadSharedPage);
 const AdminPage = React.lazy(loadAdminPage);
 const LoginModal = React.lazy(loadLoginModal);
@@ -63,13 +65,14 @@ export default function App() {
   const isShareRoute = normalizedPath.startsWith('/share/');
   const isAdminRoute = normalizedPath.startsWith('/admin');
   const isDecisionRoute = normalizedPath === '/decision';
+  const isTasksRoute = normalizedPath === '/tasks';
   const isCapabilitiesRoute = normalizedPath === '/capabilities';
   const isQuickStartRoute = normalizedPath === '/quickstart';
   const shouldShowLoading = !isAuthReady;
   const rememberUntil = Number(localStorage.getItem(AUTH_REMEMBER_UNTIL_KEY) || 0);
   const hasStoredAuthHint = rememberUntil > 0 || !!localStorage.getItem(AUTH_TOKEN_KEY);
   const shouldInitializeAuthClient =
-    !isShareRoute && (isAuthenticated || isAdminRoute || isDecisionRoute || hasStoredAuthHint);
+    !isShareRoute && (isAuthenticated || isAdminRoute || isDecisionRoute || isTasksRoute || hasStoredAuthHint);
 
   useEffect(() => {
     if (!shouldInitializeAuthClient) {
@@ -204,6 +207,8 @@ export default function App() {
                 loadAdminPage();
               } else if (isDecisionRoute) {
                 loadDecisionPage();
+              } else if (isTasksRoute) {
+                loadTaskCenterPage();
               } else {
                 loadDashboardPage();
               }
@@ -230,7 +235,7 @@ export default function App() {
     };
 
     void checkAuth();
-  }, [isShareRoute, isAdminRoute, isDecisionRoute, isCapabilitiesRoute, isQuickStartRoute, rememberUntil]);
+  }, [isShareRoute, isAdminRoute, isDecisionRoute, isTasksRoute, isCapabilitiesRoute, isQuickStartRoute, rememberUntil]);
 
   useEffect(() => {
     if (shouldShowLoading) {
@@ -277,7 +282,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!isAuthReady || isAuthenticated || isShareRoute || isAdminRoute || isDecisionRoute) {
+    if (!isAuthReady || isAuthenticated || isShareRoute || isAdminRoute || isDecisionRoute || isTasksRoute) {
       return undefined;
     }
 
@@ -304,7 +309,7 @@ export default function App() {
         window.cancelIdleCallback(idleId);
       }
     };
-  }, [isAuthReady, isAuthenticated, isShareRoute, isAdminRoute, isDecisionRoute]);
+  }, [isAuthReady, isAuthenticated, isShareRoute, isAdminRoute, isDecisionRoute, isTasksRoute]);
 
   const openLoginModal = () => {
     void warmLoginModal();
@@ -360,6 +365,8 @@ export default function App() {
                 <AdminPage />
               ) : isDecisionRoute ? (
                 <DecisionCenterPage />
+              ) : isTasksRoute ? (
+                <TaskCenterPage />
               ) : (
                 <DashboardPage onLogout={handleLogout} currentMode={currentMode} onModeChange={setCurrentMode} />
               )
@@ -382,6 +389,8 @@ export default function App() {
                   ? '正在解析分享内容...'
                   : isDecisionRoute
                     ? '正在加载决策系统...'
+                  : isTasksRoute
+                    ? '正在加载任务中心...'
                   : '正在启动智能引擎...'
             }
             isVisible={shouldShowLoading}

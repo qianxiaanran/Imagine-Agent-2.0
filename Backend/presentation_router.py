@@ -26,6 +26,7 @@ from runtime_storage import (
     ensure_runtime_layout,
     migrate_legacy_runtime_files,
 )
+from task_registry import build_task_result_link, get_task as get_registered_task, upsert_task
 
 router = APIRouter(prefix="/api/presentation", tags=["Presentation"])
 ensure_runtime_layout()
@@ -246,6 +247,7 @@ class PresentonGenerateRequest(BaseModel):
     files: Optional[List[str]] = None
     provider: Literal["auto", "local", "cloud_sync", "cloud_async"] = "auto"
     base_url: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 class PresentonOutlineRequest(BaseModel):
@@ -358,6 +360,98 @@ def _build_headers() -> Dict[str, str]:
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+def _request_model_to_dict(req: PresentonGenerateRequest) -> Dict[str, Any]:
+    if hasattr(req, "model_dump"):
+        return req.model_dump(exclude_none=True)
+    return req.dict(exclude_none=True)
+
+
+def _extract_prompt_preview(req: PresentonGenerateRequest) -> str:
+    prompt = str(req.prompt or "").strip()
+    if prompt:
+        return prompt[:280]
+    slides = req.slides_markdown or []
+    if not slides:
+        return "PPT 生成任务"
+    joined = " ".join(str(item or "").strip() for item in slides[:2]).strip()
+    return joined[:280] or "PPT 生成任务"
+
+
+def _build_presenton_task_title(req: PresentonGenerateRequest) -> str:
+    preview = _extract_prompt_preview(req)
+    if not preview:
+        return "PPT 生成任务"
+    first_line = preview.splitlines()[0].strip()
+    if len(first_line) > 56:
+        first_line = f"{first_line[:56].rstrip()}..."
+    return f"PPT 生成 · {first_line}"
+
+
+def _sync_presenton_task_registry(
+    task_id: str,
+    *,
+    req: Optional[PresentonGenerateRequest] = None,
+    status: Optional[str] = None,
+    progress: Optional[int] = None,
+    message: Optional[str] = None,
+    error_message: Optional[str] = None,
+    download_url: Optional[str] = None,
+    edit_url: Optional[str] = None,
+    provider: Optional[str] = None,
+    raw: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    existing = get_registered_task(task_id) or {}
+    request_payload = dict(existing.get("source_payload") or {})
+    if req is not None:
+        request_payload = _request_model_to_dict(req)
+
+    normalized_provider = str(
+        provider
+        or existing.get("detail", {}).get("provider")
+        or request_payload.get("provider")
+        or "cloud_async"
+    ).strip()
+    prompt_preview = _extract_prompt_preview(req) if req is not None else str(
+        existing.get("detail", {}).get("prompt_preview")
+        or request_payload.get("prompt", "")
+    )[:280]
+    detail = dict(existing.get("detail") or {})
+    detail.update(
+        {
+            "provider": normalized_provider,
+            "template": request_payload.get("template"),
+            "slide_count": request_payload.get("n_slides"),
+            "language": request_payload.get("language"),
+            "prompt_preview": prompt_preview,
+            "message": message if message is not None else detail.get("message"),
+            "download_url": download_url if download_url is not None else detail.get("download_url"),
+            "edit_url": edit_url if edit_url is not None else detail.get("edit_url"),
+            "raw": raw if raw is not None else detail.get("raw"),
+        }
+    )
+    if detail.get("download_url"):
+        detail["has_download"] = True
+
+    status_value = status or existing.get("status") or "queued"
+    progress_value = progress if progress is not None else existing.get("progress", 0)
+    return upsert_task(
+        {
+            "task_id": task_id,
+            "task_type": "ppt",
+            "user_id": str(request_payload.get("user_id") or existing.get("user_id") or "anonymous").strip()
+            or "anonymous",
+            "title": _build_presenton_task_title(req) if req is not None else existing.get("title") or "PPT 生成任务",
+            "status": status_value,
+            "progress": progress_value,
+            "started_at": existing.get("started_at") or _utc_now_iso(),
+            "error_message": error_message if error_message is not None else existing.get("error_message"),
+            "result_link": build_task_result_link(task_id),
+            "retry_supported": True,
+            "detail": detail,
+            "source_payload": request_payload,
+        }
+    )
 
 def _template_retry_candidates(raw_template: Any) -> List[str]:
     value = str(raw_template or "").strip()
@@ -2623,6 +2717,7 @@ def _submit_cloud_async_task(base_url: str, headers: Dict[str, str], req: Presen
         "status": "pending",
         "task_id": task_id,
         "message": submit_data.get("message") or "任务已提交",
+        "result_link": build_task_result_link(task_id),
         "raw": submit_data,
     }
 
@@ -2830,6 +2925,7 @@ def _submit_ordered_presenton_task(base_url: str, req: PresentonGenerateRequest)
         "status": "pending",
         "task_id": task_id,
         "message": "任务已提交，正在按已选模板直接生成",
+        "result_link": build_task_result_link(task_id),
     }
 
 
@@ -3053,7 +3149,17 @@ def submit_presenton_ppt_task(req: PresentonGenerateRequest):
 
     if skip_reason is None:
         try:
-            return _submit_ordered_presenton_task(base_url, req)
+            result = _submit_ordered_presenton_task(base_url, req)
+            _sync_presenton_task_registry(
+                str(result.get("task_id") or "").strip(),
+                req=req,
+                status=result.get("status"),
+                progress=4,
+                message=result.get("message"),
+                provider=result.get("provider"),
+                raw=result.get("raw"),
+            )
+            return result
         except HTTPException as exc:
             logger.warning("Ordered Presenton pipeline unavailable, fallback to upstream async: %s", exc.detail)
         except Exception as exc:
@@ -3074,6 +3180,15 @@ def submit_presenton_ppt_task(req: PresentonGenerateRequest):
             result["raw"] = raw_payload
         elif skip_reason == "compatibility_policy":
             result["message"] = "当前模板使用稳定生成链路"
+        _sync_presenton_task_registry(
+            str(result.get("task_id") or "").strip(),
+            req=req,
+            status=result.get("status"),
+            progress=8,
+            message=result.get("message"),
+            provider=result.get("provider"),
+            raw=result.get("raw"),
+        )
         return result
     except Exception:
         with _MODEL_RUNTIME_LOCK:
@@ -3145,6 +3260,17 @@ def get_presenton_ppt_task_status(task_id: str, base_url: Optional[str] = None):
                     _ACTIVE_PPT_TASKS[task_id] = time.time()
                     _ACTIVE_PPT_TASKS[delegated_task_id] = time.time()
 
+            _sync_presenton_task_registry(
+                task_id,
+                status=status_value,
+                progress=delegated_progress,
+                message=display_message,
+                error_message=status_data.get("error"),
+                download_url=proxied_download or download_url,
+                edit_url=proxied_edit or edit_url,
+                provider=str(local_task.get("provider") or "ordered_async_fallback"),
+                raw=status_data,
+            )
             return {
                 "success": success_value,
                 "provider": str(local_task.get("provider") or "ordered_async_fallback"),
@@ -3168,13 +3294,28 @@ def get_presenton_ppt_task_status(task_id: str, base_url: Optional[str] = None):
                 _ACTIVE_PPT_TASKS.pop(task_id, None)
             else:
                 _ACTIVE_PPT_TASKS[task_id] = time.time()
+        local_progress = _coerce_progress_value(local_task.get("progress")) or _estimate_progress(
+            status_value,
+            _translate_progress_message(str(local_task.get("message") or "")),
+        )
+        _sync_presenton_task_registry(
+            task_id,
+            status=status_value,
+            progress=local_progress,
+            message=_translate_progress_message(str(local_task.get("message") or "")),
+            error_message=local_task.get("error"),
+            download_url=local_task.get("download_url"),
+            edit_url=local_task.get("edit_url"),
+            provider=str(local_task.get("provider") or "ordered_async"),
+            raw=local_task.get("raw"),
+        )
         return {
             "success": bool(local_task.get("success", True)),
             "provider": str(local_task.get("provider") or "ordered_async"),
             "task_id": task_id,
             "status": status_value,
             "message": _translate_progress_message(str(local_task.get("message") or "")),
-            "progress": _coerce_progress_value(local_task.get("progress")) or _estimate_progress(status_value, _translate_progress_message(str(local_task.get("message") or ""))),
+            "progress": local_progress,
             "download_url": local_task.get("download_url"),
             "download_url_raw": local_task.get("download_url_raw"),
             "edit_url": local_task.get("edit_url"),
@@ -3214,19 +3355,58 @@ def get_presenton_ppt_task_status(task_id: str, base_url: Optional[str] = None):
             # Do not mutate runtime during polling; toggling global config mid-task can break Presenton jobs.
             _ACTIVE_PPT_TASKS[task_id] = time.time()
 
+    resolved_progress = explicit_progress if explicit_progress is not None else _estimate_progress(status_value, message)
+    _sync_presenton_task_registry(
+        task_id,
+        status=status_value,
+        progress=resolved_progress,
+        message=message,
+        error_message=status_data.get("error"),
+        download_url=proxied_download or download_url,
+        edit_url=proxied_edit or edit_url,
+        provider="cloud_async",
+        raw=status_data,
+    )
     return {
         "success": True,
         "provider": "cloud_async",
         "task_id": task_id,
         "status": status_value,
         "message": message,
-        "progress": explicit_progress if explicit_progress is not None else _estimate_progress(status_value, message),
+        "progress": resolved_progress,
         "download_url": proxied_download or download_url,
         "download_url_raw": download_url,
         "edit_url": proxied_edit or edit_url,
         "edit_url_raw": edit_url,
         "raw": status_data,
     }
+
+
+def refresh_presenton_task_record(task_id: str) -> Optional[Dict[str, Any]]:
+    task = get_registered_task(task_id)
+    if not task:
+        return None
+    status_value = str(task.get("status") or "").strip().lower()
+    if status_value in TERMINAL_TASK_STATUSES:
+        return task
+    source_payload = dict(task.get("source_payload") or {})
+    base_url = source_payload.get("base_url")
+    get_presenton_ppt_task_status(task_id, base_url=base_url)
+    return get_registered_task(task_id)
+
+
+def retry_presenton_task(task_id: str) -> Dict[str, Any]:
+    task = get_registered_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    source_payload = dict(task.get("source_payload") or {})
+    if not source_payload:
+        raise HTTPException(status_code=400, detail="Missing task payload")
+    try:
+        req = PresentonGenerateRequest(**source_payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid task payload: {exc}") from exc
+    return submit_presenton_ppt_task(req)
 
 
 @router.get("/presenton/download")

@@ -48,6 +48,7 @@ const ShareModal = lazy(() => import('./ShareModal'));
 const OcrIngestModal = lazy(() => import('./OcrIngestModal'));
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
 const SourcePanel = lazy(() => import('./SourcePanel'));
+const TaskCenterPopover = lazy(() => import('./TaskCenterPopover'));
 
 const INITIAL_MESSAGE_COUNT = 20;
 const MARKDOWN_MESSAGE_COUNT = 6;
@@ -1178,6 +1179,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [isSessionsLoading, setIsSessionsLoading] = useState(true);
   const [isSavingContext, setIsSavingContext] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [isTaskCenterOpen, setIsTaskCenterOpen] = useState(false);
   const [appSettings, setAppSettings] = useState(() => loadAppSettings());
   const [settingsModalState, setSettingsModalState] = useState({ isOpen: false, category: 'general' });
 
@@ -2495,8 +2497,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           const wavBlob = await convertWebMToWav(file);
           const formData = new FormData();
           formData.append('file', wavBlob, 'instant.wav');
+          const token = localStorage.getItem(AUTH_TOKEN_KEY);
+          const voiceHeaders = token ? { Authorization: `Bearer ${token}` } : {};
           const res = await fetch(`${API_BASE_URL}/api/voice/instant`, {
               method: 'POST',
+              headers: voiceHeaders,
               body: formData
           });
           const result = await res.json();
@@ -3073,6 +3078,29 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const popup = window.open('/decision', '_blank', 'noopener,noreferrer');
       if (!popup) {
           console.warn('Popup blocked when opening decision center.');
+          return;
+      }
+      try {
+          popup.opener = null;
+      } catch {
+          // Ignore browsers that disallow writing to opener.
+      }
+  };
+
+  const handleOpenTaskCenter = (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      setIsTaskCenterOpen((prev) => !prev);
+  };
+
+  const handleGoToTaskCenterPage = (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      setIsTaskCenterOpen(false);
+      if (typeof window === 'undefined') return;
+      const popup = window.open('/tasks', '_blank', 'noopener,noreferrer');
+      if (!popup) {
+          console.warn('Popup blocked when opening task center page.');
           return;
       }
       try {
@@ -4145,7 +4173,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   const formData = new FormData();
                   formData.append('file', file);
                   formData.append('engine', normalizeOcrEngine(ocrEngine));
-                  const res = await fetch(`${API_BASE_URL}/api/voice/transcribe`, { method: 'POST', body: formData });
+                  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+                  const voiceHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+                  const res = await fetch(`${API_BASE_URL}/api/voice/transcribe`, {
+                      method: 'POST',
+                      headers: voiceHeaders,
+                      body: formData
+                  });
                   const data = await res.json();
 
                   if (data.task_id) {
@@ -4944,9 +4978,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       // 🟢 新逻辑：调用 /api/voice/instant (实时转写)
       const formData = new FormData();
       formData.append('file', wavBlob, 'recording.wav');
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      const voiceHeaders = token ? { Authorization: `Bearer ${token}` } : {};
 
       const res = await fetch(`${API_BASE_URL}/api/voice/instant`, {
           method: 'POST',
+          headers: voiceHeaders,
           body: formData
       });
       const result = await res.json();
@@ -5864,9 +5901,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                 include_images: !!standalonePptForm.includeImages,
                 web_search: false,
                 include_title_slide: false,
-                include_table_of_contents: false,
+              include_table_of_contents: false,
               allow_access_to_user_info: false,
               trigger_webhook: false,
+              user_id: userProfile?.id || undefined,
           };
 
           const submitResult = await presentationApi.submitPresentonPptTask(submitPayload);
@@ -5999,6 +6037,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleModelChangeStable = useStableCallback(handleModelChange);
   const handleOpenSettingsModalStable = useStableCallback(handleOpenSettingsModal);
   const handleOpenDecisionCenterStable = useStableCallback(handleOpenDecisionCenter);
+  const handleOpenTaskCenterStable = useStableCallback(handleOpenTaskCenter);
+  const handleGoToTaskCenterPageStable = useStableCallback(handleGoToTaskCenterPage);
   const handleShareClickStable = useStableCallback(handleShareClick);
   const handleModeChangeStable = useStableCallback(onModeChange);
   const handleLogoutStable = useStableCallback(onLogout);
@@ -6007,6 +6047,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleCloseSidebar = useCallback(() => setIsSidebarOpen(false), []);
   const handleOpenMobileSidebar = useCallback(() => setIsMobileSidebarOpen(true), []);
   const handleCloseMobileSidebar = useCallback(() => setIsMobileSidebarOpen(false), []);
+  const handleCloseTaskCenter = useCallback(() => setIsTaskCenterOpen(false), []);
   const handleToggleDesktopModelDropdown = useCallback(() => setIsDropdownOpen((open) => !open), []);
   const handleToggleMobileModelDropdown = useCallback(() => setIsMobileModelDropdownOpen((open) => !open), []);
   const handleSelectDesktopModel = useCallback((modelId) => {
@@ -6020,8 +6061,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleHeaderOpenDecisionCenter = useCallback((event) => {
     setIsDropdownOpen(false);
     setIsMobileModelDropdownOpen(false);
+    setIsTaskCenterOpen(false);
     handleOpenDecisionCenterStable(event);
   }, [handleOpenDecisionCenterStable]);
+  const handleHeaderOpenTaskCenter = useCallback((event) => {
+    setIsDropdownOpen(false);
+    setIsMobileModelDropdownOpen(false);
+    handleOpenTaskCenterStable(event);
+  }, [handleOpenTaskCenterStable]);
+  const handleHeaderGotoTaskCenter = useCallback((event) => {
+    setIsDropdownOpen(false);
+    setIsMobileModelDropdownOpen(false);
+    handleGoToTaskCenterPageStable(event);
+  }, [handleGoToTaskCenterPageStable]);
   const handleEmptyStateQuickAction = useCallback((prompt) => {
     setInputValue(prompt);
   }, []);
@@ -8458,6 +8510,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         onInputChange={setOcrSummaryInput}
         onSend={handleSendCurrentOcrSummaryMessage}
       />
+      <Suspense fallback={null}>
+        <TaskCenterPopover
+          isOpen={isTaskCenterOpen}
+          onClose={handleCloseTaskCenter}
+        />
+      </Suspense>
       <DashboardSidebars
         isMobileSidebarOpen={isMobileSidebarOpen}
         onCloseMobileSidebar={handleCloseMobileSidebar}
@@ -8492,6 +8550,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           onToggleMobileModelDropdown={handleToggleMobileModelDropdown}
           onSelectMobileModel={handleSelectMobileModel}
           onOpenDecisionCenter={handleHeaderOpenDecisionCenter}
+          onOpenTaskCenter={handleHeaderOpenTaskCenter}
+          onGotoTaskCenter={handleHeaderGotoTaskCenter}
+          isTaskCenterOpen={isTaskCenterOpen}
           currentSessionId={currentSessionId}
           onShareClick={handleShareClickStable}
           onNewChat={handleNewChatStable}

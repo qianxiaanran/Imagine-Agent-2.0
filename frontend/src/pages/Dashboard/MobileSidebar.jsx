@@ -76,15 +76,8 @@ const MobileSidebar = memo(({
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef(null);
 
-  // 固定会话状态（本地存储）
-  const [pinnedSessionIds, setPinnedSessionIds] = useState(() => {
-    try {
-      const saved = localStorage.getItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`);
-      return new Set(saved ? JSON.parse(saved) : []);
-    } catch {
-      return new Set();
-    }
-  });
+  // 固定会话状态（服务端持久化 + 本地乐观更新）
+  const [pinnedSessionIds, setPinnedSessionIds] = useState(new Set());
 
   // 会话运行状态
   const [menuOpenId, setMenuOpenId] = useState(null);
@@ -123,16 +116,24 @@ const MobileSidebar = memo(({
     : displaySessions.slice(0, visibleSessionCount);
   const hasMoreSessions = !shouldRenderAllSessions && displaySessions.length > sessionsToRender.length;
 
-  // 更新固定状态并在本地保留
-  const togglePinSession = (sessionId) => {
-    const newPinned = new Set(pinnedSessionIds);
-    if (newPinned.has(sessionId)) {
-      newPinned.delete(sessionId);
+  const togglePinSession = async (sessionId) => {
+    const previousPinned = new Set(pinnedSessionIds);
+    const nextPinned = new Set(previousPinned);
+    const shouldPin = !previousPinned.has(sessionId);
+    if (shouldPin) {
+      nextPinned.add(sessionId);
     } else {
-      newPinned.add(sessionId);
+      nextPinned.delete(sessionId);
     }
-    setPinnedSessionIds(newPinned);
-    localStorage.setItem(`pinned_sessions_${userProfile?.id || 'anonymous'}`, JSON.stringify([...newPinned]));
+    setPinnedSessionIds(nextPinned);
+
+    try {
+      await historyApi.setSessionPinned(sessionId, shouldPin, localUserProfile?.id || "anonymous");
+      onSessionListUpdate?.();
+    } catch (error) {
+      console.error("Pin update failed:", error);
+      setPinnedSessionIds(previousPinned);
+    }
   };
 
   // 🔒 逻辑变更：只有在“通用企业问答” (Model ID: 0) 时才允许使用知识库/数据库
@@ -149,15 +150,17 @@ const MobileSidebar = memo(({
   useEffect(() => {
     if (userProfile) {
       setLocalUserProfile((prev) => ({ ...prev, ...userProfile }));
-      // 当用户更改时重新加载固定配置
-      try {
-        const saved = localStorage.getItem(`pinned_sessions_${userProfile.id}`);
-        setPinnedSessionIds(new Set(saved ? JSON.parse(saved) : []));
-      } catch {
-        setPinnedSessionIds(new Set());
-      }
     }
   }, [userProfile]);
+
+  useEffect(() => {
+    const serverPinnedIds = new Set(
+      (Array.isArray(sessionList) ? sessionList : [])
+        .filter((session) => Boolean(session?.pinned))
+        .map((session) => session.id)
+    );
+    setPinnedSessionIds(serverPinnedIds);
+  }, [sessionList, localUserProfile?.id]);
 
   useEffect(() => {
     if (!isOpen) return;

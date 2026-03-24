@@ -1383,6 +1383,42 @@ def retry_audit_job(job_id: str) -> Tuple[bool, Optional[str]]:
         return False, str(e)
 
 
+def retry_audit_job_with_result(job_id: str) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+    job = _hydrate_job_from_storage(job_id)
+    if not job:
+        job = _load_job_from_db(job_id)
+    if not job:
+        return False, "Job not found", None
+    user_id = job.get("user_id") or "anonymous"
+    file_url = job.get("file_url")
+    file_name = job.get("file_name") or os.path.basename(str(file_url or "")) or "document"
+    if not file_url:
+        return False, "Missing file path", None
+    local_path = _resolve_audit_local_path(
+        file_url,
+        user_id=user_id,
+        job_id=job_id,
+        file_name=file_name,
+        local_path_hint=job.get("local_path"),
+    )
+    if not local_path or not os.path.exists(local_path):
+        return False, f"File not found: {local_path}", None
+    try:
+        with open(local_path, "rb") as f:
+            file_bytes = f.read()
+        new_job = enqueue_audit_job(
+            file_bytes,
+            file_name,
+            user_id,
+            job.get("doc_type", "auto"),
+            case_id=job.get("case_id"),
+            model_type=job.get("model_type"),
+        )
+        return True, None, new_job
+    except Exception as e:
+        return False, str(e), None
+
+
 def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
     snapshot = _load_job_from_db(job_id)
     local_job = _hydrate_job_from_storage(job_id)

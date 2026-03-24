@@ -46,6 +46,7 @@ async def audit_start(
     return {
         "job_id": job["job_id"],
         "status": job["status"],
+        "result_link": f"/tasks?task={job['job_id']}",
         "case_id": job.get("case_id"),
         "stage": job.get("stage"),
         "workflow_state": snapshot.get("workflow_state") or job.get("workflow_state"),

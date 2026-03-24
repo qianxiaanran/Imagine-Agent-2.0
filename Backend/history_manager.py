@@ -7,6 +7,7 @@ from supabase_client import engine, supabase
 
 _HISTORY_ID_FIXED = False
 _SESSION_LIST_INDEXES_FIXED = False
+_SESSION_PREFERENCES_TABLE_FIXED = False
 _SESSION_LIST_LIMIT = 500
 _HISTORY_PAGE_LIMIT_DEFAULT = 40
 _HISTORY_PAGE_LIMIT_MAX = 100
@@ -82,6 +83,57 @@ def _ensure_session_list_indexes():
         _SESSION_LIST_INDEXES_FIXED = True
     except Exception as e:
         print(f"[History] ensure session list indexes failed: {e}")
+
+
+def _ensure_session_preferences_table():
+    global _SESSION_PREFERENCES_TABLE_FIXED
+    if _SESSION_PREFERENCES_TABLE_FIXED:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.session_preferences (
+                        user_id text NOT NULL,
+                        session_id text NOT NULL,
+                        is_pinned boolean NOT NULL DEFAULT false,
+                        created_at timestamptz NOT NULL DEFAULT now(),
+                        updated_at timestamptz NOT NULL DEFAULT now(),
+                        PRIMARY KEY (user_id, session_id)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_session_preferences_user_updated "
+                    "ON public.session_preferences (user_id, updated_at DESC)"
+                )
+            )
+        _SESSION_PREFERENCES_TABLE_FIXED = True
+    except Exception as e:
+        print(f"[History] ensure session preferences table failed: {e}")
+
+
+def _fetch_session_preferences(user_id):
+    _ensure_session_preferences_table()
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    SELECT session_id, is_pinned, updated_at
+                    FROM public.session_preferences
+                    WHERE user_id = :user_id
+                    """
+                ),
+                {"user_id": str(user_id)},
+            )
+            return [dict(row) for row in result.mappings().all()]
+    except Exception as e:
+        print(f"[History] fetch session preferences failed: {e}")
+        return []
 
 
 def _normalize_session_date(value):
@@ -419,6 +471,15 @@ def get_user_sessions(user_id):
             title = row.get('title')
             if sid:
                 custom_titles[sid] = title
+        preference_rows = _fetch_session_preferences(user_id)
+        preference_map = {
+            str(row.get("session_id") or ""): {
+                "pinned": bool(row.get("is_pinned")),
+                "updated_at": _normalize_session_date(row.get("updated_at")),
+            }
+            for row in (preference_rows or [])
+            if row.get("session_id")
+        }
 
         latest_rows = _fetch_latest_session_rows(user_id)
 
@@ -453,7 +514,8 @@ def get_user_sessions(user_id):
             sessions.append({
                 "id": sid,
                 "title": title,
-                "date": _normalize_session_date(row.get("created_at"))
+                "date": _normalize_session_date(row.get("created_at")),
+                "pinned": bool((preference_map.get(sid) or {}).get("pinned")),
             })
 
         for sid, title in custom_titles.items():
@@ -461,10 +523,17 @@ def get_user_sessions(user_id):
                 sessions.append({
                     "id": sid,
                     "title": title,
-                    "date": ""
+                    "date": "",
+                    "pinned": bool((preference_map.get(sid) or {}).get("pinned")),
                 })
 
-        sessions.sort(key=lambda x: x.get('date') or "", reverse=True)
+        sessions.sort(
+            key=lambda x: (
+                1 if x.get("pinned") else 0,
+                x.get('date') or "",
+            ),
+            reverse=True,
+        )
         return sessions
     except Exception as e:
         print(f"Error fetching sessions: {e}")
@@ -476,6 +545,17 @@ def delete_session(user_id, session_id):
     try:
         supabase.table("history").delete().eq("session_id", session_id).eq("user_id", str(user_id)).execute()
         supabase.table("session_titles").delete().eq("session_id", session_id).eq("user_id", str(user_id)).execute()
+        _ensure_session_preferences_table()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM public.session_preferences
+                    WHERE user_id = :user_id AND session_id = :session_id
+                    """
+                ),
+                {"user_id": str(user_id), "session_id": str(session_id)},
+            )
         return True
     except Exception as e:
         print(f"Error deleting session: {e}")
@@ -493,5 +573,40 @@ def rename_session(user_id, session_id, new_title):
         return True
     except Exception as e:
         print(f"Error renaming session: {e}")
+        return False
+
+
+def set_session_pinned(user_id, session_id, pinned):
+    try:
+        _ensure_session_preferences_table()
+        safe_user_id = str(user_id)
+        safe_session_id = str(session_id)
+        should_pin = bool(pinned)
+        with engine.begin() as conn:
+            if should_pin:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO public.session_preferences (user_id, session_id, is_pinned, created_at, updated_at)
+                        VALUES (:user_id, :session_id, true, now(), now())
+                        ON CONFLICT (user_id, session_id)
+                        DO UPDATE SET is_pinned = true, updated_at = now()
+                        """
+                    ),
+                    {"user_id": safe_user_id, "session_id": safe_session_id},
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM public.session_preferences
+                        WHERE user_id = :user_id AND session_id = :session_id
+                        """
+                    ),
+                    {"user_id": safe_user_id, "session_id": safe_session_id},
+                )
+        return True
+    except Exception as e:
+        print(f"Error updating session pin status: {e}")
         return False
 
