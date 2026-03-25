@@ -12,6 +12,7 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 import numpy as np
 import logging
+from runtime_storage import RUNTIME_PROCESS_TEMP_ROOT, configure_process_temp_dir
 
 
 def _add_torch_dll_paths():
@@ -81,6 +82,7 @@ def _add_cuda_dll_paths():
 
 _add_torch_dll_paths()
 _add_cuda_dll_paths()
+configure_process_temp_dir()
 
 # 🔧 [Windows 修复] 解决 PaddleOCR 可能出现的 OMP 库冲突错误
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -264,7 +266,7 @@ class OCRManager:
 
             # 3. 提取 Markdown 内容
             # 为了兼容性，先尝试 save_to_markdown，如果失败则尝试直接读取属性
-            with tempfile.TemporaryDirectory() as temp_dir:
+            with tempfile.TemporaryDirectory(dir=str(RUNTIME_PROCESS_TEMP_ROOT)) as temp_dir:
                 try:
                     for res in output:
                         try:

@@ -3,6 +3,8 @@ import sys
 import time
 import threading
 import uuid
+import io
+import zipfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
@@ -23,15 +25,18 @@ load_dotenv(dotenv_path=os.path.join(_env_dir, ".env"), override=False)
 load_dotenv(dotenv_path=os.path.join(_env_dir, ".env.local"), override=True)
 from runtime_storage import (
     RUNTIME_OCR_ROOT,
+    RUNTIME_SEAL_ROOT,
     RUNTIME_STATIC_ROOT,
     build_static_api_url,
     cleanup_runtime_files,
+    configure_process_temp_dir,
     ensure_runtime_layout,
     migrate_legacy_runtime_files,
     start_runtime_cleanup_loop,
 )
 
 ensure_runtime_layout()
+configure_process_temp_dir()
 migrate_legacy_runtime_files()
 
 # 初始化可选模块
@@ -69,6 +74,7 @@ register_ocr_task = None
 complete_ocr_task = None
 fail_ocr_task = None
 set_ocr_task_runner = None
+extract_transparent_seal = None
 # 添加了可选的同步 ASR 可调用功能
 baidu_asr_from_bytes = None
 get_cached_sms_session = None
@@ -89,6 +95,32 @@ def _save_ocr_upload(content: bytes, filename: str) -> str:
     with open(abs_path, "wb") as f:
         f.write(content)
     return build_static_api_url("ocr", date_folder, safe_name)
+
+
+def _save_seal_output(content: bytes) -> str:
+    return _save_seal_asset(content, "seal.png", default_ext=".png")
+
+
+def _save_seal_source(content: bytes, filename: str) -> str:
+    return _save_seal_asset(content, filename or "seal-source.png", default_ext=".png")
+
+
+def _save_seal_asset(content: bytes, filename: str, default_ext: str = ".png") -> str:
+    date_folder = datetime.utcnow().strftime("%Y%m%d")
+    ext = os.path.splitext(filename or "")[1]
+    if not ext or len(ext) > 10:
+        ext = default_ext
+    safe_name = f"{uuid.uuid4().hex}{ext}"
+    abs_dir = RUNTIME_SEAL_ROOT / date_folder
+    abs_dir.mkdir(parents=True, exist_ok=True)
+    abs_path = abs_dir / safe_name
+    with open(abs_path, "wb") as f:
+        f.write(content)
+    return build_static_api_url("ocr", "seal", date_folder, safe_name)
+
+
+def _save_seal_archive(content: bytes) -> str:
+    return _save_seal_asset(content, "seals.zip", default_ext=".zip")
 
 
 def _get_cached_user_status_profile(user_id: str) -> Optional[Dict[str, Any]]:
@@ -169,6 +201,7 @@ try:
     import share_manager
     from report_email_manager import generate_report_outline, generate_email_draft
     from ocr_structured import parse_ocr_content, save_ocr_record
+    from seal_extractor import extract_transparent_seal
     import voice_ws_proxy
     from admin_utils import _bearer_token, _get_token_iat, _get_user_from_token, _fetch_profile
     from auth_router import _get_session_from_token as get_cached_sms_session
@@ -574,6 +607,132 @@ async def ocr_submit(payload: OCRSubmitPayload):
         return {"success": False, "error": err or "Insert failed"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.post("/api/ocr/seal-extract")
+async def ocr_seal_extract(
+    request: Request,
+    file: UploadFile = File(...),
+    target_color: Optional[str] = Form("#d81e2f"),
+    tolerance: Optional[int] = Form(30),
+    gray_threshold: Optional[float] = Form(0.06),
+    channel_mode: Optional[str] = Form("auto"),
+    channel_ratio: Optional[int] = Form(38),
+    crop_mode: Optional[str] = Form("focus"),
+    fill_radius: Optional[int] = Form(10),
+    extract_mode: Optional[str] = Form("smart"),
+    prefer_paddle: Optional[bool] = Form(True),
+):
+    if not extract_transparent_seal:
+        return JSONResponse(status_code=503, content={"success": False, "error": "Seal extraction service unavailable"})
+
+    try:
+        _resolve_request_user_id(request, allow_anonymous=True)
+    except ValueError as exc:
+        return JSONResponse(status_code=401, content={"success": False, "error": str(exc)})
+
+    try:
+        content = await file.read()
+        if not content:
+            return JSONResponse(status_code=400, content={"success": False, "error": "Empty file"})
+        source_url = _save_seal_source(content, file.filename or "seal-source.png")
+
+        settings = {
+            "target_color": target_color,
+            "tolerance": tolerance,
+            "gray_threshold": gray_threshold,
+            "channel_mode": channel_mode,
+            "channel_ratio": channel_ratio,
+            "crop_mode": crop_mode,
+            "fill_radius": fill_radius,
+            "extract_mode": extract_mode,
+            "prefer_paddle": prefer_paddle,
+        }
+
+        result = extract_transparent_seal(
+            content,
+            file.filename or "seal-source",
+            settings=settings,
+            ocr_engine=ocr_agent,
+        )
+        raw_items = result.pop("items", None)
+        base_name = os.path.splitext(file.filename or "seal")[0] or "seal"
+        normalized_items: List[Dict[str, Any]] = []
+
+        if raw_items and isinstance(raw_items, list):
+            for item_index, raw_item in enumerate(raw_items):
+                if not isinstance(raw_item, dict):
+                    continue
+                item_png = raw_item.get("result_png")
+                if not item_png:
+                    continue
+                download_name = f"{base_name}_seal_{item_index + 1:02d}.png"
+                item_url = _save_seal_output(item_png)
+                item_payload = {
+                    **{key: value for key, value in raw_item.items() if key != "result_png"},
+                    "result_url": item_url,
+                    "download_name": download_name,
+                    "content_type": "image/png",
+                }
+                normalized_items.append(item_payload)
+        else:
+            result_png = result.pop("result_png")
+            result_url = _save_seal_output(result_png)
+            normalized_items.append(
+                {
+                    **result,
+                    "candidate_index": 0,
+                    "candidate_label": "印章 1",
+                    "result_url": result_url,
+                    "download_name": f"{base_name}_transparent.png",
+                    "content_type": "image/png",
+                }
+            )
+
+        if not normalized_items:
+            return JSONResponse(status_code=400, content={"success": False, "error": "未生成可下载的印章结果。"})
+
+        archive_url = ""
+        archive_download_name = ""
+        if len(normalized_items) > 1 and raw_items and isinstance(raw_items, list):
+            archive_buffer = io.BytesIO()
+            with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive_file:
+                for item_index, raw_item in enumerate(raw_items):
+                    if not isinstance(raw_item, dict) or not raw_item.get("result_png"):
+                        continue
+                    archive_file.writestr(f"{base_name}_seal_{item_index + 1:02d}.png", raw_item["result_png"])
+            archive_url = _save_seal_archive(archive_buffer.getvalue())
+            archive_download_name = f"{base_name}_seals.zip"
+
+        selected_index = int(result.get("selected_index") or 0)
+        if selected_index < 0 or selected_index >= len(normalized_items):
+            selected_index = 0
+        selected_item = normalized_items[selected_index]
+
+        return {
+            "success": True,
+            "data": {
+                **{key: value for key, value in result.items() if key not in {"result_png", "items"}},
+                **selected_item,
+                "source_url": source_url,
+                "source_name": file.filename or "seal-source",
+                "source_size_bytes": len(content),
+                "source_content_type": file.content_type or "",
+                "settings": settings,
+                "selected_index": selected_index,
+                "item_count": len(normalized_items),
+                "items": normalized_items,
+                "archive_url": archive_url,
+                "archive_download_name": archive_download_name,
+            },
+        }
+    except RuntimeError as exc:
+        return JSONResponse(status_code=400, content={"success": False, "error": str(exc)})
+    except Exception as exc:
+        print(f"[SealExtract] API error: {exc}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"success": False, "error": str(exc)})
 
 
 @app.post("/api/voice/transcribe")

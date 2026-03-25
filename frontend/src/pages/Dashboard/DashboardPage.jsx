@@ -47,6 +47,7 @@ const SettingsModal = lazy(() => import('../../components/SettingsModal'));
 const VoiceRecorder = lazy(() => import('../../components/VoiceRecorder'));
 const ShareModal = lazy(() => import('./ShareModal'));
 const OcrIngestModal = lazy(() => import('./OcrIngestModal'));
+const SealExtractorWorkspace = lazy(() => import('./SealExtractorWorkspace'));
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
 const SourcePanel = lazy(() => import('./SourcePanel'));
 const TaskCenterPopover = lazy(() => import('./TaskCenterPopover'));
@@ -1192,6 +1193,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [userProfile, setUserProfile] = useState({ id: 'anonymous', name: 'User', avatar: '' });
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const currentSessionIdRef = useRef(null);
+  const sealHistoryPersistSignatureRef = useRef('');
   const [sessionList, setSessionList] = useState([]);
   const [historyCursor, setHistoryCursor] = useState(null);
   const [historyHasMoreServer, setHistoryHasMoreServer] = useState(false);
@@ -1209,6 +1211,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [ocrFiles, setOcrFiles] = useState([]);
   const [activeOcrId, setActiveOcrId] = useState(null);
   const [ocrViewTab, setOcrViewTab] = useState("match");
+  const [ocrWorkspaceView, setOcrWorkspaceView] = useState("ocr");
+  const [sealHistorySnapshot, setSealHistorySnapshot] = useState(null);
   const [ocrPageIndex, setOcrPageIndex] = useState(0);
   const [isOcrEngineOpen, setIsOcrEngineOpen] = useState(false);
   const [isOcrDownloadOpen, setIsOcrDownloadOpen] = useState(false);
@@ -1355,6 +1359,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     window.addEventListener(APP_SETTINGS_UPDATED_EVENT, syncSettings);
     return () => window.removeEventListener(APP_SETTINGS_UPDATED_EVENT, syncSettings);
   }, []);
+
+  useEffect(() => {
+    if (isOCRMode) return;
+    setOcrWorkspaceView("ocr");
+  }, [isOCRMode]);
 
   useEffect(() => {
       if (!ocrPreviewRef.current) return;
@@ -2272,6 +2281,21 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return `${API_BASE_URL}/api/static/${normalized}`;
   };
 
+  const parseSealHistorySnapshot = (content) => {
+      try {
+          const parsed = JSON.parse(content || '{}');
+          if (!parsed || typeof parsed !== 'object') return null;
+          const hasSealPayload = parsed.tool === 'seal_extractor'
+              || parsed.workspace === 'seal'
+              || parsed.source_url
+              || parsed.sourceUrl
+              || (Array.isArray(parsed.items) && parsed.items.length > 0);
+          return hasSealPayload ? parsed : null;
+      } catch {
+          return null;
+      }
+  };
+
   const AUDIT_HISTORY_SOURCE_LABELS = {
       rule: '规则命中',
       ai: 'AI语义',
@@ -3094,7 +3118,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               let data = {};
               try {
                   data = await response.json();
-              } catch (parseError) {
+              } catch {
                   data = {};
               }
               if (!response.ok || !data?.job_id) {
@@ -3339,8 +3363,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setCurrentAudioPath(null);
       setPendingFiles([]);
       resetAuditState();
+      sealHistoryPersistSignatureRef.current = '';
       setOcrFiles([]);
       setActiveOcrId(null);
+      setSealHistorySnapshot(null);
+      setOcrWorkspaceView('ocr');
       setOcrPageIndex(0);
       setSelectedOcrLine(null);
       setEditingOcrLine(null);
@@ -3480,8 +3507,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     setPendingFiles([]);
     setFeedbackState({});
     currentSessionIdRef.current = null;
+    sealHistoryPersistSignatureRef.current = '';
     resetHistoryPaginationState();
     resetAuditState();
+    setOcrFiles([]);
+    setActiveOcrId(null);
+    setOcrWorkspaceView('ocr');
+    setSealHistorySnapshot(null);
     setSpeakingIdx(null);
     window.speechSynthesis.cancel();
 
@@ -3497,12 +3529,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const latestAuditEntry = auditEntries[auditEntries.length - 1] || null;
 
       let metaMsg = null;
-      let contextMsg = null;
+      let latestContextMsg = null;
+      let latestOcrContextMsg = null;
+      let latestSealContextMsg = null;
       for (let i = safeMessages.length - 1; i >= 0; i -= 1) {
         const msg = safeMessages[i];
         if (!metaMsg && msg.role === 'meta' && msg.func_type === 'session_meta') metaMsg = msg;
-        if (!contextMsg && msg.role === 'context') contextMsg = msg;
-        if (metaMsg && contextMsg) break;
+        if (!latestContextMsg && msg.role === 'context') latestContextMsg = msg;
+        if (!latestOcrContextMsg && msg.role === 'context' && msg.func_type === 'ocr_context') latestOcrContextMsg = msg;
+        if (!latestSealContextMsg && msg.role === 'context' && msg.func_type === 'seal_context') latestSealContextMsg = msg;
+        if (metaMsg && latestContextMsg && latestOcrContextMsg && latestSealContextMsg) break;
       }
 
       // 默认按“通用聊天”恢复，避免在 OCR/会议模式下点击普通聊天历史时看不到消息。
@@ -3511,6 +3547,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       let loadedAudioPath = null;
       let savedBackend = 'local';
       let savedAuditMeta = null;
+      let savedOcrWorkspaceView = 'ocr';
 
       if (metaMsg?.content) {
         try {
@@ -3520,14 +3557,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           if (meta?.audio_path) loadedAudioPath = meta.audio_path;
           if (meta?.backend) savedBackend = meta.backend;
           if (meta?.audit) savedAuditMeta = normalizeAuditHistoryMeta(meta.audit);
+          if (String(meta?.ocr_workspace_view || '').toLowerCase() === 'seal') savedOcrWorkspaceView = 'seal';
         } catch (error) {
           console.warn('Invalid session_meta json:', metaMsg.content, error);
         }
       }
-      else if (contextMsg) {
-        const contextType = contextMsg.func_type;
+      else if (latestContextMsg) {
+        const contextType = latestContextMsg.func_type;
         if (contextType === 'voice_context') targetModel = 1;
         else if (contextType === 'ocr_context') targetModel = 2;
+        else if (contextType === 'seal_context') {
+          targetModel = 2;
+          savedOcrWorkspaceView = 'seal';
+        }
         else if (contextType === 'audit_context') targetModel = 4;
         targetMode = 'general';
       } else {
@@ -3544,6 +3586,18 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
 
       if (targetMode === 'audit') targetMode = 'general';
+      if (targetModel === 2) {
+        const latestContextType = String(latestContextMsg?.func_type || '').toLowerCase();
+        if (latestContextType === 'seal_context') savedOcrWorkspaceView = 'seal';
+        if (latestContextType === 'ocr_context') savedOcrWorkspaceView = 'ocr';
+      }
+
+      let contextMsg = latestContextMsg;
+      if (targetModel === 2 && savedOcrWorkspaceView === 'seal' && latestSealContextMsg) {
+        contextMsg = latestSealContextMsg;
+      } else if (targetModel === 2 && latestOcrContextMsg) {
+        contextMsg = latestOcrContextMsg;
+      }
 
       setSelectedModel(targetModel);
       setLlmBackend(savedBackend);
@@ -3572,78 +3626,93 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setHistoryCursor(messagePage.nextBeforeId);
       setHistoryHasMoreServer(Boolean(messagePage.hasMore));
       scheduleHistoryExpand();
+      const isSealHistorySession = targetModel === 2 && savedOcrWorkspaceView === 'seal';
       setPanelContent(
         isStandalonePptHistory
           ? ''
           : (targetModel === 4
             ? (latestAuditEntry?.content || contextMsg?.content || '')
-            : (contextMsg ? contextMsg.content : ''))
+            : (isSealHistorySession ? '' : (contextMsg ? contextMsg.content : '')))
       );
       setAuditHistoryEntries(targetModel === 4 ? auditEntries : []);
       setAuditHistoryMeta(targetModel === 4 ? (latestAuditEntry?.historyMeta || savedAuditMeta) : null);
       currentSessionIdRef.current = sessionId;
       setCurrentSessionId(sessionId);
+      setOcrWorkspaceView(isSealHistorySession ? 'seal' : 'ocr');
 
       if (targetModel === 2 && contextMsg?.content) {
-        let ocrEntry = null;
-        try {
-          const parsed = JSON.parse(contextMsg.content);
-          const dataLines = parsed?.lines || parsed?.data?.lines || [];
-          const dataPages = parsed?.pages || parsed?.data?.pages || [];
-          const fileUrl = parsed?.file_url || parsed?.data?.file_url || parsed?.ocrData?.file_url || parsed?.ocrData?.data?.file_url || '';
-          const fileType = parsed?.file_type || parsed?.data?.file_type || parsed?.ocrData?.file_type || parsed?.ocrData?.data?.file_type || '';
-          const fileName = parsed?.file_name || parsed?.data?.file_name || parsed?.ocrData?.file_name || parsed?.ocrData?.data?.file_name || '历史记录';
-          const previewUrl = resolveFileUrl(fileUrl);
-          let pages = dataPages;
-          if (!pages || pages.length === 0) {
-            const maxX = (dataLines || []).flatMap((l) => (l.box || []).map((p) => p[0]));
-            const maxY = (dataLines || []).flatMap((l) => (l.box || []).map((p) => p[1]));
-            if (maxX.length && maxY.length) {
-              pages = [{ page: 0, width: Math.ceil(Math.max(...maxX)), height: Math.ceil(Math.max(...maxY)) }];
-            }
+        if (isSealHistorySession) {
+          const nextSealSnapshot = parseSealHistorySnapshot(contextMsg.content);
+          setSealHistorySnapshot(nextSealSnapshot);
+          setOcrFiles([]);
+          setActiveOcrId(null);
+          if (!nextSealSnapshot) {
+            setOcrWorkspaceView('ocr');
           }
-          ocrEntry = {
-            id: `history_${sessionId}`,
-            name: fileName,
-            size: 0,
-            sizeLabel: '',
-            type: 'history/ocr',
-            fileType: fileType || '',
-            fileRef: null,
-            previewUrl: previewUrl,
-            serverUrl: previewUrl,
-            status: 'done',
-            ocrText: parsed?.text || parsed?.data?.text || '',
-            ocrData: parsed?.ocrData || parsed,
-            jsonText: parsed ? JSON.stringify(parsed?.ocrData || parsed, null, 2) : '',
-            lines: dataLines || [],
-            pages: pages || [],
-            error: '',
-            createdAt: Date.now()
-          };
-        } catch {
-          const text = contextMsg.content || '';
-          const lines = text.split(/\r?\n/).filter(Boolean);
-          ocrEntry = {
-            id: `history_${sessionId}`,
-            name: '历史记录',
-            size: 0,
-            sizeLabel: '',
-            type: 'history/ocr',
-            fileRef: null,
-            previewUrl: null,
-            jsonText: '',
-            status: 'done',
-            ocrText: text,
-            ocrData: null,
-            lines: [],
-            pages: [{ page: 0, width: 1000, height: Math.max(600, lines.length * 22 + 40) }],
-            error: '',
-            createdAt: Date.now()
-          };
+        } else {
+          let ocrEntry = null;
+          setSealHistorySnapshot(null);
+          try {
+            const parsed = JSON.parse(contextMsg.content);
+            const dataLines = parsed?.lines || parsed?.data?.lines || [];
+            const dataPages = parsed?.pages || parsed?.data?.pages || [];
+            const fileUrl = parsed?.file_url || parsed?.data?.file_url || parsed?.ocrData?.file_url || parsed?.ocrData?.data?.file_url || '';
+            const fileType = parsed?.file_type || parsed?.data?.file_type || parsed?.ocrData?.file_type || parsed?.ocrData?.data?.file_type || '';
+            const fileName = parsed?.file_name || parsed?.data?.file_name || parsed?.ocrData?.file_name || parsed?.ocrData?.data?.file_name || '历史记录';
+            const previewUrl = resolveFileUrl(fileUrl);
+            let pages = dataPages;
+            if (!pages || pages.length === 0) {
+              const maxX = (dataLines || []).flatMap((l) => (l.box || []).map((p) => p[0]));
+              const maxY = (dataLines || []).flatMap((l) => (l.box || []).map((p) => p[1]));
+              if (maxX.length && maxY.length) {
+                pages = [{ page: 0, width: Math.ceil(Math.max(...maxX)), height: Math.ceil(Math.max(...maxY)) }];
+              }
+            }
+            ocrEntry = {
+              id: `history_${sessionId}`,
+              name: fileName,
+              size: 0,
+              sizeLabel: '',
+              type: 'history/ocr',
+              fileType: fileType || '',
+              fileRef: null,
+              previewUrl: previewUrl,
+              serverUrl: previewUrl,
+              status: 'done',
+              ocrText: parsed?.text || parsed?.data?.text || '',
+              ocrData: parsed?.ocrData || parsed,
+              jsonText: parsed ? JSON.stringify(parsed?.ocrData || parsed, null, 2) : '',
+              lines: dataLines || [],
+              pages: pages || [],
+              error: '',
+              createdAt: Date.now()
+            };
+          } catch {
+            const text = contextMsg.content || '';
+            const lines = text.split(/\r?\n/).filter(Boolean);
+            ocrEntry = {
+              id: `history_${sessionId}`,
+              name: '历史记录',
+              size: 0,
+              sizeLabel: '',
+              type: 'history/ocr',
+              fileRef: null,
+              previewUrl: null,
+              jsonText: '',
+              status: 'done',
+              ocrText: text,
+              ocrData: null,
+              lines: [],
+              pages: [{ page: 0, width: 1000, height: Math.max(600, lines.length * 22 + 40) }],
+              error: '',
+              createdAt: Date.now()
+            };
+          }
+          setOcrFiles(ocrEntry ? [ocrEntry] : []);
+          setActiveOcrId(ocrEntry ? ocrEntry.id : null);
         }
-        setOcrFiles(ocrEntry ? [ocrEntry] : []);
-        setActiveOcrId(ocrEntry ? ocrEntry.id : null);
+      } else {
+        setSealHistorySnapshot(null);
       }
 
       if (loadedAudioPath) {
@@ -3742,6 +3811,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setChatHistory([]);
       setFeedbackState({});
       currentSessionIdRef.current = null;
+      sealHistoryPersistSignatureRef.current = '';
       resetHistoryPaginationState();
       clearHistoryExpandTask();
       setHistoryRenderTarget(INITIAL_MESSAGE_COUNT);
@@ -3752,13 +3822,15 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setAudioFileUrl(null);
       setCurrentAudioPath(null);
       setPendingFiles([]);
-            setOcrFiles([]);
-            setActiveOcrId(null);
-            setOcrPageIndex(0);
-            setSelectedOcrLine(null);
-            setEditingOcrLine(null);
-            setEditingOcrValue('');
-            setJsonEditError('');
+      setOcrFiles([]);
+      setActiveOcrId(null);
+      setSealHistorySnapshot(null);
+      setOcrWorkspaceView('ocr');
+      setOcrPageIndex(0);
+      setSelectedOcrLine(null);
+      setEditingOcrLine(null);
+      setEditingOcrValue('');
+      setJsonEditError('');
       resetAuditState();
       setIsMobileSidebarOpen(false);
       setReportStep('selection');
@@ -3777,6 +3849,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setIsOutlineGenerating(false);
       setPresentonProgress(createIdlePresentonProgress());
       setSpeakingIdx(null);
+      if (typeof window !== 'undefined') {
+        const nextPath = buildConversationPath(null);
+        const currentPath = normalizePathname(window.location.pathname);
+        if (currentPath !== nextPath) {
+          window.history.pushState(window.history.state, '', nextPath);
+        }
+      }
       window.speechSynthesis.cancel();
   };
 
@@ -3905,6 +3984,36 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         console.error("Failed to save session meta", e);
     }
   }, [userProfile.id]);
+
+  const saveSealResultToHistory = useCallback(async (snapshot) => {
+      const payload = snapshot && typeof snapshot === 'object' ? snapshot : null;
+      if (!payload?.source_url || !Array.isArray(payload.items) || payload.items.length === 0) {
+          return null;
+      }
+
+      const serialized = JSON.stringify(payload);
+      if (sealHistoryPersistSignatureRef.current === serialized) {
+          return currentSessionIdRef.current || currentSessionId;
+      }
+
+      let targetSessionId = currentSessionIdRef.current || currentSessionId;
+      const isNewSession = !targetSessionId;
+      if (!targetSessionId) {
+          targetSessionId = crypto.randomUUID ? crypto.randomUUID() : `sid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+          currentSessionIdRef.current = targetSessionId;
+          setCurrentSessionId(targetSessionId);
+      }
+
+      await savePanelContext(targetSessionId, serialized, 'seal_context');
+      await saveSessionMeta(targetSessionId, 2, 'general', null, llmBackend, { ocr_workspace_view: 'seal' });
+      sealHistoryPersistSignatureRef.current = serialized;
+
+      if (isNewSession) {
+          const uid = userProfile.id || 'anonymous';
+          void refreshSessionList(uid);
+      }
+      return targetSessionId;
+  }, [currentSessionId, llmBackend, refreshSessionList, savePanelContext, saveSessionMeta, userProfile.id]);
 
   const createClientSessionId = () => (
       crypto.randomUUID ? crypto.randomUUID() : `sid_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -8317,6 +8426,23 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   );
 
   const renderOcrWorkspace = () => {
+    if (ocrWorkspaceView === 'seal') {
+      return (
+        <Suspense fallback={<div className="flex-1 flex items-center justify-center text-sm text-gray-400 dark:text-gray-500">正在加载印章提取工具...</div>}>
+          <SealExtractorWorkspace
+            isMobileViewport={isMobileViewport}
+            initialSnapshot={sealHistorySnapshot}
+            onPersistSnapshot={saveSealResultToHistory}
+            onBack={() => {
+              setSealHistorySnapshot(null);
+              setOcrWorkspaceView('ocr');
+            }}
+            onNotice={showWorkspaceNotice}
+          />
+        </Suspense>
+      );
+    }
+
     const activeFile = activeOcrFile;
     const activeFileType = activeFile?.fileType || activeFile?.type || '';
     const isPdf = activeFile && (activeFileType === 'application/pdf' || (activeFile.name || '').toLowerCase().endsWith('.pdf'));
@@ -8575,6 +8701,30 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                 className="mt-2 px-3 py-1.5 rounded-lg text-[11px] font-medium bg-black text-white dark:bg-white dark:text-black disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 选择文件
+              </button>
+            </div>
+            <div className="max-w-[520px] mx-auto -mt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setSealHistorySnapshot(null);
+                  setOcrWorkspaceView('seal');
+                }}
+                className="group w-full flex items-center justify-between gap-3 rounded-2xl border border-rose-200/80 bg-[linear-gradient(135deg,rgba(255,245,247,0.98),rgba(255,255,255,0.96)_42%,rgba(255,241,242,0.98))] px-4 py-3 text-left shadow-[0_10px_30px_rgba(244,63,94,0.08)] transition hover:-translate-y-0.5 hover:border-rose-300 hover:shadow-[0_16px_36px_rgba(244,63,94,0.14)] dark:border-rose-500/30 dark:bg-[linear-gradient(135deg,rgba(17,24,39,0.98),rgba(30,41,59,0.96)_50%,rgba(76,29,49,0.92))] dark:shadow-[0_14px_36px_rgba(0,0,0,0.32)] dark:hover:border-rose-400/45 dark:hover:shadow-[0_18px_40px_rgba(244,63,94,0.16)]"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-2xl bg-rose-500 text-white flex items-center justify-center shadow-sm shadow-rose-500/30 dark:bg-rose-500/90 dark:text-white">
+                    <Sparkles size={18} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-slate-900 dark:text-rose-50">提取印章并导出透明 PNG</div>
+                    <div className="text-xs text-slate-600 dark:text-slate-300 truncate">进入印章提取工具，支持多章识别与批量下载</div>
+                  </div>
+                </div>
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-rose-200 bg-white/90 px-3 py-1 text-[11px] font-medium text-rose-600 transition group-hover:border-rose-300 group-hover:text-rose-700 dark:border-rose-400/30 dark:bg-rose-500/12 dark:text-rose-100 dark:group-hover:border-rose-300/50 dark:group-hover:bg-rose-500/18">
+                  立即进入
+                  <ArrowRight size={13} />
+                </span>
               </button>
             </div>
 

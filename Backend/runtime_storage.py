@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -20,6 +21,12 @@ RUNTIME_AUDIT_ROOT = Path(os.getenv("APP_RUNTIME_AUDIT_ROOT", str(RUNTIME_ROOT /
 RUNTIME_CACHE_ROOT = Path(os.getenv("APP_RUNTIME_CACHE_ROOT", str(RUNTIME_ROOT / "cache"))).resolve()
 RUNTIME_PRESENTATION_ROOT = Path(
     os.getenv("APP_RUNTIME_PRESENTATION_ROOT", str(RUNTIME_ROOT / "presentation"))
+).resolve()
+RUNTIME_PROCESS_TEMP_ROOT = Path(
+    os.getenv("APP_RUNTIME_PROCESS_TEMP_ROOT", str(RUNTIME_CACHE_ROOT / "tmp"))
+).resolve()
+RUNTIME_SEAL_ROOT = Path(
+    os.getenv("APP_RUNTIME_SEAL_ROOT", str(RUNTIME_OCR_ROOT / "seal"))
 ).resolve()
 
 SMS_TOKEN_CACHE_FILE = Path(
@@ -97,13 +104,26 @@ def ensure_runtime_layout() -> None:
             RUNTIME_ROOT,
             RUNTIME_STATIC_ROOT,
             RUNTIME_OCR_ROOT,
+            RUNTIME_SEAL_ROOT,
             RUNTIME_TEMP_AUDIO_ROOT,
             RUNTIME_AUDIT_ROOT,
             RUNTIME_CACHE_ROOT,
             RUNTIME_PRESENTATION_ROOT,
+            RUNTIME_PROCESS_TEMP_ROOT,
         ):
             _mkdir(path)
         _RUNTIME_INIT_DONE = True
+
+
+def configure_process_temp_dir() -> Path:
+    ensure_runtime_layout()
+    _mkdir(RUNTIME_PROCESS_TEMP_ROOT)
+    target = str(RUNTIME_PROCESS_TEMP_ROOT)
+    os.environ["TMPDIR"] = target
+    os.environ["TMP"] = target
+    os.environ["TEMP"] = target
+    tempfile.tempdir = target
+    return RUNTIME_PROCESS_TEMP_ROOT
 
 
 def _iter_existing(paths: Iterable[Path]) -> Iterable[Path]:

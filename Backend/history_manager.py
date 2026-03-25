@@ -427,6 +427,7 @@ def save_context(user_id, session_id, content, func_type="context_save"):
             titles = {
                 "voice_context": "会议记录",
                 "ocr_context": "OCR 结果",
+                "seal_context": "印章提取",
                 "audit_context": "审计日志",
             }
             default_title = titles.get(func_type, "新聊天")
