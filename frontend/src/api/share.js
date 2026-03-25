@@ -1,5 +1,25 @@
 import apiClient from './apiClient';
 
+const parseResponseBody = async (response) => {
+  const text = await response.text();
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return text;
+  }
+};
+
+const createShareError = (response, data) => {
+  const error = new Error(
+    (data && (data.detail || data.error || data.message)) ||
+    (typeof data === 'string' ? data : '') ||
+    `API Error: ${response.status} ${response.statusText}`
+  );
+  error.statusCode = Number(response?.status || 0);
+  error.payload = data;
+  return error;
+};
+
 const shareApi = {
   // 创建分享链接
   createShare: (sessionId, userId, options = {}) => {
@@ -17,13 +37,15 @@ const shareApi = {
 
   // 获取公开分享内容 (无需 user_id)
   getSharedContent: (token) => {
-    // 直接 fetch，不经过 apiClient (apiClient 可能会附加 auth token，虽不影响但最好纯净)
-    // 这里假设 API_BASE_URL 和 apiClient 里的一样，我们直接拼
     const baseUrl = apiClient.defaults?.baseURL || '';
-    // 注意：如果是 create-react-app 代理模式，baseUrl 为空即可
-
     return fetch(`${baseUrl}/api/public/share/${token}`)
-      .then(res => res.json());
+      .then(async (response) => {
+        const data = await parseResponseBody(response);
+        if (!response.ok || data?.success === false) {
+          throw createShareError(response, data);
+        }
+        return data;
+      });
   }
 };
 

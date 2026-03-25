@@ -25,6 +25,27 @@ const decisionApi = {
     });
     return apiClient(`/api/decision/ai?${params.toString()}`, { method: 'GET' });
   },
+
+  getDrilldown: async ({
+    source,
+    granularity = 'month',
+    bucket = '',
+    status = '',
+    category = '',
+    name = '',
+    limit = 8,
+  } = {}) => {
+    const params = new URLSearchParams({
+      source: source || '',
+      granularity: granularity || 'month',
+      limit: String(Number(limit || 8)),
+    });
+    if (bucket) params.set('bucket', bucket);
+    if (status) params.set('status', status);
+    if (category) params.set('category', category);
+    if (name) params.set('name', name);
+    return apiClient(`/api/decision/drilldown?${params.toString()}`, { method: 'GET' });
+  },
 };
 
 export default decisionApi;

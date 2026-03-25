@@ -1,6 +1,5 @@
 import React from 'react';
-
-import { AlertTriangle } from 'lucide-react';
+import StatePanel from './StatePanel';
 
 
 
@@ -39,48 +38,26 @@ class ErrorBoundary extends React.Component {
     if (this.state.hasError) {
 
       return (
-
-        <div className="flex flex-col items-center justify-center h-screen bg-red-50 text-red-900 p-6 text-center">
-
-          <AlertTriangle size={48} className="mb-4 text-red-500" />
-
-          <h2 className="text-2xl font-bold mb-2">页面遇到了一点问题</h2>
-
-          <p className="mb-6 text-red-700">加载组件时发生了错误。</p>
-
-
-
-          <div className="bg-white p-4 rounded-lg shadow-sm border border-red-200 text-left w-full max-w-2xl overflow-auto max-h-[300px]">
-
-            <p className="font-mono text-sm font-bold text-red-600 mb-2">
-
+        <StatePanel
+          fullScreen
+          tone="rose"
+          icon="error"
+          title="页面遇到了一点问题"
+          description="渲染组件时发生了异常。你可以先刷新页面，若问题持续出现，再联系管理员排查。"
+          actions={[
+            { label: '返回首页', href: '/' },
+            { label: '刷新页面', onClick: () => window.location.reload(), primary: true },
+          ]}
+        >
+          <div className="rounded-2xl border border-rose-200 bg-white p-4 text-left dark:border-rose-900/60 dark:bg-slate-950">
+            <p className="font-mono text-sm font-bold text-rose-600 dark:text-rose-300">
               {this.state.error && this.state.error.toString()}
-
             </p>
-
-            <pre className="font-mono text-xs text-gray-500 whitespace-pre-wrap">
-
+            <pre className="mt-3 max-h-[260px] overflow-auto whitespace-pre-wrap text-xs text-slate-500 dark:text-slate-400">
               {this.state.errorInfo && this.state.errorInfo.componentStack}
-
             </pre>
-
           </div>
-
-
-
-          <button
-
-            onClick={() => window.location.reload()}
-
-            className="mt-8 px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-
-          >
-
-            刷新页面
-
-          </button>
-
-        </div>
+        </StatePanel>
 
       );
 

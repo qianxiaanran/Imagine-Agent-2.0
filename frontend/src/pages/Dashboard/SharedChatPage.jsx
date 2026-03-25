@@ -1,8 +1,11 @@
 import React, { useEffect, useState, Suspense, lazy } from 'react';
-import { Bot, User, Clock, AlertCircle, FileText } from 'lucide-react';
+import { Bot, User, Clock, FileText } from 'lucide-react';
 import shareApi from '../../api/share';
+import StatePanel from '../../components/StatePanel';
+import { getFriendlyRequestError, isPermissionDeniedError } from '../../utils/requestErrors';
 
 const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
+const SourcePanel = lazy(() => import('./SourcePanel'));
 
 const CONTEXT_LABELS = {
   voice_context: '会议纪要/转写',
@@ -61,8 +64,8 @@ const SharedChatPage = () => {
         } else {
           setError(res.error || "内容无法访问或已过期");
         }
-      } catch {
-        setError("无法加载分享内容");
+      } catch (fetchError) {
+        setError(getFriendlyRequestError(fetchError, "无法加载分享内容"));
       } finally {
         setLoading(false);
       }
@@ -72,35 +75,38 @@ const SharedChatPage = () => {
 
   if (loading) {
     return (
-      <div
-        className="bg-gray-50 dark:bg-gray-900 flex items-center justify-center"
-        style={{ height: 'var(--app-height, 100vh)' }}
-      >
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-gray-500 text-sm">正在获取分享内容...</p>
-        </div>
-      </div>
+      <StatePanel
+        fullScreen
+        tone="slate"
+        title="正在获取分享内容"
+        description="请稍候，系统正在加载已分享的静态快照。"
+      />
     );
   }
 
   if (error) {
     return (
-      <div
-        className="bg-gray-50 dark:bg-gray-900 flex items-center justify-center p-4"
-        style={{ height: 'var(--app-height, 100vh)' }}
-      >
-        <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl max-w-md w-full text-center">
-          <div className="w-16 h-16 bg-red-100 dark:bg-red-900/30 rounded-full flex items-center justify-center mx-auto mb-4 text-red-500">
-            <AlertCircle size={32} />
-          </div>
-          <h2 className="text-xl font-bold text-gray-800 dark:text-white mb-2">会话已过期</h2>
-          <p className="text-gray-500 dark:text-gray-400 mb-6">{error}</p>
-          <a href="/" className="inline-block px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors font-medium">
-            返回主页
-          </a>
-        </div>
-      </div>
+      <StatePanel
+        fullScreen
+        tone={isPermissionDeniedError({ message: error }) ? 'amber' : 'rose'}
+        icon="error"
+        title="分享内容暂不可访问"
+        description={error}
+        actions={[{ label: '返回主页', href: '/', primary: true }]}
+      />
+    );
+  }
+
+  if (!Array.isArray(data?.messages) || data.messages.length === 0) {
+    return (
+      <StatePanel
+        fullScreen
+        tone="slate"
+        icon="empty"
+        title="这条分享还没有内容"
+        description="该分享链接对应的会话快照中没有可展示的消息，可能是分享生成时尚未产生有效内容。"
+        actions={[{ label: '返回主页', href: '/', primary: true }]}
+      />
     );
   }
 
@@ -201,6 +207,11 @@ const SharedChatPage = () => {
                       <Suspense fallback={<div className="text-xs text-gray-400">Loading...</div>}>
                         <MarkdownRenderer content={msg.content || ''} />
                       </Suspense>
+                      {Array.isArray(msg.sources) && msg.sources.length > 0 ? (
+                        <Suspense fallback={<div className="mt-2 text-xs text-gray-400">加载来源...</div>}>
+                          <SourcePanel sources={msg.sources} />
+                        </Suspense>
+                      ) : null}
                     </div>
                   )}
                 </div>

@@ -17,6 +17,7 @@ import historyApi from '../../api/history';
 import chatFeedbackApi from '../../api/chatFeedback';
 import presentationApi from '../../api/presentation';
 import { convertWebMToWav } from '../../utils/audio';
+import { downloadBlobFile, downloadTextFile } from '../../utils/browserActions';
 import {
   HISTORY_PAGE_SIZE,
   normalizeHistoryChatMessages,
@@ -1126,6 +1127,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     items: []
   });
   const [auditNotice, setAuditNotice] = useState('');
+  const [workspaceNotice, setWorkspaceNotice] = useState({ message: '', tone: 'slate' });
   const [auditState, setAuditState] = useState({
     status: 'idle',
     jobId: null,
@@ -1135,9 +1137,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
     stage: null,
     workflow_state: null,
     result: null,
+    file_url: null,
+    file_name: null,
     error: null,
     error_message: null
   });
+  const [auditHistoryMeta, setAuditHistoryMeta] = useState(null);
+  const [auditHistoryEntries, setAuditHistoryEntries] = useState([]);
   const [isAuditErpActionLoading, setIsAuditErpActionLoading] = useState(false);
   // ✨ 新增：音频文件播放 URL 状态
   const [audioFileUrl, setAudioFileUrl] = useState(null);
@@ -1261,6 +1267,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const auditPollGenerationRef = useRef(0);
   const auditPollFailureCountRef = useRef(0);
   const auditHistorySavedRef = useRef(null);
+  const auditNoticeTimeoutRef = useRef(null);
+  const workspaceNoticeTimeoutRef = useRef(null);
   const auditBatchRef = useRef({
     active: false,
     currentIndex: -1,
@@ -1937,6 +1945,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           caseId: data.case_id || prev.caseId,
           caseDocuments: Array.isArray(data.case_documents) ? data.case_documents : prev.caseDocuments,
           result: data.result || prev.result,
+          file_url: data.file_url || prev.file_url,
+          file_name: data.file_name || prev.file_name,
           error_message: nextStatus === 'failed' ? (data.error_message || prev.error_message) : null,
           error: nextStatus === 'failed' ? (data.error_message || prev.error) : null
         }));
@@ -2253,10 +2263,263 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (!raw) return null;
       if (/^https?:\/\//i.test(raw)) return raw;
       if (raw.startsWith('data:')) return raw;
+      if (raw.startsWith('api/static/')) return `${API_BASE_URL}/${raw}`;
+      if (raw.startsWith('static/')) return `${API_BASE_URL}/api/${raw}`;
       if (raw.startsWith('/api/static/')) return `${API_BASE_URL}${raw}`;
       if (raw.startsWith('/static/')) return `${API_BASE_URL}/api${raw}`;
       if (raw.startsWith('/')) return `${API_BASE_URL}${raw}`;
-      return `${API_BASE_URL}/${raw}`;
+      const normalized = raw.replace(/^(\.\/)+/, '').replace(/^\/+/, '');
+      return `${API_BASE_URL}/api/static/${normalized}`;
+  };
+
+  const AUDIT_HISTORY_SOURCE_LABELS = {
+      rule: '规则命中',
+      ai: 'AI语义',
+      cross_doc: '跨单据核对',
+      anomaly: '异常检测',
+      history: '历史相似',
+      erp: 'ERP校验',
+  };
+
+  const normalizeAuditHistorySourceKey = (value) => {
+      const raw = String(value || '').trim().toLowerCase();
+      if (!raw) return '';
+      if (raw === 'cross-doc') return 'cross_doc';
+      if (raw === 'rules') return 'rule';
+      return raw;
+  };
+
+  const normalizeAuditHistorySourceEntry = (value) => {
+      if (!value) return null;
+      if (typeof value === 'string') {
+          const key = normalizeAuditHistorySourceKey(value);
+          if (!key) return null;
+          return {
+              key,
+              label: AUDIT_HISTORY_SOURCE_LABELS[key] || value,
+              count: 0,
+          };
+      }
+      if (typeof value !== 'object') return null;
+      const key = normalizeAuditHistorySourceKey(value.key || value.source || value.type || value.code);
+      const label = String(value.label || value.name || value.title || '').trim();
+      const countRaw = Number(value.count);
+      if (!key && !label) return null;
+      return {
+          key: key || '',
+          label: label || AUDIT_HISTORY_SOURCE_LABELS[key] || '数据来源',
+          count: Number.isFinite(countRaw) ? Math.max(0, Math.round(countRaw)) : 0,
+      };
+  };
+
+  const dedupeAuditHistorySources = (items = []) => {
+      const bucket = new Map();
+      (Array.isArray(items) ? items : []).forEach((item) => {
+          const normalized = normalizeAuditHistorySourceEntry(item);
+          if (!normalized) return;
+          const identity = normalized.key || normalized.label;
+          const existing = bucket.get(identity);
+          if (!existing) {
+              bucket.set(identity, normalized);
+              return;
+          }
+          bucket.set(identity, {
+              ...existing,
+              count: Math.max(existing.count || 0, normalized.count || 0),
+              label: existing.label || normalized.label,
+              key: existing.key || normalized.key,
+          });
+      });
+      return Array.from(bucket.values());
+  };
+
+  const buildAuditHistorySourceSummary = (result) => {
+      if (!result || typeof result !== 'object') return [];
+      const findings = Array.isArray(result.findings) ? result.findings : [];
+      const counts = new Map();
+      findings.forEach((item) => {
+          const key = normalizeAuditHistorySourceKey(item?.source || 'rule') || 'rule';
+          counts.set(key, (counts.get(key) || 0) + 1);
+      });
+      const erpChecks = Array.isArray(result.erp_checks) ? result.erp_checks.filter(Boolean) : [];
+      if (erpChecks.length > 0) {
+          counts.set('erp', Math.max(counts.get('erp') || 0, erpChecks.length));
+      }
+      return dedupeAuditHistorySources(
+          Array.from(counts.entries()).map(([key, count]) => ({
+              key,
+              label: AUDIT_HISTORY_SOURCE_LABELS[key] || key,
+              count,
+          }))
+      );
+  };
+
+  const normalizeAuditHistoryMeta = (value) => {
+      if (!value || typeof value !== 'object') return null;
+      const buildAuditSourceUrl = (rawFileUrl = '', fileName = '', jobId = '') => {
+          const query = new URLSearchParams();
+          if (rawFileUrl) query.set('file_url', rawFileUrl);
+          if (fileName) query.set('file_name', fileName);
+          if (jobId) query.set('job_id', jobId);
+          return query.toString() ? `${API_BASE_URL}/api/public/audit/source?${query.toString()}` : '';
+      };
+      const normalizeAuditHistoryDocument = (docValue) => {
+          if (!docValue || typeof docValue !== 'object') return null;
+          const rawDocFileUrl = String(docValue.file_url || docValue.fileUrl || docValue.rawFileUrl || '').trim();
+          const docFileName = String(docValue.file_name || docValue.fileName || '').trim();
+          const docJobId = String(docValue.job_id || docValue.jobId || '').trim();
+          const docType = String(docValue.doc_type || docValue.docType || '').trim();
+          const status = String(docValue.status || '').trim();
+          if (!rawDocFileUrl && !docFileName && !docJobId) return null;
+          return {
+              rawFileUrl: rawDocFileUrl,
+              sourceUrl: buildAuditSourceUrl(rawDocFileUrl, docFileName, docJobId),
+              fileName: docFileName || '原始单据',
+              jobId: docJobId,
+              docType,
+              status,
+          };
+      };
+      const rawFileUrl = String(value.file_url || value.fileUrl || value.rawFileUrl || '').trim();
+      const fileName = String(value.file_name || value.fileName || '').trim();
+      const jobId = String(value.job_id || value.jobId || '').trim();
+      const primaryDocument = normalizeAuditHistoryDocument(value);
+      const rawDocuments = Array.isArray(value.documents || value.case_documents || value.caseDocuments)
+          ? (value.documents || value.case_documents || value.caseDocuments)
+          : [];
+      const documents = rawDocuments
+          .map((doc) => normalizeAuditHistoryDocument(doc))
+          .filter(Boolean);
+      const dataSources = dedupeAuditHistorySources(
+          value.sources
+          || value.data_sources
+          || value.dataSources
+          || []
+      );
+      if (primaryDocument && !documents.some((doc) => `${doc.rawFileUrl}|${doc.fileName}|${doc.jobId}` === `${primaryDocument.rawFileUrl}|${primaryDocument.fileName}|${primaryDocument.jobId}`)) {
+          documents.unshift(primaryDocument);
+      }
+      if (!primaryDocument && !documents.length && !dataSources.length) return null;
+      return {
+          rawFileUrl,
+          sourceUrl: primaryDocument?.sourceUrl || '',
+          fileName: fileName || primaryDocument?.fileName || '原始单据',
+          jobId,
+          documents,
+          dataSources,
+      };
+  };
+
+  const getCurrentAuditHistoryMeta = (
+      state = auditState,
+      fileRef = auditFile,
+      fallbackMeta = auditHistoryMeta
+  ) => normalizeAuditHistoryMeta({
+      file_url: state?.file_url || state?.result?.file_url || fallbackMeta?.rawFileUrl || '',
+      file_name: state?.file_name || state?.result?.file_name || fileRef?.name || fallbackMeta?.fileName || '',
+      job_id: state?.jobId || fallbackMeta?.jobId || '',
+      documents: (
+          state?.result?.is_case_report
+            ? (Array.isArray(state?.caseDocuments) ? state.caseDocuments : [])
+            : (Array.isArray(fallbackMeta?.documents) ? fallbackMeta.documents : [])
+      )
+  });
+
+  const buildAuditSessionMetaPayload = (
+      state = auditState,
+      fileRef = auditFile,
+      fallbackMeta = auditHistoryMeta
+  ) => {
+      const normalized = getCurrentAuditHistoryMeta(state, fileRef, fallbackMeta);
+      if (!normalized) return null;
+      return {
+          file_url: normalized.rawFileUrl || '',
+          file_name: normalized.fileName,
+          job_id: normalized.jobId || state?.jobId || '',
+          documents: (normalized.documents || []).map((doc) => ({
+              file_url: doc.rawFileUrl || '',
+              file_name: doc.fileName || '',
+              job_id: doc.jobId || '',
+              doc_type: doc.docType || '',
+              status: doc.status || '',
+          })),
+          sources: dedupeAuditHistorySources([
+              ...(normalized.dataSources || []),
+              ...buildAuditHistorySourceSummary(state?.result),
+          ]).map((item) => ({
+              key: item.key,
+              label: item.label,
+              count: item.count || 0,
+          })),
+      };
+  };
+
+  const buildAuditHistoryEntriesFromContextItems = (items = []) => {
+      const sortedItems = [...(Array.isArray(items) ? items : [])].sort(
+          (a, b) => (Number(a?.id) || 0) - (Number(b?.id) || 0)
+      );
+      const entries = [];
+
+      for (const item of sortedItems) {
+          if (item?.role === 'context' && item?.func_type === 'audit_context') {
+              const content = String(item?.content || '').trim();
+              if (!content) continue;
+              entries.push({
+                  id: String(item?.id || `audit-${entries.length}`),
+                  content,
+                  createdAt: item?.created_at || '',
+                  historyMeta: null,
+              });
+              continue;
+          }
+
+          if (item?.role === 'meta' && item?.func_type === 'session_meta') {
+              try {
+                  const meta = JSON.parse(item?.content || '{}');
+                  const normalizedMeta = normalizeAuditHistoryMeta(meta?.audit);
+                  if (!normalizedMeta) continue;
+                  for (let index = entries.length - 1; index >= 0; index -= 1) {
+                      if (!entries[index].historyMeta) {
+                          entries[index] = {
+                              ...entries[index],
+                              historyMeta: normalizedMeta,
+                          };
+                          break;
+                      }
+                  }
+              } catch {
+                  // ignore malformed historical session_meta rows
+              }
+          }
+      }
+
+      return entries.map((entry, index) => {
+          const summaryText = String(entry?.content || '');
+          const isAggregate = /本次审单包共\s*\d+\s*份文档/.test(summaryText);
+          if (!isAggregate) return entry;
+
+          const currentDocuments = Array.isArray(entry?.historyMeta?.documents) ? entry.historyMeta.documents.filter(Boolean) : [];
+          if (currentDocuments.length > 1) return entry;
+
+          const inferredDocuments = entries
+              .slice(0, index)
+              .filter((prevEntry) => !/本次审单包共\s*\d+\s*份文档/.test(String(prevEntry?.content || '')))
+              .flatMap((prevEntry) => Array.isArray(prevEntry?.historyMeta?.documents) ? prevEntry.historyMeta.documents : [])
+              .filter(Boolean)
+              .filter((doc, docIndex, docs) => {
+                  const key = `${doc.rawFileUrl || ''}|${doc.fileName || ''}|${doc.jobId || ''}`;
+                  return docs.findIndex((item) => `${item.rawFileUrl || ''}|${item.fileName || ''}|${item.jobId || ''}` === key) === docIndex;
+              });
+          if (!inferredDocuments.length) return entry;
+
+          return {
+              ...entry,
+              historyMeta: {
+                  ...(entry.historyMeta || {}),
+                  documents: inferredDocuments,
+              },
+          };
+      });
   };
 
   const buildPdfPageUrl = (url, page) => {
@@ -2443,20 +2706,31 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const auditScore = Number.isFinite(Number(result.audit_score)) ? Number(result.audit_score) : null;
       const erpTrace = result.erp_trace_id ? String(result.erp_trace_id) : '';
       const findings = Array.isArray(result.findings) ? result.findings : [];
+      const sourceSummary = buildAuditHistorySourceSummary(result);
       const topFindings = findings.slice(0, 5).map((item, idx) => {
           const message = item?.message ? String(item.message) : '风险点';
           const suggestion = item?.suggestion ? `（建议：${item.suggestion}）` : '';
           return `${idx + 1}. ${message}${suggestion}`;
       });
+      const isCaseReport = Boolean(result?.is_case_report);
+      const caseSummary = result?.case_summary && typeof result.case_summary === 'object' ? result.case_summary : {};
+      const documentReports = Array.isArray(caseSummary?.document_reports) ? caseSummary.document_reports : [];
+      const totalDocuments = Number(caseSummary?.completeness?.total_documents) || documentReports.length;
+      const historyTitle = isCaseReport
+          ? `整包汇总${totalDocuments > 0 ? ` · ${totalDocuments}份单据` : ''}`
+          : (file?.name || '未命名文件');
 
       const lines = [
-          `【智能审单】${file?.name || '未命名文件'}`,
+          `【智能审单】${historyTitle}`,
           `风险等级：${riskLabel}`,
           `结论：${passValue ? '通过' : '需复核'}`,
       ];
       if (auditScore !== null) lines.push(`审单评分：${auditScore}`);
       if (summary) lines.push(`摘要：${summary}`);
       if (erpTrace) lines.push(`ERP Trace：${erpTrace}`);
+      if (sourceSummary.length) {
+          lines.push(`数据来源：${sourceSummary.map((item) => `${item.label}${item.count > 0 ? `(${item.count})` : ''}`).join(' / ')}`);
+      }
       if (topFindings.length) {
           lines.push('问题：');
           lines.push(...topFindings);
@@ -2629,6 +2903,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           stage: null,
           workflow_state: null,
           result: null,
+          file_url: null,
+          file_name: null,
           error: null,
           error_message: null
       });
@@ -2640,6 +2916,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
       setAuditFile(null);
       setAuditNotice('');
+      setAuditHistoryMeta(null);
+      setAuditHistoryEntries([]);
       setIsAuditErpActionLoading(false);
       auditBatchTransitionRef.current = '';
       auditPollGenerationRef.current = 0;
@@ -2649,9 +2927,39 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const showAuditNotice = (message) => {
       if (!message) return;
+      if (auditNoticeTimeoutRef.current) {
+          clearTimeout(auditNoticeTimeoutRef.current);
+      }
       setAuditNotice(message);
-      setTimeout(() => setAuditNotice(''), 2500);
+      auditNoticeTimeoutRef.current = setTimeout(() => {
+          setAuditNotice('');
+          auditNoticeTimeoutRef.current = null;
+      }, 2500);
   };
+
+  const showWorkspaceNotice = (message, tone = 'slate') => {
+      if (!message) return;
+      if (workspaceNoticeTimeoutRef.current) {
+          clearTimeout(workspaceNoticeTimeoutRef.current);
+      }
+      setWorkspaceNotice({
+          message,
+          tone: ['rose', 'amber', 'emerald', 'slate'].includes(tone) ? tone : 'slate'
+      });
+      workspaceNoticeTimeoutRef.current = setTimeout(() => {
+          setWorkspaceNotice({ message: '', tone: 'slate' });
+          workspaceNoticeTimeoutRef.current = null;
+      }, 3200);
+  };
+
+  useEffect(() => () => {
+      if (auditNoticeTimeoutRef.current) {
+          clearTimeout(auditNoticeTimeoutRef.current);
+      }
+      if (workspaceNoticeTimeoutRef.current) {
+          clearTimeout(workspaceNoticeTimeoutRef.current);
+      }
+  }, []);
 
   const fetchAuditCaseReport = async (caseId) => {
       const normalizedCaseId = String(caseId || '').trim();
@@ -2757,6 +3065,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           stage: 'pending_docs',
           workflow_state: 'pending_docs',
           result: preserveCaseResult ? prev.result : null,
+          file_url: preserveCaseResult ? prev.file_url : null,
+          file_name: file?.name || (preserveCaseResult ? prev.file_name : null),
           error: null,
           error_message: null
       }));
@@ -2832,6 +3142,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               stage: data.stage || 'pending_docs',
               workflow_state: data.workflow_state || data.stage || 'pending_docs',
               result: preserveCaseResult ? prev.result : null,
+              file_url: data.file_url || prev.file_url,
+              file_name: data.file_name || file?.name || prev.file_name,
               error: null,
               error_message: null
           }));
@@ -2964,7 +3276,14 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               result: data?.result || prev.result
           }));
           const traceId = data?.erp_action?.trace_id;
-          showAuditNotice(traceId ? `ERP 回写成功：${traceId}` : 'ERP 回写成功');
+          const scopeType = String(data?.scope?.type || '').toLowerCase();
+          const affectedCount = Number(data?.scope?.affected_count || 0);
+          const actionLabel = action === 'approved' ? '通过' : action === 'rejected' ? '驳回' : '补件';
+          if (scopeType === 'case' && affectedCount > 1) {
+              showAuditNotice(traceId ? `整包 ${affectedCount} 份单据已回写${actionLabel}：${traceId}` : `整包 ${affectedCount} 份单据已回写${actionLabel}`);
+          } else {
+              showAuditNotice(traceId ? `ERP 回写成功：${traceId}` : 'ERP 回写成功');
+          }
       } catch (error) {
           showAuditNotice(error?.message || 'ERP 回写失败');
       } finally {
@@ -3174,6 +3493,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       });
       await loadSessionFeedbackState(sessionId);
       const safeMessages = [...(messagePage.contextItems || []), ...(messagePage.items || [])];
+      const auditEntries = buildAuditHistoryEntriesFromContextItems(messagePage.contextItems || []);
+      const latestAuditEntry = auditEntries[auditEntries.length - 1] || null;
 
       let metaMsg = null;
       let contextMsg = null;
@@ -3189,6 +3510,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       let targetMode = 'general';
       let loadedAudioPath = null;
       let savedBackend = 'local';
+      let savedAuditMeta = null;
 
       if (metaMsg?.content) {
         try {
@@ -3197,6 +3519,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           if (meta?.mode) targetMode = String(meta.mode);
           if (meta?.audio_path) loadedAudioPath = meta.audio_path;
           if (meta?.backend) savedBackend = meta.backend;
+          if (meta?.audit) savedAuditMeta = normalizeAuditHistoryMeta(meta.audit);
         } catch (error) {
           console.warn('Invalid session_meta json:', metaMsg.content, error);
         }
@@ -3249,7 +3572,15 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setHistoryCursor(messagePage.nextBeforeId);
       setHistoryHasMoreServer(Boolean(messagePage.hasMore));
       scheduleHistoryExpand();
-      setPanelContent(isStandalonePptHistory ? '' : (contextMsg ? contextMsg.content : ''));
+      setPanelContent(
+        isStandalonePptHistory
+          ? ''
+          : (targetModel === 4
+            ? (latestAuditEntry?.content || contextMsg?.content || '')
+            : (contextMsg ? contextMsg.content : ''))
+      );
+      setAuditHistoryEntries(targetModel === 4 ? auditEntries : []);
+      setAuditHistoryMeta(targetModel === 4 ? (latestAuditEntry?.historyMeta || savedAuditMeta) : null);
       currentSessionIdRef.current = sessionId;
       setCurrentSessionId(sessionId);
 
@@ -3553,7 +3884,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
   }, [userProfile.id]);
 
-  const saveSessionMeta = useCallback(async (sid, modelId, mode, audioPath = null, backend = 'local') => {
+  const saveSessionMeta = useCallback(async (sid, modelId, mode, audioPath = null, backend = 'local', extraMeta = null) => {
     if (!sid) return;
     try {
         const metaObj = {
@@ -3563,6 +3894,9 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
         };
         if (audioPath) {
             metaObj.audio_path = audioPath;
+        }
+        if (extraMeta && typeof extraMeta === 'object') {
+            Object.assign(metaObj, extraMeta);
         }
 
         const meta = JSON.stringify(metaObj);
@@ -3803,6 +4137,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       const persistAuditHistory = async () => {
           const content = buildAuditHistoryText(auditState.result, auditFile);
+          const auditMetaPayload = buildAuditSessionMetaPayload(auditState, auditFile, auditHistoryMeta);
+          const normalizedAuditMeta = normalizeAuditHistoryMeta(auditMetaPayload);
           auditHistorySavedRef.current = auditState.jobId;
           if (!content) return;
 
@@ -3814,7 +4150,30 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
           try {
               await savePanelContext(targetSessionId, content, 'audit_context');
-              await saveSessionMeta(targetSessionId, selectedModel, currentMode, currentAudioPath, llmBackend);
+              await saveSessionMeta(
+                  targetSessionId,
+                  selectedModel,
+                  currentMode,
+                  currentAudioPath,
+                  llmBackend,
+                  auditMetaPayload ? { audit: auditMetaPayload } : null
+              );
+              setAuditHistoryEntries((prev) => {
+                  const nextEntry = {
+                      id: String(auditState.jobId),
+                      content,
+                      createdAt: new Date().toISOString(),
+                      historyMeta: normalizedAuditMeta,
+                  };
+                  const existingIndex = prev.findIndex((item) => String(item?.id || '') === String(auditState.jobId));
+                  if (existingIndex >= 0) {
+                      return prev.map((item, index) => (index === existingIndex ? nextEntry : item));
+                  }
+                  return [...prev, nextEntry];
+              });
+              if (normalizedAuditMeta) {
+                  setAuditHistoryMeta(normalizedAuditMeta);
+              }
 
               if (!currentSessionId) {
                   const uid = userProfile.id || 'anonymous';
@@ -3830,7 +4189,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       auditState.status,
       auditState.jobId,
       auditState.result,
+      auditState.file_url,
+      auditState.file_name,
       auditFile,
+      auditHistoryMeta,
       isAuditMode,
       currentSessionId,
       selectedModel,
@@ -3854,8 +4216,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (isMeetingMode) type = 'voice_context';
       if (isOCRMode) type = 'ocr_context';
       if (isAuditMode) type = 'audit_context';
+      const auditMetaPayload = isAuditMode ? buildAuditSessionMetaPayload(auditState, auditFile, auditHistoryMeta) : null;
       await savePanelContext(targetSessionId, panelContent, type);
-      await saveSessionMeta(targetSessionId, selectedModel, currentMode, currentAudioPath, llmBackend);
+      await saveSessionMeta(
+          targetSessionId,
+          selectedModel,
+          currentMode,
+          currentAudioPath,
+          llmBackend,
+          auditMetaPayload ? { audit: auditMetaPayload } : null
+      );
 
       if (!currentSessionId) {
           const uid = userProfile.id || 'anonymous';
@@ -4201,7 +4571,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                      const text = await poll(data.task_id);
                      combinedContext += `[音频文件: ${file.name}]\n${text}\n\n`;
                   } else {
-                      alert(`文件 ${file.name} 上传失败: ${data.error}`);
+                      showWorkspaceNotice(`文件 ${file.name} 上传失败：${data.error || '未知错误'}`, 'rose');
                       hasError = true;
                   }
               }
@@ -4275,7 +4645,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           } else {
                               // 后端返回成功，但没有提取到文字（可能是纯公式或模糊图片）
                               console.warn(`OCR finished for ${file.name} but returned empty text. Raw response:`, data);
-                              alert(`文件 ${file.name} 识别完成，但在图片中未发现可提取的文字（可能是纯公式、模糊或分辨率不足）。请尝试上传更清晰的图片。`);
+                              showWorkspaceNotice(`文件 ${file.name} 已识别完成，但没有发现可提取文字。请尝试上传更清晰的图片或 PDF。`, 'amber');
                               if (isOCRMode) {
                                   const dataLines = data?.data?.lines || data?.lines || [];
                                   const dataPages = data?.data?.pages || data?.pages || [];
@@ -4310,7 +4680,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                       } else {
                           console.warn(`OCR result invalid for ${file.name}`, data);
                           // 如果有错误信息，尝试显示，否则显示通用错误
-                          alert(`文件 ${file.name} 识别失败: ${data.error || '未知错误'}`);
+                          showWorkspaceNotice(`文件 ${file.name} 识别失败：${data.error || '未知错误'}`, 'rose');
                           if (isOCRMode) {
                               updateOcrEntry(wrapper.id, { status: 'error', error: data.error || '识别失败', ocrData: data });
                           }
@@ -4319,7 +4689,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   } catch (error) {
                       clearTimeout(timeoutId);
                       console.error(`OCR request failed for ${file.name}`, error);
-                      alert(`文件 ${file.name} 识别请求失败: ${error.name === 'AbortError' ? '处理超时，图片可能过大' : error.message}`);
+                      showWorkspaceNotice(
+                          `文件 ${file.name} 识别请求失败：${error.name === 'AbortError' ? '处理超时，图片可能过大' : error.message}`,
+                          'rose'
+                      );
                       if (isOCRMode) {
                           updateOcrEntry(wrapper.id, { status: 'error', error: error.message || '识别失败' });
                       }
@@ -4346,7 +4719,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                           }
                       } else {
                           console.error(`RAG Upload failed`, data);
-                          alert(`文件 ${file.name} 上传失败: ${error || 'Upload failed'}`);
+                          showWorkspaceNotice(`文件 ${file.name} 上传失败：${error || 'Upload failed'}`, 'rose');
                           hasError = true;
                       }
 
@@ -4414,7 +4787,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
         if (hasAudio || hasImage) {
             if (hasAudio && hasImage) {
-                alert("请分别上传音频或图片文件");
+                showWorkspaceNotice('请分别上传音频文件和图片/PDF 文件，不要混合提交。', 'amber');
                 return;
             }
 
@@ -4430,10 +4803,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
     if (isMeetingMode) {
         const invalid = files.find(f => !f.type.startsWith('audio/') && !f.type.startsWith('video/') && !['.wav','.m4a','.mp3'].some(ext => f.name.endsWith(ext)));
-        if (invalid) { alert("会议模式仅支持音频文件"); return; }
+        if (invalid) { showWorkspaceNotice('会议模式仅支持音频文件。', 'amber'); return; }
     } else if (isOCRMode) {
         const invalid = files.find(f => !['image/jpeg', 'image/png', 'image/bmp', 'application/pdf'].includes(f.type) && !f.name.toLowerCase().endsWith('.pdf'));
-        if (invalid) { alert("OCR 模式仅支持图片或 PDF"); return; }
+        if (invalid) { showWorkspaceNotice('OCR 模式仅支持图片或 PDF 文件。', 'amber'); return; }
     }
 
     const shouldStartFreshMeetingSession = isMeetingMode && files.some(isAudioFile);
@@ -4992,7 +5365,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
       if (!res.ok || result?.success === false || isLegacyFailText) {
           const msg = result?.error || (isLegacyFailText ? recognizedText : `语音识别失败（${result?.error_code ?? 'unknown'}）`);
-          alert(msg);
+          showWorkspaceNotice(msg, 'rose');
           return;
       }
 
@@ -5015,29 +5388,61 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               setInputValue(prev => prev + (prev ? '\n' : '') + recognizedText);
           }
       } else {
-          alert(result.error || '未能识别出语音内容');
+          showWorkspaceNotice(result.error || '未能识别出语音内容', 'amber');
       }
     } catch (e) {
         console.error('语音识别请求失败', e);
-        alert('语音识别失败，请检查网络');
+        showWorkspaceNotice('语音识别失败，请检查网络后重试。', 'rose');
     } finally {
         setIsProcessing(false);
     }
   };
 
-  const handleExportWord = () => {
-    if (!panelContent.trim()) { alert("暂无内容可导出"); return; }
+  const escapeHtmlForExport = (value = '') => String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+  const buildWorkspaceExportFilename = (extension = 'txt') => {
+    const dateLabel = new Date().toISOString().slice(0, 10);
+    const prefix = isMeetingMode
+      ? 'meeting_notes'
+      : isOCRMode
+        ? 'ocr_result'
+        : isAuditMode
+          ? 'audit_workspace'
+          : currentMode === 'rag'
+            ? 'knowledge_reply'
+            : currentMode === 'database'
+              ? 'database_reply'
+              : currentMode === 'search'
+                ? 'search_reply'
+                : 'workspace_notes';
+    return `${prefix}_${dateLabel}.${extension}`;
+  };
+
+  const handleExportPanelContent = (format = 'doc') => {
+    const content = String(panelContent || '').trim();
+    if (!content) return;
+
+    if (format === 'md') {
+      downloadTextFile(content, buildWorkspaceExportFilename('md'), 'text/markdown;charset=utf-8');
+      return;
+    }
+
+    if (format === 'txt') {
+      downloadTextFile(content, buildWorkspaceExportFilename('txt'));
+      return;
+    }
+
     const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Export</title></head><body>";
-    const footer = "</body></html>";
-    const contentHtml = panelContent.replace(/\n/g, "<br>");
+    const footer = '</body></html>';
+    const contentHtml = escapeHtmlForExport(content).replace(/\n/g, '<br>');
     const sourceHTML = header + contentHtml + footer;
-    const source = 'data:application/vnd.ms-word;charset=utf-8,' + encodeURIComponent(sourceHTML);
-    const fileDownload = document.createElement("a");
-    document.body.appendChild(fileDownload);
-    fileDownload.href = source;
-    fileDownload.download = `export_${new Date().toISOString().slice(0,10)}.doc`;
-    fileDownload.click();
-    document.body.removeChild(fileDownload);
+    const blob = new Blob([sourceHTML], { type: 'application/msword;charset=utf-8' });
+    downloadBlobFile(blob, buildWorkspaceExportFilename('doc'));
   };
 
   const handleGenerateSummary = () => {
@@ -5058,7 +5463,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const source = activeOcrFile?.ocrText || getOcrLines(activeOcrFile).map((line) => line.text).join('\n');
       const content = (source || '').trim();
       if (!content) {
-          alert('暂无可录入的识别内容');
+          showWorkspaceNotice('暂无可录入的识别内容。', 'amber');
           return;
       }
       setOcrIngestModal({ isOpen: true, content });
@@ -5074,9 +5479,16 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleAuditErpActionStable = useStableCallback(handleAuditErpAction);
   const handleMeetingUploadClickStable = useStableCallback(handleMeetingUploadClick);
   const handleManualSaveStable = useStableCallback(handleManualSave);
-  const handleExportWordStable = useStableCallback(handleExportWord);
+  const handleExportWordStable = useStableCallback(() => handleExportPanelContent('doc'));
+  const handleExportMarkdownStable = useStableCallback(() => handleExportPanelContent('md'));
+  const handleExportTextStable = useStableCallback(() => handleExportPanelContent('txt'));
   const handleGenerateSummaryStable = useStableCallback(handleGenerateSummary);
   const handleOcrStoreStable = useStableCallback(handleOcrStore);
+  const panelExportActions = useMemo(() => ([
+      { key: 'doc', label: 'Word 文档', onClick: handleExportWordStable },
+      { key: 'md', label: 'Markdown', onClick: handleExportMarkdownStable },
+      { key: 'txt', label: '纯文本', onClick: handleExportTextStable },
+  ]), [handleExportMarkdownStable, handleExportTextStable, handleExportWordStable]);
 
   useEffect(() => {
       const pending = autoProcessFilesRef.current;
@@ -6684,7 +7096,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleOpenOcrSummary = () => {
       const text = getActiveOcrText();
       if (!text) {
-          alert('暂无可总结的识别内容');
+          showWorkspaceNotice('暂无可总结的识别内容。', 'amber');
           return;
       }
       ocrSummaryContextRef.current = text;
@@ -6713,7 +7125,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       if (isOcrSummaryLoading) return;
       const text = getActiveOcrText();
       if (!text) {
-          alert('暂无可总结的识别内容');
+          showWorkspaceNotice('暂无可总结的识别内容。', 'amber');
           return;
       }
       ocrSummaryContextRef.current = text;
@@ -8100,6 +8512,24 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             </div>
           </div>
         )}
+        {workspaceNotice?.message ? (
+          <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 px-3 w-full max-w-xl">
+            <div
+              className={`flex items-center gap-2 rounded-2xl border px-4 py-3 text-sm shadow-lg ${
+                workspaceNotice.tone === 'rose'
+                  ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200'
+                  : workspaceNotice.tone === 'amber'
+                    ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200'
+                    : workspaceNotice.tone === 'emerald'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200'
+                      : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'
+              }`}
+            >
+              <span className="text-base leading-none">•</span>
+              <span>{workspaceNotice.message}</span>
+            </div>
+          </div>
+        ) : null}
         {isMobileViewport && (
           <div className="px-3 py-2 border-b border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900">
             <div className="grid grid-cols-2 gap-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/90 dark:bg-gray-900/70 p-1">
@@ -8620,17 +9050,20 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   isOcrSaving={isOcrSaving}
                   isSavingContext={isSavingContext}
                   handleManualSave={handleManualSaveStable}
-                  handleExportWord={handleExportWordStable}
+                  exportActions={panelExportActions}
                   handleGenerateSummary={handleGenerateSummaryStable}
                   onOcrStore={handleOcrStoreStable}
                   ocrEngine={ocrEngine}
                   onOcrEngineChange={setOcrEngine}
                   auditState={auditState}
+                  auditHistoryMeta={getCurrentAuditHistoryMeta(auditState, auditFile, auditHistoryMeta) || auditHistoryMeta}
+                  auditHistoryEntries={auditHistoryEntries}
                   auditDocType={auditDocType}
                   auditDocTypes={AUDIT_DOC_TYPES}
                   auditModelBackend={auditModelBackend}
                   auditFile={auditFile}
                   auditNotice={auditNotice}
+                  panelNotice={workspaceNotice}
                   onAuditDocTypeChange={setAuditDocType}
                   onAuditModelBackendChange={setAuditModelBackend}
                   onAuditFileSelect={handleAuditFileSelectStable}
@@ -8885,7 +9318,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                             {isRecordingMode ? (
                               <div className="w-full h-[60px] flex items-center justify-center animate-in slide-in-from-bottom-2 duration-300">
                                  <Suspense fallback={<div className="flex items-center gap-2 text-sm text-gray-500"><Loader2 className="animate-spin" size={16}/> 加载录音组件...</div>}>
-                                    <VoiceRecorder onCancel={() => setIsRecordingMode(false)} onConfirm={handleVoiceConfirm} />
+                                    <VoiceRecorder
+                                      onCancel={() => setIsRecordingMode(false)}
+                                      onConfirm={handleVoiceConfirm}
+                                      onError={(message) => showWorkspaceNotice(message, 'rose')}
+                                    />
                                  </Suspense>
                               </div>
                             ) : (
@@ -9147,6 +9584,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             <OcrIngestModal
               isOpen={ocrIngestModal.isOpen}
               onClose={() => setOcrIngestModal({ isOpen: false, content: "" })}
+              onSuccess={(message) => showWorkspaceNotice(message || 'OCR 结果已提交入库。', 'emerald')}
               content={ocrIngestModal.content}
               userId={userProfile?.id || "anonymous"}
               sessionId={currentSessionId}

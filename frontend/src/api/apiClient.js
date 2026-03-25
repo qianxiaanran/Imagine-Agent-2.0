@@ -36,6 +36,14 @@ const extractErrorMessage = (response, data) =>
   (typeof data === 'string' ? data : '') ||
   `API Error: ${response.status} ${response.statusText}`;
 
+const createApiError = (response, data, endpoint) => {
+  const error = new Error(extractErrorMessage(response, data));
+  error.statusCode = Number(response?.status || 0);
+  error.endpoint = endpoint;
+  error.payload = data;
+  return error;
+};
+
 const parseResponseBody = async (response) => {
   const text = await response.text();
   try {
@@ -182,7 +190,7 @@ const apiClient = async (endpoint, options = {}) => {
         if (retryAttempt.response.status === 401 && shouldClearTokenOnUnauthorized(endpoint)) {
           clearStoredAuthTokens();
         }
-        throw new Error(extractErrorMessage(retryAttempt.response, retryAttempt.data));
+        throw createApiError(retryAttempt.response, retryAttempt.data, endpoint);
       }
 
       if (shouldClearTokenOnUnauthorized(endpoint)) {
@@ -190,7 +198,7 @@ const apiClient = async (endpoint, options = {}) => {
       }
     }
 
-    throw new Error(extractErrorMessage(firstAttempt.response, firstAttempt.data));
+    throw createApiError(firstAttempt.response, firstAttempt.data, endpoint);
   } catch (error) {
     console.error('API Request Failed:', error);
     throw error;

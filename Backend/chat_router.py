@@ -4611,10 +4611,25 @@ async def chat(
     def _stream(gen, media_type: str = "application/x-ndjson"):
         return StreamingResponse(_disconnect_aware_stream(gen), media_type=media_type, headers=stream_headers)
 
+    def _normalize_persisted_sources_payload(sources: Any) -> List[Any]:
+        if not isinstance(sources, list):
+            return []
+        normalized_sources: List[Any] = []
+        for item in sources:
+            if isinstance(item, (dict, list, str, int, float, bool)) or item is None:
+                normalized_sources.append(item)
+                continue
+            try:
+                normalized_sources.append(json.loads(json.dumps(item, ensure_ascii=False, default=str)))
+            except Exception:
+                normalized_sources.append(str(item))
+        return normalized_sources
+
     async def _persist_turn_for_feedback(
             func_type: str,
             user_message: str,
             assistant_message: str,
+            sources: Optional[List[Any]] = None,
     ) -> Optional[Dict[str, int]]:
         if user_id == "anonymous":
             return None
@@ -4634,7 +4649,24 @@ async def chat(
         if user_history_id not in (None, ""):
             history_ids["user"] = int(user_history_id)
         if assistant_history_id not in (None, ""):
-            history_ids["assistant"] = int(assistant_history_id)
+            assistant_history_id = int(assistant_history_id)
+            history_ids["assistant"] = assistant_history_id
+            normalized_sources = _normalize_persisted_sources_payload(sources)
+            if normalized_sources:
+                try:
+                    await asyncio.to_thread(
+                        _append_meta_history_event,
+                        user_id,
+                        session_id,
+                        "message_sources",
+                        {
+                            "assistant_history_id": assistant_history_id,
+                            "func_type": func_type,
+                            "sources": normalized_sources,
+                        },
+                    )
+                except Exception as e:
+                    print(f"Message source history save failed: {e}")
         return history_ids or None
 
     def _should_flush(
@@ -5385,6 +5417,7 @@ async def chat(
         yield json.dumps({"t": "m", "sid": session_id}, ensure_ascii=False) + "\n"
 
         full_reply_clean = ""
+        persisted_sources: List[Dict[str, Any]] = []
         push_chunk, flush_chunk = _make_text_buffer(immediate=True)
 
         try:
@@ -5439,6 +5472,7 @@ async def chat(
                     return
 
                 if market_sources:
+                    persisted_sources = list(market_sources)
                     yield json.dumps({"t": "m", "sid": session_id, "src": market_sources}, ensure_ascii=False) + "\n"
                     if search_domain in {"weather", "exchange"}:
                         direct_market_answer = _build_direct_exchange_answer(tool_query, market_sources)
@@ -5462,6 +5496,7 @@ async def chat(
                                     "search",
                                     message,
                                     full_reply_clean,
+                                    sources=persisted_sources,
                                 )
                             except Exception as e:
                                 print(f"[Search] history save failed: {e}")
@@ -5571,6 +5606,7 @@ async def chat(
                             "source": str(item.get("source") or "").strip(),
                         })
                 if search_sources:
+                    persisted_sources = list(search_sources)
                     yield json.dumps({"t": "m", "sid": session_id, "src": search_sources}, ensure_ascii=False) + "\n"
 
                 if not fetched_pages:
@@ -5602,6 +5638,7 @@ async def chat(
                                         "search",
                                         message,
                                         full_reply_clean,
+                                        sources=persisted_sources,
                                     )
                                 except Exception as e:
                                     print(f"[Search] history save failed: {e}")
@@ -5629,6 +5666,7 @@ async def chat(
                                         "search",
                                         message,
                                         full_reply_clean,
+                                        sources=persisted_sources,
                                     )
                                 except Exception as e:
                                     print(f"[Search] history save failed: {e}")
@@ -5798,6 +5836,7 @@ async def chat(
                         "search",
                         message,
                         full_reply_clean,
+                        sources=persisted_sources,
                     )
                 except Exception as e:
                     print(f"[Search] history save failed: {e}")
@@ -5883,6 +5922,7 @@ async def chat(
                         "database",
                         message,
                         full_reply,
+                        sources=db_sources,
                     )
                 except Exception as e:
                     print(f"History save failed: {e}")
@@ -6090,6 +6130,7 @@ async def chat(
                         "rag",
                         message,
                         full_reply,
+                        sources=srcs,
                     )
                 except Exception as e:
                     print(f"[RAG] history save failed: {e}")
@@ -6222,6 +6263,7 @@ async def chat(
                         final_intent,
                         message,
                         full_reply_clean,
+                        sources=sources,
                     )
                 except Exception as e:
                     print(f"History save failed: {e}")

@@ -22,6 +22,7 @@ import {
   Mic,
   User,
 } from 'lucide-react';
+import AuditHistoryPreview from './AuditHistoryPreview';
 
 const MarkdownRenderer = React.lazy(() => import('./MarkdownRenderer'));
 const AuditWorkspace = React.lazy(() => import('./AuditWorkspace'));
@@ -301,6 +302,8 @@ const AuditPanel = ({
   onAuditModelBackendChange,
   onFileSelect,
   auditState,
+  auditHistoryMeta,
+  auditHistoryEntries,
   auditFile,
   onReset,
   onErpAction,
@@ -483,6 +486,7 @@ const AuditPanel = ({
   const caseDocuments = Array.isArray(caseSummary.documents)
     ? caseSummary.documents
     : (Array.isArray(auditState?.caseDocuments) ? auditState.caseDocuments : []);
+  const isBatchReviewScope = Boolean(result?.is_case_report) && caseDocuments.length > 1;
   const caseCompleteness = caseSummary && typeof caseSummary.completeness === "object" ? caseSummary.completeness : null;
   const workflowState = String(result.workflow_state || auditState?.workflow_state || status || "idle").toLowerCase();
   const workflowLabels = {
@@ -567,14 +571,7 @@ const AuditPanel = ({
           </div>
         )}
 
-        {showHistory && (
-          <div className="rounded-xl border border-gray-200 dark:border-gray-800 p-4 bg-gray-50/70 dark:bg-gray-900/60">
-            <div className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">历史审单摘要</div>
-            <div className="text-sm text-gray-700 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
-              {historyText}
-            </div>
-          </div>
-        )}
+        {showHistory && <AuditHistoryPreview historyText={historyText} historyMeta={auditHistoryMeta} historyEntries={auditHistoryEntries} compact />}
 
         <div className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 overflow-hidden">
           <button
@@ -772,6 +769,11 @@ const AuditPanel = ({
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 建议动作：<span className="text-gray-700 dark:text-gray-200 font-medium">{actionAdvice}</span>
               </div>
+              {isBatchReviewScope && (
+                <div className="text-xs text-cyan-700 dark:text-cyan-300">
+                  当前为整包结果，下面的回写动作会对同一批次的 {caseDocuments.length} 份单据一起生效。
+                </div>
+              )}
               <div className="pt-1 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -779,7 +781,7 @@ const AuditPanel = ({
                   disabled={isErpActionLoading}
                   className="px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {isErpActionLoading ? "回写中..." : "ERP回写：通过"}
+                  {isErpActionLoading ? "回写中..." : (isBatchReviewScope ? "整包回写：通过" : "ERP回写：通过")}
                 </button>
                 <button
                   type="button"
@@ -787,7 +789,7 @@ const AuditPanel = ({
                   disabled={isErpActionLoading}
                   className="px-3 py-1.5 rounded-full text-xs font-medium bg-rose-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  ERP回写：驳回
+                  {isBatchReviewScope ? "整包回写：驳回" : "ERP回写：驳回"}
                 </button>
                 <button
                   type="button"
@@ -795,7 +797,7 @@ const AuditPanel = ({
                   disabled={isErpActionLoading}
                   className="px-3 py-1.5 rounded-full text-xs font-medium bg-amber-600 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  ERP回写：补件
+                  {isBatchReviewScope ? "整包回写：补件" : "ERP回写：补件"}
                 </button>
                 {erpTraceId && (
                   <span className="text-[11px] text-gray-500 dark:text-gray-400 px-2 py-1 rounded-full border border-gray-200 dark:border-gray-700">
@@ -945,6 +947,7 @@ const AuditPanel = ({
 
 const ModePanelComponent = ({
   panelStyle = DEFAULT_PANEL_STYLE,
+  panelNotice = null,
   isMeetingMode,
   isOCRMode,
   isAuditMode,
@@ -956,10 +959,12 @@ const ModePanelComponent = ({
   isOcrSaving,
   isSavingContext,
   handleManualSave,
-  handleExportWord,
+  exportActions = [],
   handleGenerateSummary,
   onOcrStore,
   auditState,
+  auditHistoryMeta,
+  auditHistoryEntries,
   auditDocType,
   auditDocTypes,
   auditModelBackend,
@@ -980,9 +985,22 @@ const ModePanelComponent = ({
   const [meetingViewTab, setMeetingViewTab] = useState("transcript");
   const [isMeetingEditing, setIsMeetingEditing] = useState(false);
   const [meetingSearchKeyword, setMeetingSearchKeyword] = useState("");
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef(null);
   const effectiveMeetingViewTab = isMeetingMode ? meetingViewTab : "transcript";
   const effectiveIsMeetingEditing = isMeetingMode ? isMeetingEditing : false;
   const effectiveMeetingSearchKeyword = isMeetingMode ? meetingSearchKeyword : "";
+
+  useEffect(() => {
+    if (!isExportMenuOpen) return undefined;
+    const handlePointerDown = (event) => {
+      if (!exportMenuRef.current?.contains(event.target)) {
+        setIsExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [isExportMenuOpen]);
 
   if (isAuditMode) {
     return (
@@ -998,6 +1016,8 @@ const ModePanelComponent = ({
           onAuditModelBackendChange={onAuditModelBackendChange}
           onFileSelect={onAuditFileSelect}
           auditState={auditState}
+          auditHistoryMeta={auditHistoryMeta}
+          auditHistoryEntries={auditHistoryEntries}
           auditFile={auditFile}
           onReset={onAuditReset}
           onErpAction={onAuditErpAction}
@@ -1032,6 +1052,8 @@ const ModePanelComponent = ({
   const meetingStatusText = isUploadingFile
     ? "正在解析语音，请稍候..."
     : (hasPanelContent ? "转写已就绪，可直接生成纪要" : "请先上传录音文件");
+  const availableExportActions = Array.isArray(exportActions) ? exportActions.filter((item) => item && typeof item.onClick === 'function') : [];
+  const isExportDisabled = isProcessing || isUploadingFile || !panelContent.trim() || availableExportActions.length === 0;
   const transcriptLines = (panelContent || "")
     .split(/\r?\n+/)
     .map((line) => line.trim())
@@ -1047,6 +1069,14 @@ const ModePanelComponent = ({
   const primaryActionClass = isMeetingMode
     ? "flex items-center gap-2 text-white px-5 py-2.5 rounded-full text-sm font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-gray-900 hover:bg-black shadow-[0_10px_24px_rgba(15,23,42,0.22)] hover:shadow-[0_14px_28px_rgba(15,23,42,0.3)]"
     : `flex items-center gap-2 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm hover:shadow ${panelStyle.btnBg}`;
+  const hasPanelNotice = Boolean(panelNotice?.message);
+  const panelNoticeClass = panelNotice?.tone === 'rose'
+    ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-200'
+    : panelNotice?.tone === 'amber'
+      ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200'
+      : panelNotice?.tone === 'emerald'
+        ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200'
+        : 'border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200';
 
   return (
     <div className={`w-full ${widthClass} flex flex-col flex-shrink-0 border-b md:border-b-0 border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
@@ -1085,6 +1115,13 @@ const ModePanelComponent = ({
           </div>
         </div>
       )}
+      {hasPanelNotice ? (
+        <div className="px-4 pt-4">
+          <div className={`rounded-2xl border px-4 py-3 text-sm shadow-sm ${panelNoticeClass}`}>
+            {panelNotice.message}
+          </div>
+        </div>
+      ) : null}
       {showEnhancedPanel ? (
         isMeetingMode ? (
           <div className="flex-1 p-3 md:p-4 overflow-hidden bg-[radial-gradient(circle_at_top_right,rgba(15,23,42,0.06),transparent_45%)] dark:bg-[radial-gradient(circle_at_top_right,rgba(148,163,184,0.1),transparent_50%)]">
@@ -1349,34 +1386,64 @@ const ModePanelComponent = ({
           />
         </div>
       )}
-      <div className={`px-4 py-3 border-t border-gray-100 dark:border-gray-800 flex flex-wrap items-center justify-between gap-2 backdrop-blur-sm ${isMeetingMode ? "bg-white/95 dark:bg-gray-900/95" : "bg-gray-50/80 dark:bg-gray-800/80"}`}>
-        <div className="flex items-center gap-2">
-          <button onClick={handleManualSave} disabled={isProcessing || isUploadingFile || !panelContent.trim() || isSavingContext} className={secondaryActionClass}>
+      <div className={`px-4 py-3 border-t border-gray-100 dark:border-gray-800 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between backdrop-blur-sm ${isMeetingMode ? "bg-white/95 dark:bg-gray-900/95" : "bg-gray-50/80 dark:bg-gray-800/80"}`}>
+        <div className="flex w-full items-center gap-2 sm:w-auto">
+          <button onClick={handleManualSave} disabled={isProcessing || isUploadingFile || !panelContent.trim() || isSavingContext} className={`${secondaryActionClass} flex-1 justify-center sm:flex-none`}>
             {isSavingContext ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} <span className="hidden sm:inline">保存</span>
           </button>
-          <button onClick={handleExportWord} disabled={isProcessing || isUploadingFile || !panelContent.trim()} className={secondaryActionClass}>
-            <Download size={16} /> <span className="hidden sm:inline">导出</span>
-          </button>
+          <div className="relative flex-1 sm:flex-none" ref={exportMenuRef}>
+            <button
+              type="button"
+              onClick={() => !isExportDisabled && setIsExportMenuOpen((prev) => !prev)}
+              disabled={isExportDisabled}
+              className={`${secondaryActionClass} flex-1 justify-center sm:flex-none`}
+            >
+              <Download size={16} /> <span className="hidden sm:inline">导出</span> <ChevronDown size={14} className={`transition-transform ${isExportMenuOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {isExportMenuOpen ? (
+              <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[180px] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-gray-900">
+                <div className="border-b border-gray-100 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-gray-400 dark:border-gray-800 dark:text-gray-500">
+                  导出格式
+                </div>
+                <div className="p-2">
+                  {availableExportActions.map((action) => (
+                    <button
+                      key={action.key || action.label}
+                      type="button"
+                      onClick={() => {
+                        setIsExportMenuOpen(false);
+                        action.onClick();
+                      }}
+                      className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-gray-700 transition hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-800"
+                    >
+                      <span>{action.label}</span>
+                      <Download size={14} className="text-gray-400" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
         {isOCRMode ? (
-          <div className="flex items-center gap-2">
+          <div className="flex w-full items-center gap-2 sm:w-auto">
             <button
               onClick={onOcrStore}
               disabled={isOcrSaving || isUploadingFile || !panelContent.trim()}
-              className={secondaryActionClass}
+              className={`${secondaryActionClass} flex-1 justify-center sm:flex-none`}
             >
               {isOcrSaving ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />} 数据库录入
             </button>
             <button
               onClick={handleGenerateSummary}
               disabled={isProcessing || isUploadingFile || !panelContent.trim()}
-              className={primaryActionClass}
+              className={`${primaryActionClass} flex-1 justify-center sm:flex-none`}
             >
               {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} 智能分析
             </button>
           </div>
         ) : (
-          <button onClick={handleGenerateSummary} disabled={isProcessing || isUploadingFile || !panelContent.trim()} className={primaryActionClass}>
+          <button onClick={handleGenerateSummary} disabled={isProcessing || isUploadingFile || !panelContent.trim()} className={`${primaryActionClass} w-full justify-center sm:w-auto`}>
             {isProcessing ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} {isMeetingMode ? "生成纪要" : (isAuditMode ? "提交审单" : "智能分析")}
           </button>
         )}

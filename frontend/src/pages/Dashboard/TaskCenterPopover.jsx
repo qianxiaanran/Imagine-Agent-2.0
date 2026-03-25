@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 
 import tasksApi from '../../api/tasks';
+import { getFriendlyRequestError } from '../../utils/requestErrors';
 
 const STATUS_TABS = [
   { key: 'all', label: '全部' },
@@ -138,7 +139,7 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
     } catch (err) {
       setTasks([]);
       setMeta({ counts: { all: 0, running: 0, completed: 0, failed: 0 } });
-      setError(String(err?.message || '任务加载失败'));
+      setError(getFriendlyRequestError(err, '任务加载失败'));
     } finally {
       setLoading(false);
     }
@@ -159,7 +160,7 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
       setDetailError('');
     } catch (err) {
       setSelectedTask(null);
-      setDetailError(String(err?.message || '任务详情加载失败'));
+      setDetailError(getFriendlyRequestError(err, '任务详情加载失败'));
     } finally {
       setDetailLoading(false);
     }
@@ -177,7 +178,7 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
         setSelectedTaskId(nextTaskId);
       }
     } catch (err) {
-      window.alert(String(err?.message || '任务重试失败'));
+      setError(getFriendlyRequestError(err, '任务重试失败'));
     } finally {
       setRetryingTaskId('');
     }

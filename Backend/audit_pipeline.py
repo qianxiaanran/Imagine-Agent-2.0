@@ -732,6 +732,59 @@ def _case_public_documents(case_id: Optional[str]) -> List[Dict[str, Any]]:
         return output
 
 
+def resolve_case_job_ids(case_id: Optional[str], include_job_id: Optional[str] = None) -> List[str]:
+    normalized_case_id = _normalize_case_id(case_id)
+    seen: set[str] = set()
+    job_ids: List[str] = []
+
+    def _append_job_id(value: Any) -> None:
+        job_id = _safe_text(value)
+        if not job_id or job_id in seen:
+            return
+        seen.add(job_id)
+        job_ids.append(job_id)
+
+    _append_job_id(include_job_id)
+    if not normalized_case_id:
+        return job_ids
+
+    for item in _case_public_documents(normalized_case_id):
+        if not isinstance(item, dict):
+            continue
+        _append_job_id(item.get("job_id"))
+
+    case_snapshot = _hydrate_case_from_storage(normalized_case_id) or _load_case_state(normalized_case_id) or {}
+    if isinstance(case_snapshot, dict):
+        _append_job_id(case_snapshot.get("latest_job_id"))
+
+    if require_supabase:
+        try:
+            sb = require_supabase()
+            rows = (
+                sb.table("audit_jobs")
+                .select("job_id,created_at")
+                .eq("case_id", normalized_case_id)
+                .order("created_at")
+                .limit(200)
+                .execute()
+                .data
+                or []
+            )
+            for row in rows:
+                if isinstance(row, dict):
+                    _append_job_id(row.get("job_id"))
+        except Exception as e:
+            print(f"[Audit Case] Load case jobs failed ({normalized_case_id}): {e}")
+
+    if len(job_ids) < 2:
+        for payload in list_local_audit_jobs(limit=500, offset=0):
+            if _normalize_case_id(payload.get("case_id")) != normalized_case_id:
+                continue
+            _append_job_id(payload.get("job_id"))
+
+    return job_ids
+
+
 def _detect_case_doc_tag(file_name: str, doc_type: str) -> str:
     normalized_type = normalize_doc_type(doc_type)
     direct_map = {
@@ -1426,6 +1479,7 @@ def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
         if local_job:
             local_updated_at = _parse_date(local_job.get("updated_at"))
             snapshot_updated_at = _parse_date(snapshot.get("updated_at"))
+            local_result = local_job.get("result") if isinstance(local_job.get("result"), dict) else None
             prefer_local_runtime = (
                 snapshot_updated_at is None
                 or (local_updated_at is not None and local_updated_at >= snapshot_updated_at)
@@ -1447,6 +1501,15 @@ def get_job_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
                 ):
                     if key in local_job and local_job.get(key) is not None:
                         snapshot[key] = local_job.get(key)
+                if local_result is not None:
+                    snapshot["result"] = local_result
+                    local_case_summary = local_result.get("case_summary") if isinstance(local_result.get("case_summary"), dict) else {}
+                    local_case_id = _safe_text(local_case_summary.get("case_id"))
+                    local_case_documents = local_case_summary.get("documents") if isinstance(local_case_summary.get("documents"), list) else []
+                    if local_case_id:
+                        snapshot["case_id"] = local_case_id
+                    if local_case_documents:
+                        snapshot["case_documents"] = local_case_documents
             if not snapshot.get("case_id"):
                 snapshot["case_id"] = local_job.get("case_id")
             snapshot["workflow_state"] = local_job.get("workflow_state") or snapshot.get("workflow_state")
@@ -5876,30 +5939,33 @@ def _sync_erp_action_direct(
     )
 
 
-def push_audit_action_to_erp(
+def _push_single_audit_action_to_erp(
     job_id: str,
     action: str,
     operator_id: str,
     comment: Optional[str] = None,
+    *,
+    snapshot: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     action_norm = _safe_text(action).lower()
     if action_norm not in ERP_ACTIONS:
         return False, {"error": "Invalid action, expected approved/rejected/need_more"}
-    snapshot = get_job_snapshot(job_id)
-    if not snapshot:
+
+    current_snapshot = snapshot or get_job_snapshot(job_id)
+    if not current_snapshot:
         return False, {"error": "Job not found"}
-    if _safe_text(snapshot.get("status")) != "done":
+    if _safe_text(current_snapshot.get("status")) != "done":
         return False, {"error": "Job is not completed"}
-    result = snapshot.get("result") or {}
+
+    result = current_snapshot.get("result") or {}
     if not isinstance(result, dict):
         result = {}
 
-    user_id = _safe_text(snapshot.get("user_id")) or "anonymous"
+    user_id = _safe_text(current_snapshot.get("user_id")) or "anonymous"
     sync_payload: Dict[str, Any] = {}
     queue_task: Optional[Dict[str, Any]] = None
     sync_error: Optional[str] = None
 
-    # queue 模式用于“先保留 ERP 接口语义，后接真实 ERP”。
     if AUDIT_ERP_SYNC_MODE == "direct":
         try:
             sync_payload = _sync_erp_action_direct(
@@ -5988,6 +6054,124 @@ def push_audit_action_to_erp(
         job_id,
     )
     return True, {"job_id": job_id, "erp_action": erp_action, "result": result}
+
+
+def push_audit_action_to_erp(
+    job_id: str,
+    action: str,
+    operator_id: str,
+    comment: Optional[str] = None,
+) -> Tuple[bool, Dict[str, Any]]:
+    action_norm = _safe_text(action).lower()
+    if action_norm not in ERP_ACTIONS:
+        return False, {"error": "Invalid action, expected approved/rejected/need_more"}
+
+    snapshot = get_job_snapshot(job_id)
+    if not snapshot:
+        return False, {"error": "Job not found"}
+
+    case_id = _normalize_case_id(snapshot.get("case_id"))
+    scope_job_ids = resolve_case_job_ids(case_id, include_job_id=job_id) if case_id else [_safe_text(job_id)]
+    scope_job_ids = [item for item in scope_job_ids if _safe_text(item)]
+    is_case_scope = bool(case_id and len(scope_job_ids) > 1)
+
+    if not is_case_scope:
+        ok, data = _push_single_audit_action_to_erp(
+            job_id=job_id,
+            action=action_norm,
+            operator_id=operator_id,
+            comment=comment,
+            snapshot=snapshot,
+        )
+        if not ok:
+            return ok, data
+        data["scope"] = {
+            "type": "job",
+            "case_id": case_id or None,
+            "affected_job_ids": [_safe_text(job_id)],
+            "affected_count": 1,
+        }
+        return True, data
+
+    snapshots: List[Dict[str, Any]] = []
+    for target_job_id in scope_job_ids:
+        target_snapshot = get_job_snapshot(target_job_id)
+        if not target_snapshot:
+            return False, {"error": f"Case job not found: {target_job_id}"}
+        if _safe_text(target_snapshot.get("status")) != "done":
+            return False, {"error": f"Case contains unfinished document: {target_job_id}"}
+        snapshots.append(target_snapshot)
+
+    trace_ids: List[str] = []
+    queue_ids: List[str] = []
+    statuses: List[str] = []
+    providers: List[str] = []
+    sync_errors: List[str] = []
+    for target_job_id, target_snapshot in zip(scope_job_ids, snapshots):
+        ok, data = _push_single_audit_action_to_erp(
+            job_id=target_job_id,
+            action=action_norm,
+            operator_id=operator_id,
+            comment=comment,
+            snapshot=target_snapshot,
+        )
+        if not ok:
+            return False, data
+        erp_action = data.get("erp_action") if isinstance(data.get("erp_action"), dict) else {}
+        trace_id = _safe_text(erp_action.get("trace_id"))
+        queue_id = _safe_text(erp_action.get("queue_id"))
+        sync_status = _safe_text(erp_action.get("status"))
+        provider = _safe_text(erp_action.get("provider"))
+        sync_error = _safe_text(erp_action.get("sync_error"))
+        if trace_id:
+            trace_ids.append(trace_id)
+        if queue_id:
+            queue_ids.append(queue_id)
+        if sync_status:
+            statuses.append(sync_status)
+        if provider:
+            providers.append(provider)
+        if sync_error:
+            sync_errors.append(sync_error)
+
+    aggregate_result = get_case_report(case_id) or {}
+    if not isinstance(aggregate_result, dict):
+        aggregate_result = {}
+    summary_status = "queued" if any(status == "queued" for status in statuses) else (statuses[-1] if statuses else "")
+    summary_provider = providers[-1] if providers else ERP_PROVIDER
+    summary_action = {
+        "action": action_norm,
+        "operator_id": operator_id or "system",
+        "comment": comment,
+        "trace_id": trace_ids[-1] if trace_ids else "",
+        "trace_ids": trace_ids,
+        "provider": summary_provider,
+        "status": summary_status,
+        "stored": all(status != "queued" for status in statuses) if statuses else False,
+        "queue_id": queue_ids[-1] if queue_ids else "",
+        "queue_ids": queue_ids,
+        "sync_error": sync_errors[-1] if sync_errors else "",
+        "affected_count": len(scope_job_ids),
+        "at": _now_iso(),
+        "scope_type": "case",
+        "case_id": case_id,
+    }
+    aggregate_result["erp_action"] = summary_action
+    aggregate_result["erp_trace_id"] = summary_action.get("trace_id")
+    aggregate_result["erp_sync_status"] = summary_status
+
+    return True, {
+        "job_id": job_id,
+        "case_id": case_id,
+        "scope": {
+            "type": "case",
+            "case_id": case_id,
+            "affected_job_ids": scope_job_ids,
+            "affected_count": len(scope_job_ids),
+        },
+        "erp_action": summary_action,
+        "result": aggregate_result,
+    }
 
 
 def _parse_with_loader(file_bytes: bytes, filename: str) -> Tuple[str, List[str]]:

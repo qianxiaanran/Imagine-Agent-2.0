@@ -1,7 +1,16 @@
+import os
+
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from fastapi.responses import FileResponse
 
-from audit_pipeline import enqueue_audit_job, get_case_report, get_job_snapshot, push_audit_action_to_erp
+from audit_pipeline import (
+    _resolve_audit_local_path,
+    enqueue_audit_job,
+    get_case_report,
+    get_job_snapshot,
+    push_audit_action_to_erp,
+)
 
 router = APIRouter(tags=["Audit"])
 
@@ -48,6 +57,8 @@ async def audit_start(
         "status": job["status"],
         "result_link": f"/tasks?task={job['job_id']}",
         "case_id": job.get("case_id"),
+        "file_url": snapshot.get("file_url") or job.get("file_url"),
+        "file_name": snapshot.get("file_name") or job.get("file_name"),
         "stage": job.get("stage"),
         "workflow_state": snapshot.get("workflow_state") or job.get("workflow_state"),
         "upload_sequence_notice": job.get("upload_sequence_notice") or snapshot.get("upload_sequence_notice"),
@@ -62,6 +73,32 @@ def audit_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.get("/api/public/audit/source")
+def audit_source_file(
+    file_url: str | None = None,
+    file_name: str | None = None,
+    job_id: str | None = None,
+):
+    snapshot = get_job_snapshot(job_id) if job_id else None
+    resolved_file_url = file_url or (snapshot or {}).get("file_url")
+    resolved_file_name = file_name or (snapshot or {}).get("file_name")
+    if not resolved_file_url:
+        raise HTTPException(status_code=400, detail="Missing audit file path")
+
+    local_path = _resolve_audit_local_path(
+        resolved_file_url,
+        user_id=(snapshot or {}).get("user_id"),
+        job_id=job_id or (snapshot or {}).get("job_id"),
+        file_name=resolved_file_name,
+        local_path_hint=(snapshot or {}).get("local_path"),
+    )
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(status_code=404, detail="Audit source file not found")
+
+    download_name = resolved_file_name or os.path.basename(local_path) or "document"
+    return FileResponse(path=local_path, filename=download_name)
 
 
 @router.get("/api/audit/case/{case_id}")

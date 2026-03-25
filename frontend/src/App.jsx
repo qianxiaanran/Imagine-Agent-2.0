@@ -3,6 +3,7 @@ import ThemeProvider from './context/ThemeContext';
 import GlobalStyles from './components/GlobalStyles';
 import LoadingScreen from './components/LoadingScreen';
 import ErrorBoundary from './components/ErrorBoundary';
+import StatePanel from './components/StatePanel';
 import {
   AUTH_REFRESH_TOKEN_KEY,
   AUTH_REMEMBER_UNTIL_KEY,
@@ -69,6 +70,7 @@ export default function App() {
   const isCapabilitiesRoute = normalizedPath === '/capabilities';
   const isQuickStartRoute = normalizedPath === '/quickstart';
   const shouldShowLoading = !isAuthReady;
+  const isProtectedRoute = isAdminRoute || isDecisionRoute || isTasksRoute;
   const rememberUntil = Number(localStorage.getItem(AUTH_REMEMBER_UNTIL_KEY) || 0);
   const hasStoredAuthHint = rememberUntil > 0 || !!localStorage.getItem(AUTH_TOKEN_KEY);
   const shouldInitializeAuthClient =
@@ -368,8 +370,24 @@ export default function App() {
               ) : isTasksRoute ? (
                 <TaskCenterPage />
               ) : (
-                <DashboardPage onLogout={handleLogout} currentMode={currentMode} onModeChange={setCurrentMode} />
+              <DashboardPage onLogout={handleLogout} currentMode={currentMode} onModeChange={setCurrentMode} />
               )
+            ) : isProtectedRoute ? (
+              <StatePanel
+                fullScreen
+                tone="amber"
+                icon="auth"
+                title={isAdminRoute ? '需要登录管理员账号' : '需要先登录'}
+                description={
+                  isAdminRoute
+                    ? '管理员后台仅对具备管理员权限的账号开放。请先登录，再进入后台完成用户、审单和规则治理操作。'
+                    : '当前页面属于受保护工作区。登录后可继续查看任务中心、决策面板和相关明细。'
+                }
+                actions={[
+                  { label: '返回首页', href: '/' },
+                  { label: '立即登录', onClick: openLoginModal, primary: true },
+                ]}
+              />
             ) : isCapabilitiesRoute ? (
               <CapabilitiesPage onOpenLogin={openLoginModal} />
             ) : isQuickStartRoute ? (

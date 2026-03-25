@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { X, Loader2, AlertTriangle, FileText, CheckCircle2 } from 'lucide-react';
 import { API_BASE_URL, AUTH_TOKEN_KEY } from '../../api/config';
 
-const OcrIngestModal = ({ isOpen, onClose, content, userId, sessionId, llmBackend }) => {
+const OcrIngestModal = ({ isOpen, onClose, onSuccess, content, userId, sessionId, llmBackend }) => {
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -112,7 +112,7 @@ const OcrIngestModal = ({ isOpen, onClose, content, userId, sessionId, llmBacken
       if (!response.ok || !data.success) {
         throw new Error(data.error || data.detail || '入库失败');
       }
-      alert('已提交入库');
+      onSuccess?.('OCR 结果已提交入库。');
       onClose();
     } catch (e) {
       setError(e?.message || '入库失败，请重试');

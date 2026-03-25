@@ -6,8 +6,8 @@ import re
 import threading
 import os
 from decimal import Decimal
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
@@ -35,6 +35,15 @@ _PREAGG_CACHE: Dict[str, Any] = {
     "generated_at": None,
     "refreshing": False,
     "last_error": None,
+}
+_RISK_PAYMENT_STATUSES = ("Pending", "Unpaid", "Partial")
+_TREND_GRANULARITY_OPTIONS = ("week", "month", "quarter")
+_OBJECT_GROUP_ORDER = ("customer", "sku", "receivable", "inventory")
+_OBJECT_GROUP_LABELS = {
+    "customer": "客户",
+    "sku": "SKU",
+    "receivable": "回款项",
+    "inventory": "库存对象",
 }
 
 
@@ -182,11 +191,135 @@ def _json_safe(value: Any) -> Any:
         return float(value)
     if isinstance(value, datetime):
         return _to_iso(value)
+    if isinstance(value, date):
+        return value.isoformat()
     if isinstance(value, dict):
         return {str(k): _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return value
+
+
+def _normalize_trend_granularity(value: str | None) -> str:
+    normalized = str(value or "month").strip().lower()
+    if normalized in _TREND_GRANULARITY_OPTIONS:
+        return normalized
+    return "month"
+
+
+def _format_drilldown_number(value: Any, unit: str | None = None) -> str:
+    numeric = _to_float(value)
+    if unit == "CNY":
+        return f"{numeric:,.0f}"
+    if unit == "ratio":
+        return f"{numeric * 100:.1f}%"
+    if unit == "count":
+        return f"{int(round(numeric)):,d}"
+    return str(value or "-")
+
+
+def _normalize_evidence_items(raw: Any, fallback: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return fallback
+    items: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()[:40]
+        if not label:
+            continue
+        value = item.get("value")
+        unit = str(item.get("unit") or "").strip()[:16]
+        description = str(item.get("description") or item.get("note") or "").strip()[:120]
+        items.append(
+            {
+                "label": label,
+                "value": value,
+                "unit": unit,
+                "description": description,
+                "display_value": str(item.get("display_value") or _format_drilldown_number(value, unit))[:60],
+            }
+        )
+        if len(items) >= 6:
+            break
+    return items or fallback
+
+
+def _build_ai_evidence_data(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    kpi_map = {item.get("key"): item for item in data.get("kpis", [])}
+    cockpit_meta = (data.get("cockpit") or {}).get("meta") if isinstance(data.get("cockpit"), dict) else {}
+    totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
+    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+
+    evidence_rows = [
+        {
+            "label": "近30日销售额",
+            "value": _to_float((cockpit_meta or {}).get("sales_30d")),
+            "unit": "CNY",
+            "description": "订单表近30日销售金额汇总",
+        },
+        {
+            "label": "回款率",
+            "value": _to_float((kpi_map.get("collection_rate") or {}).get("value")),
+            "unit": "ratio",
+            "description": "已回款金额 / 累计销售额",
+        },
+        {
+            "label": "风险订单数",
+            "value": _to_int((totals or {}).get("at_risk_orders")),
+            "unit": "count",
+            "description": "付款状态为 Pending / Unpaid / Partial 的订单数量",
+        },
+        {
+            "label": "低库存SKU",
+            "value": _to_int((kpi_map.get("low_stock_sku") or {}).get("value")),
+            "unit": "count",
+            "description": "库存量低于或等于安全库存的 SKU 数量",
+        },
+        {
+            "label": "库存估值",
+            "value": _to_float((cockpit_meta or {}).get("inventory_value")),
+            "unit": "CNY",
+            "description": "当前库存数量 × 采购单价估算",
+        },
+        {
+            "label": "预警条数",
+            "value": len(warnings),
+            "unit": "count",
+            "description": "当前规则生成的经营预警数量",
+        },
+    ]
+    for row in evidence_rows:
+        row["display_value"] = _format_drilldown_number(row.get("value"), row.get("unit"))
+    return evidence_rows
+
+
+def _finalize_ai_analysis_payload(payload: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
+    evidence_fallback = _build_ai_evidence_data(data)
+    summary = str(payload.get("core_conclusion") or payload.get("summary") or "").strip()[:220]
+    risk_reasons = _safe_list(payload.get("risk_reasons"), max_items=4) or _safe_list(payload.get("insights"), max_items=4)
+    suggested_actions = _safe_list(payload.get("suggested_actions"), max_items=4) or _safe_list(payload.get("actions"), max_items=4)
+    risk_outlook = str(payload.get("risk_outlook") or "").strip()[:180]
+
+    if not summary:
+        summary = str((evidence_fallback[0] or {}).get("description") or "暂无 AI 分析结果。")
+    if not risk_reasons:
+        risk_reasons = _safe_list(payload.get("insights"), max_items=4)
+    if not suggested_actions:
+        suggested_actions = _safe_list(payload.get("actions"), max_items=4)
+
+    evidence_data = _normalize_evidence_items(payload.get("evidence_data"), evidence_fallback)
+    normalized = {
+        "summary": summary,
+        "core_conclusion": summary,
+        "insights": risk_reasons,
+        "risk_reasons": risk_reasons,
+        "actions": suggested_actions,
+        "suggested_actions": suggested_actions,
+        "risk_outlook": risk_outlook or "请重点关注回款、库存与履约协同风险。",
+        "evidence_data": evidence_data,
+    }
+    return normalized
 
 
 def _fallback_ai_analysis(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -210,12 +343,14 @@ def _fallback_ai_analysis(data: Dict[str, Any]) -> Dict[str, Any]:
         "按周滚动复盘低库存SKU与采购在途，建立销售-采购联动补货节奏。",
         "对高毛利且高销量产品设置优先排产/备货策略，提升盈利质量。",
     ]
-    return {
+    payload = {
         "summary": summary,
         "insights": insights,
         "actions": actions,
         "risk_outlook": "若回款与补货节奏不同步，未来一个经营周期内现金流与履约压力可能同步上升。",
+        "evidence_data": _build_ai_evidence_data(data),
     }
+    return _finalize_ai_analysis_payload(payload, data)
 
 
 def _build_ai_context(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -248,7 +383,7 @@ def _generate_ai_analysis(data: Dict[str, Any], backend: str) -> Dict[str, Any]:
         "2) 用中文输出。\n"
         "3) 严格输出 JSON，不要任何额外文本。\n"
         "4) JSON 结构如下：\n"
-        '{"summary":"", "insights":[""], "actions":[""], "risk_outlook":""}\n\n'
+        '{"core_conclusion":"", "risk_reasons":[""], "suggested_actions":[""], "risk_outlook":"", "evidence_data":[{"label":"","value":"","unit":"","description":""}]}\n\n'
         f"经营数据：{json.dumps(context_payload, ensure_ascii=False)}"
     )
 
@@ -257,19 +392,10 @@ def _generate_ai_analysis(data: Dict[str, Any], backend: str) -> Dict[str, Any]:
     if not parsed:
         return _fallback_ai_analysis(data)
 
-    summary = str(parsed.get("summary") or "").strip()[:200]
-    insights = _safe_list(parsed.get("insights"), max_items=4)
-    actions = _safe_list(parsed.get("actions"), max_items=4)
-    risk_outlook = str(parsed.get("risk_outlook") or "").strip()[:180]
-    if not summary or not insights or not actions:
+    normalized = _finalize_ai_analysis_payload(parsed, data)
+    if not normalized.get("core_conclusion") or not normalized.get("risk_reasons") or not normalized.get("suggested_actions"):
         return _fallback_ai_analysis(data)
-
-    return {
-        "summary": summary,
-        "insights": insights,
-        "actions": actions,
-        "risk_outlook": risk_outlook or "请重点关注回款、库存与履约协同风险。",
-    }
+    return normalized
 
 
 def _get_cached_ai_analysis(data: Dict[str, Any], backend: str, force_refresh: bool) -> Dict[str, Any]:
@@ -389,6 +515,777 @@ def _get_ai_analysis_fast(data: Dict[str, Any], backend: str, force_refresh: boo
     }
 
 
+def _query_trend_rows_by_granularity(conn: Connection, granularity: str) -> List[Dict[str, Any]]:
+    normalized = _normalize_trend_granularity(granularity)
+    if normalized == "week":
+        return _query_rows(
+            conn,
+            """
+            WITH periods AS (
+              SELECT date_trunc('week', CURRENT_DATE) - (gs * INTERVAL '1 week') AS period_start
+              FROM generate_series(11, 0, -1) AS gs
+            ),
+            sales AS (
+              SELECT date_trunc('week', order_date) AS period_start, SUM(total_amount) AS amount, COUNT(*) AS orders
+              FROM public.orders
+              WHERE order_date >= date_trunc('week', CURRENT_DATE) - INTERVAL '11 week'
+              GROUP BY 1
+            ),
+            purchases AS (
+              SELECT date_trunc('week', purchase_date) AS period_start, SUM(total_amount) AS amount, COUNT(*) AS orders
+              FROM public.purchases
+              WHERE purchase_date >= date_trunc('week', CURRENT_DATE) - INTERVAL '11 week'
+              GROUP BY 1
+            )
+            SELECT
+              (TO_CHAR(p.period_start, 'IYYY') || '-W' || TO_CHAR(p.period_start, 'IW')) AS bucket,
+              (TO_CHAR(p.period_start, 'MM-DD') || ' 周') AS label,
+              p.period_start::date AS period_start,
+              (p.period_start + INTERVAL '6 day')::date AS period_end,
+              COALESCE(s.amount, 0) AS sales_amount,
+              COALESCE(s.orders, 0) AS sales_orders,
+              COALESCE(pr.amount, 0) AS purchase_amount,
+              COALESCE(pr.orders, 0) AS purchase_orders
+            FROM periods p
+            LEFT JOIN sales s ON s.period_start = p.period_start
+            LEFT JOIN purchases pr ON pr.period_start = p.period_start
+            ORDER BY p.period_start
+            """
+        )
+    if normalized == "quarter":
+        return _query_rows(
+            conn,
+            """
+            WITH periods AS (
+              SELECT date_trunc('quarter', CURRENT_DATE) - (gs * INTERVAL '3 month') AS period_start
+              FROM generate_series(7, 0, -1) AS gs
+            ),
+            sales AS (
+              SELECT date_trunc('quarter', order_date) AS period_start, SUM(total_amount) AS amount, COUNT(*) AS orders
+              FROM public.orders
+              WHERE order_date >= date_trunc('quarter', CURRENT_DATE) - INTERVAL '21 month'
+              GROUP BY 1
+            ),
+            purchases AS (
+              SELECT date_trunc('quarter', purchase_date) AS period_start, SUM(total_amount) AS amount, COUNT(*) AS orders
+              FROM public.purchases
+              WHERE purchase_date >= date_trunc('quarter', CURRENT_DATE) - INTERVAL '21 month'
+              GROUP BY 1
+            )
+            SELECT
+              (EXTRACT(YEAR FROM p.period_start)::int || '-Q' || EXTRACT(QUARTER FROM p.period_start)::int) AS bucket,
+              (EXTRACT(YEAR FROM p.period_start)::int || '年Q' || EXTRACT(QUARTER FROM p.period_start)::int) AS label,
+              p.period_start::date AS period_start,
+              (p.period_start + INTERVAL '3 month' - INTERVAL '1 day')::date AS period_end,
+              COALESCE(s.amount, 0) AS sales_amount,
+              COALESCE(s.orders, 0) AS sales_orders,
+              COALESCE(pr.amount, 0) AS purchase_amount,
+              COALESCE(pr.orders, 0) AS purchase_orders
+            FROM periods p
+            LEFT JOIN sales s ON s.period_start = p.period_start
+            LEFT JOIN purchases pr ON pr.period_start = p.period_start
+            ORDER BY p.period_start
+            """
+        )
+    return _query_rows(
+        conn,
+        """
+        WITH periods AS (
+          SELECT date_trunc('month', CURRENT_DATE) - (gs * INTERVAL '1 month') AS period_start
+          FROM generate_series(11, 0, -1) AS gs
+        ),
+        sales AS (
+          SELECT date_trunc('month', order_date) AS period_start, SUM(total_amount) AS amount, COUNT(*) AS orders
+          FROM public.orders
+          WHERE order_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '11 month'
+          GROUP BY 1
+        ),
+        purchases AS (
+          SELECT date_trunc('month', purchase_date) AS period_start, SUM(total_amount) AS amount, COUNT(*) AS orders
+          FROM public.purchases
+          WHERE purchase_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '11 month'
+          GROUP BY 1
+        )
+        SELECT
+          TO_CHAR(p.period_start, 'YYYY-MM') AS bucket,
+          TO_CHAR(p.period_start, 'YYYY-MM') AS label,
+          p.period_start::date AS period_start,
+          (p.period_start + INTERVAL '1 month' - INTERVAL '1 day')::date AS period_end,
+          COALESCE(s.amount, 0) AS sales_amount,
+          COALESCE(s.orders, 0) AS sales_orders,
+          COALESCE(pr.amount, 0) AS purchase_amount,
+          COALESCE(pr.orders, 0) AS purchase_orders
+        FROM periods p
+        LEFT JOIN sales s ON s.period_start = p.period_start
+        LEFT JOIN purchases pr ON pr.period_start = p.period_start
+        ORDER BY p.period_start
+        """
+    )
+
+
+def _format_trend_rows(rows: List[Dict[str, Any]], granularity: str) -> List[Dict[str, Any]]:
+    normalized = _normalize_trend_granularity(granularity)
+    output: List[Dict[str, Any]] = []
+    for row in rows:
+        sales_amount_value = _to_float(row.get("sales_amount"))
+        purchase_amount_value = _to_float(row.get("purchase_amount"))
+        item = {
+            "granularity": normalized,
+            "bucket": row.get("bucket"),
+            "label": row.get("label") or row.get("bucket"),
+            "period_start": row.get("period_start"),
+            "period_end": row.get("period_end"),
+            "sales_amount": sales_amount_value,
+            "purchase_amount": purchase_amount_value,
+            "net_amount": sales_amount_value - purchase_amount_value,
+            "sales_orders": _to_int(row.get("sales_orders")),
+            "purchase_orders": _to_int(row.get("purchase_orders")),
+        }
+        if normalized == "month":
+            item["month"] = row.get("bucket")
+        output.append(item)
+    return output
+
+
+def _resolve_period_range(granularity: str, bucket: str) -> Tuple[datetime, datetime, str]:
+    normalized = _normalize_trend_granularity(granularity)
+    raw_bucket = str(bucket or "").strip()
+    if normalized == "week":
+        match = re.match(r"^(\d{4})-W(\d{2})$", raw_bucket)
+        if not match:
+            raise HTTPException(status_code=400, detail="Invalid week bucket")
+        year = int(match.group(1))
+        week = int(match.group(2))
+        start = datetime.fromisocalendar(year, week, 1).replace(tzinfo=timezone.utc)
+        end = start + timedelta(days=7)
+        return start, end, f"{year}年第{week}周"
+    if normalized == "quarter":
+        match = re.match(r"^(\d{4})-Q([1-4])$", raw_bucket)
+        if not match:
+            raise HTTPException(status_code=400, detail="Invalid quarter bucket")
+        year = int(match.group(1))
+        quarter = int(match.group(2))
+        month = (quarter - 1) * 3 + 1
+        start = datetime(year, month, 1, tzinfo=timezone.utc)
+        if quarter == 4:
+            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            end = datetime(year, month + 3, 1, tzinfo=timezone.utc)
+        return start, end, f"{year}年Q{quarter}"
+    match = re.match(r"^(\d{4})-(\d{1,2})$", raw_bucket)
+    if not match:
+        raise HTTPException(status_code=400, detail="Invalid month bucket")
+    year = int(match.group(1))
+    month = int(match.group(2))
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+    return start, end, f"{year}年{month}月"
+
+
+def _make_object_item(
+    *,
+    object_type: str,
+    object_id: Any,
+    name: Any,
+    subtitle: Any = "",
+    primary_value: Any = 0,
+    primary_unit: str = "",
+    primary_label: str = "",
+    secondary_value: Any = "",
+    secondary_unit: str = "",
+    secondary_label: str = "",
+    meta: Any = "",
+    note: Any = "",
+) -> Dict[str, Any]:
+    return {
+        "id": object_id,
+        "object_type": object_type,
+        "name": str(name or "-"),
+        "subtitle": str(subtitle or ""),
+        "primary_value": primary_value,
+        "primary_unit": primary_unit,
+        "primary_label": primary_label,
+        "secondary_value": secondary_value,
+        "secondary_unit": secondary_unit,
+        "secondary_label": secondary_label,
+        "meta": str(meta or ""),
+        "note": str(note or ""),
+    }
+
+
+def _build_where_clause(conditions: List[str]) -> str:
+    normalized = [str(item).strip() for item in conditions if str(item).strip()]
+    return (" AND " + " AND ".join(normalized)) if normalized else ""
+
+
+def _query_drilldown_customers(
+    conn: Connection,
+    *,
+    order_conditions: Optional[List[str]] = None,
+    join_clause: str = "",
+    params: Optional[Dict[str, Any]] = None,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    sql = f"""
+        SELECT
+          c.cust_id AS cust_id,
+          c.cust_name AS cust_name,
+          COUNT(DISTINCT o.order_id) AS order_count,
+          COALESCE(SUM(o.total_amount), 0) AS total_amount,
+          COALESCE(SUM(CASE WHEN o.payment_status IN ('Pending', 'Unpaid', 'Partial') THEN o.total_amount ELSE 0 END), 0) AS receivable_amount,
+          MAX(o.order_date) AS latest_order_date
+        FROM public.orders o
+        JOIN public.customers c ON c.cust_id = o.cust_id
+        {join_clause}
+        WHERE 1=1 {_build_where_clause(order_conditions or [])}
+        GROUP BY c.cust_id, c.cust_name
+        ORDER BY total_amount DESC, order_count DESC, receivable_amount DESC
+        LIMIT :limit
+    """
+    rows = _query_rows(conn, sql, {**(params or {}), "limit": limit})
+    return [
+        _make_object_item(
+            object_type="customer",
+            object_id=row.get("cust_id"),
+            name=row.get("cust_name"),
+            subtitle="客户",
+            primary_value=_to_float(row.get("total_amount")),
+            primary_unit="CNY",
+            primary_label="销售额",
+            secondary_value=_to_int(row.get("order_count")),
+            secondary_unit="count",
+            secondary_label="订单数",
+            meta=f"风险回款 { _format_drilldown_number(row.get('receivable_amount'), 'CNY') }",
+            note=f"最近订单 {row.get('latest_order_date') or '-'}",
+        )
+        for row in rows
+    ]
+
+
+def _query_drilldown_skus(
+    conn: Connection,
+    *,
+    order_conditions: Optional[List[str]] = None,
+    product_conditions: Optional[List[str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    sql = f"""
+        SELECT
+          p.prod_id AS prod_id,
+          p.prod_name AS prod_name,
+          p.category AS category,
+          COALESCE(SUM(oi.total_price), 0) AS revenue,
+          COALESCE(SUM(oi.quantity), 0) AS sold_units
+        FROM public.order_items oi
+        JOIN public.orders o ON o.order_id = oi.order_id
+        JOIN public.products p ON p.prod_id = oi.prod_id
+        WHERE 1=1
+          {_build_where_clause(order_conditions or [])}
+          {_build_where_clause(product_conditions or [])}
+        GROUP BY p.prod_id, p.prod_name, p.category
+        ORDER BY revenue DESC, sold_units DESC
+        LIMIT :limit
+    """
+    rows = _query_rows(conn, sql, {**(params or {}), "limit": limit})
+    return [
+        _make_object_item(
+            object_type="sku",
+            object_id=row.get("prod_id"),
+            name=row.get("prod_name"),
+            subtitle=row.get("category") or "未分类",
+            primary_value=_to_float(row.get("revenue")),
+            primary_unit="CNY",
+            primary_label="销售额",
+            secondary_value=_to_int(row.get("sold_units")),
+            secondary_unit="count",
+            secondary_label="销量",
+            note="来自销售订单明细",
+        )
+        for row in rows
+    ]
+
+
+def _query_drilldown_receivables(
+    conn: Connection,
+    *,
+    order_conditions: Optional[List[str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    limit: int = 8,
+    at_risk_only: bool = False,
+) -> List[Dict[str, Any]]:
+    conditions = list(order_conditions or [])
+    if at_risk_only:
+        conditions.append("o.payment_status IN ('Pending', 'Unpaid', 'Partial')")
+    sql = f"""
+        SELECT
+          o.order_id AS order_id,
+          o.order_no AS order_no,
+          c.cust_name AS cust_name,
+          o.total_amount AS total_amount,
+          o.payment_status AS payment_status,
+          o.delivery_status AS delivery_status,
+          o.order_date AS order_date
+        FROM public.orders o
+        JOIN public.customers c ON c.cust_id = o.cust_id
+        WHERE 1=1 {_build_where_clause(conditions)}
+        ORDER BY o.total_amount DESC, o.order_date DESC
+        LIMIT :limit
+    """
+    rows = _query_rows(conn, sql, {**(params or {}), "limit": limit})
+    return [
+        _make_object_item(
+            object_type="receivable",
+            object_id=row.get("order_id"),
+            name=row.get("order_no") or row.get("order_id"),
+            subtitle=row.get("cust_name") or "客户",
+            primary_value=_to_float(row.get("total_amount")),
+            primary_unit="CNY",
+            primary_label="订单金额",
+            secondary_value=f"{row.get('payment_status') or '-'} / {row.get('delivery_status') or '-'}",
+            secondary_unit="text",
+            secondary_label="状态",
+            note=f"订单日期 {row.get('order_date') or '-'}",
+        )
+        for row in rows
+    ]
+
+
+def _query_drilldown_inventory(
+    conn: Connection,
+    *,
+    warehouse: Optional[str] = None,
+    category: Optional[str] = None,
+    product_name: Optional[str] = None,
+    prefer_low_stock: bool = False,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    conditions: List[str] = []
+    params: Dict[str, Any] = {"limit": limit}
+    if warehouse:
+        conditions.append("i.warehouse = :warehouse")
+        params["warehouse"] = warehouse
+    if category:
+        conditions.append("p.category = :category")
+        params["category"] = category
+    if product_name:
+        conditions.append("p.prod_name = :prod_name")
+        params["prod_name"] = product_name
+
+    having_sql = ""
+    order_sql = "inventory_value DESC, quantity DESC"
+    if prefer_low_stock:
+        having_sql = "HAVING COALESCE(SUM(i.quantity), 0) <= COALESCE(MAX(p.min_stock), 0)"
+        order_sql = "(COALESCE(MAX(p.min_stock), 0) - COALESCE(SUM(i.quantity), 0)) DESC, quantity ASC"
+
+    sql = f"""
+        SELECT
+          p.prod_id AS prod_id,
+          p.prod_name AS prod_name,
+          p.category AS category,
+          COALESCE(SUM(i.quantity), 0) AS quantity,
+          COUNT(DISTINCT i.warehouse) AS warehouse_count,
+          COALESCE(MAX(p.min_stock), 0) AS min_stock,
+          COALESCE(SUM(i.quantity * COALESCE(p.purchase_price, 0)), 0) AS inventory_value
+        FROM public.inventory i
+        JOIN public.products p ON p.prod_id = i.prod_id
+        WHERE 1=1 {_build_where_clause(conditions)}
+        GROUP BY p.prod_id, p.prod_name, p.category
+        {having_sql}
+        ORDER BY {order_sql}
+        LIMIT :limit
+    """
+    rows = _query_rows(conn, sql, params)
+    return [
+        _make_object_item(
+            object_type="inventory",
+            object_id=row.get("prod_id"),
+            name=row.get("prod_name"),
+            subtitle=row.get("category") or "库存对象",
+            primary_value=_to_float(row.get("quantity")),
+            primary_unit="count",
+            primary_label="库存件数",
+            secondary_value=_to_int(row.get("min_stock")),
+            secondary_unit="count",
+            secondary_label="安全库存",
+            meta=f"{_to_int(row.get('warehouse_count'))} 个仓库",
+            note=f"库存估值 {_format_drilldown_number(row.get('inventory_value'), 'CNY')}",
+        )
+        for row in rows
+    ]
+
+
+def _build_empty_object_groups() -> Dict[str, List[Dict[str, Any]]]:
+    return {key: [] for key in _OBJECT_GROUP_ORDER}
+
+
+def _normalize_drilldown_source(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    allowed_sources = {"trend", "payment", "delivery", "purchase", "risk", "product", "warehouse", "category"}
+    if normalized not in allowed_sources:
+        raise HTTPException(status_code=400, detail="Unsupported drilldown source")
+    return normalized
+
+
+def _normalize_optional_text(value: Any) -> Optional[str]:
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def _normalize_drilldown_limit(value: int | None) -> int:
+    try:
+        numeric = int(value or 8)
+    except Exception:
+        numeric = 8
+    return max(4, min(20, numeric))
+
+
+def _query_drilldown_inventory_from_orders(
+    conn: Connection,
+    *,
+    order_conditions: Optional[List[str]] = None,
+    product_conditions: Optional[List[str]] = None,
+    params: Optional[Dict[str, Any]] = None,
+    limit: int = 8,
+    prefer_low_stock: bool = False,
+) -> List[Dict[str, Any]]:
+    scoped_conditions = list(order_conditions or []) + list(product_conditions or [])
+    having_sql = ""
+    order_sql = "inventory_value DESC, quantity DESC"
+    if prefer_low_stock:
+        having_sql = "HAVING COALESCE(SUM(i.quantity), 0) <= COALESCE(MAX(p.min_stock), 0)"
+        order_sql = "(COALESCE(MAX(p.min_stock), 0) - COALESCE(SUM(i.quantity), 0)) DESC, quantity ASC"
+
+    sql = f"""
+        WITH scoped_products AS (
+          SELECT DISTINCT p.prod_id, p.prod_name, p.category
+          FROM public.order_items oi
+          JOIN public.orders o ON o.order_id = oi.order_id
+          JOIN public.products p ON p.prod_id = oi.prod_id
+          WHERE 1=1 {_build_where_clause(scoped_conditions)}
+        )
+        SELECT
+          sp.prod_id AS prod_id,
+          sp.prod_name AS prod_name,
+          sp.category AS category,
+          COALESCE(SUM(i.quantity), 0) AS quantity,
+          COUNT(DISTINCT i.warehouse) AS warehouse_count,
+          COALESCE(MAX(p.min_stock), 0) AS min_stock,
+          COALESCE(SUM(i.quantity * COALESCE(p.purchase_price, 0)), 0) AS inventory_value
+        FROM scoped_products sp
+        JOIN public.products p ON p.prod_id = sp.prod_id
+        LEFT JOIN public.inventory i ON i.prod_id = sp.prod_id
+        GROUP BY sp.prod_id, sp.prod_name, sp.category
+        {having_sql}
+        ORDER BY {order_sql}
+        LIMIT :limit
+    """
+    rows = _query_rows(conn, sql, {**(params or {}), "limit": limit})
+    return [
+        _make_object_item(
+            object_type="inventory",
+            object_id=row.get("prod_id"),
+            name=row.get("prod_name"),
+            subtitle=row.get("category") or "库存对象",
+            primary_value=_to_float(row.get("quantity")),
+            primary_unit="count",
+            primary_label="库存件数",
+            secondary_value=_to_int(row.get("min_stock")),
+            secondary_unit="count",
+            secondary_label="安全库存",
+            meta=f"{_to_int(row.get('warehouse_count'))} 个仓库",
+            note=f"库存估值 {_format_drilldown_number(row.get('inventory_value'), 'CNY')}",
+        )
+        for row in rows
+    ]
+
+
+def _build_drilldown_response(
+    *,
+    source: str,
+    granularity: str = "month",
+    bucket: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    name: str | None = None,
+    limit: int = 8,
+) -> Dict[str, Any]:
+    normalized_source = _normalize_drilldown_source(source)
+    normalized_granularity = _normalize_trend_granularity(granularity)
+    normalized_status = _normalize_optional_text(status)
+    normalized_category = _normalize_optional_text(category)
+    normalized_name = _normalize_optional_text(name)
+    normalized_limit = _normalize_drilldown_limit(limit)
+
+    object_groups = _build_empty_object_groups()
+    title = "经营明细下钻"
+    metric_description = "点击图表后查看关联的客户、SKU、回款项与库存对象。"
+    default_group = "customer"
+    context: Dict[str, Any] = {
+        "source": normalized_source,
+        "granularity": normalized_granularity,
+        "bucket": bucket or "",
+        "status": normalized_status or "",
+        "category": normalized_category or "",
+        "name": normalized_name or "",
+    }
+
+    with engine.begin() as conn:
+        if normalized_source == "trend":
+            if not bucket:
+                raise HTTPException(status_code=400, detail="Missing trend bucket")
+            period_start, period_end, period_label = _resolve_period_range(normalized_granularity, bucket)
+            params = {"period_start": period_start.date(), "period_end": period_end.date()}
+            order_conditions = ["o.order_date >= :period_start", "o.order_date < :period_end"]
+            object_groups["customer"] = _query_drilldown_customers(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["sku"] = _query_drilldown_skus(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["receivable"] = _query_drilldown_receivables(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["inventory"] = _query_drilldown_inventory_from_orders(
+                conn,
+                order_conditions=order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            title = f"{period_label} 经营明细"
+            metric_description = f"统计口径：按{normalized_granularity}汇总订单与采购金额，当前展示 {period_label} 的客户、SKU、回款项与库存对象。"
+            context.update({"period_start": str(period_start.date()), "period_end": str(period_end.date()), "label": period_label})
+
+        elif normalized_source == "payment":
+            if not normalized_status:
+                raise HTTPException(status_code=400, detail="Missing payment status")
+            params = {"status": normalized_status}
+            order_conditions = ["o.payment_status = :status"]
+            object_groups["customer"] = _query_drilldown_customers(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["sku"] = _query_drilldown_skus(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["receivable"] = _query_drilldown_receivables(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["inventory"] = _query_drilldown_inventory_from_orders(
+                conn,
+                order_conditions=order_conditions,
+                params=params,
+                limit=normalized_limit,
+                prefer_low_stock=normalized_status in _RISK_PAYMENT_STATUSES,
+            )
+            title = f"回款结构 · {normalized_status}"
+            metric_description = "统计口径：按订单金额汇总付款状态，点击后查看对应状态下的客户、SKU、回款项与库存对象。"
+            default_group = "receivable" if normalized_status in _RISK_PAYMENT_STATUSES else "customer"
+
+        elif normalized_source == "delivery":
+            if not normalized_status:
+                raise HTTPException(status_code=400, detail="Missing delivery status")
+            params = {"status": normalized_status}
+            order_conditions = ["o.delivery_status = :status"]
+            object_groups["customer"] = _query_drilldown_customers(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["sku"] = _query_drilldown_skus(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["receivable"] = _query_drilldown_receivables(conn, order_conditions=order_conditions, params=params, limit=normalized_limit)
+            object_groups["inventory"] = _query_drilldown_inventory_from_orders(
+                conn,
+                order_conditions=order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            title = f"履约结构 · {normalized_status}"
+            metric_description = "统计口径：按订单金额汇总交付状态，点击后查看该履约状态关联的客户、SKU、回款项与库存对象。"
+
+        elif normalized_source == "purchase":
+            if not normalized_status:
+                raise HTTPException(status_code=400, detail="Missing purchase status")
+            object_groups["inventory"] = _query_drilldown_inventory(
+                conn,
+                prefer_low_stock=normalized_status in {"Pending", "Processing"},
+                limit=normalized_limit,
+            )
+            title = f"采购状态 · {normalized_status}"
+            metric_description = "统计口径：按采购单金额汇总采购状态。由于当前缺少采购明细行，优先展示关联库存对象用于补货与积压判断。"
+            default_group = "inventory"
+
+        elif normalized_source == "product":
+            if not normalized_name:
+                raise HTTPException(status_code=400, detail="Missing product name")
+            params = {"prod_name": normalized_name}
+            product_order_conditions = [
+                "EXISTS (SELECT 1 FROM public.order_items oi JOIN public.products p ON p.prod_id = oi.prod_id WHERE oi.order_id = o.order_id AND p.prod_name = :prod_name)"
+            ]
+            product_conditions = ["p.prod_name = :prod_name"]
+            object_groups["customer"] = _query_drilldown_customers(
+                conn,
+                order_conditions=product_order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["sku"] = _query_drilldown_skus(
+                conn,
+                product_conditions=product_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["receivable"] = _query_drilldown_receivables(
+                conn,
+                order_conditions=product_order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["inventory"] = _query_drilldown_inventory(conn, product_name=normalized_name, limit=normalized_limit)
+            title = f"商品销售 · {normalized_name}"
+            metric_description = "统计口径：基于近180日商品销售额，点击商品后查看其关联客户、SKU、回款项与库存对象。"
+            default_group = "sku"
+
+        elif normalized_source == "warehouse":
+            warehouse_name = normalized_name or normalized_category
+            if not warehouse_name:
+                raise HTTPException(status_code=400, detail="Missing warehouse name")
+            params = {"warehouse_name": warehouse_name}
+            warehouse_order_conditions = [
+                "EXISTS (SELECT 1 FROM public.order_items oi JOIN public.inventory i ON i.prod_id = oi.prod_id WHERE oi.order_id = o.order_id AND i.warehouse = :warehouse_name)"
+            ]
+            object_groups["customer"] = _query_drilldown_customers(
+                conn,
+                order_conditions=warehouse_order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["receivable"] = _query_drilldown_receivables(
+                conn,
+                order_conditions=warehouse_order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["inventory"] = _query_drilldown_inventory(conn, warehouse=warehouse_name, limit=normalized_limit)
+            title = f"仓库库存 · {warehouse_name}"
+            metric_description = "统计口径：按当前仓库库存快照统计件数与明细行数，并展示该仓库商品关联的客户、回款项和库存对象。"
+            default_group = "inventory"
+            context["name"] = warehouse_name
+
+        elif normalized_source == "category":
+            if not normalized_category:
+                raise HTTPException(status_code=400, detail="Missing product category")
+            params = {"category_name": normalized_category}
+            category_order_conditions = [
+                "EXISTS (SELECT 1 FROM public.order_items oi JOIN public.products p ON p.prod_id = oi.prod_id WHERE oi.order_id = o.order_id AND p.category = :category_name)"
+            ]
+            category_product_conditions = ["p.category = :category_name"]
+            object_groups["customer"] = _query_drilldown_customers(
+                conn,
+                order_conditions=category_order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["sku"] = _query_drilldown_skus(
+                conn,
+                product_conditions=category_product_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["receivable"] = _query_drilldown_receivables(
+                conn,
+                order_conditions=category_order_conditions,
+                params=params,
+                limit=normalized_limit,
+            )
+            object_groups["inventory"] = _query_drilldown_inventory(conn, category=normalized_category, limit=normalized_limit)
+            title = f"品类盈利 · {normalized_category}"
+            metric_description = "统计口径：按品类汇总近180日销售额、成本额和利润，点击后查看该品类关联的客户、SKU、回款项与库存对象。"
+            default_group = "sku"
+
+        elif normalized_source == "risk":
+            if not normalized_category:
+                raise HTTPException(status_code=400, detail="Missing risk category")
+            title = f"风险对象 · {normalized_category}"
+            if normalized_category == "客户回款":
+                params: Dict[str, Any] = {}
+                order_conditions = ["o.payment_status IN ('Pending', 'Unpaid', 'Partial')"]
+                sku_order_conditions = ["o.payment_status IN ('Pending', 'Unpaid', 'Partial')"]
+                receivable_conditions = ["o.payment_status IN ('Pending', 'Unpaid', 'Partial')"]
+                if normalized_name:
+                    order_conditions.append("c.cust_name = :risk_name")
+                    sku_order_conditions.append(
+                        "o.cust_id IN (SELECT cust_id FROM public.customers WHERE cust_name = :risk_name)"
+                    )
+                    receivable_conditions.append("c.cust_name = :risk_name")
+                    params["risk_name"] = normalized_name
+                object_groups["customer"] = _query_drilldown_customers(
+                    conn,
+                    order_conditions=order_conditions,
+                    params=params,
+                    limit=normalized_limit,
+                )
+                object_groups["sku"] = _query_drilldown_skus(
+                    conn,
+                    order_conditions=sku_order_conditions,
+                    params=params,
+                    limit=normalized_limit,
+                )
+                object_groups["receivable"] = _query_drilldown_receivables(
+                    conn,
+                    order_conditions=receivable_conditions,
+                    params=params,
+                    limit=normalized_limit,
+                    at_risk_only=True,
+                )
+                object_groups["inventory"] = _query_drilldown_inventory_from_orders(
+                    conn,
+                    order_conditions=["o.payment_status IN ('Pending', 'Unpaid', 'Partial')"],
+                    params=params,
+                    limit=normalized_limit,
+                )
+                metric_description = "统计口径：客户回款风险按未回款/部分回款订单金额汇总，支持下钻查看客户、SKU、回款项与库存对象。"
+                default_group = "customer" if not normalized_name else "receivable"
+            elif normalized_category == "库存缺口":
+                params = {"prod_name": normalized_name} if normalized_name else {}
+                product_order_conditions = (
+                    [
+                        "EXISTS (SELECT 1 FROM public.order_items oi JOIN public.products p ON p.prod_id = oi.prod_id WHERE oi.order_id = o.order_id AND p.prod_name = :prod_name)"
+                    ]
+                    if normalized_name
+                    else []
+                )
+                product_conditions = ["p.prod_name = :prod_name"] if normalized_name else []
+                object_groups["customer"] = _query_drilldown_customers(
+                    conn,
+                    order_conditions=product_order_conditions,
+                    params=params,
+                    limit=normalized_limit,
+                ) if normalized_name else []
+                object_groups["sku"] = _query_drilldown_skus(
+                    conn,
+                    product_conditions=product_conditions,
+                    params=params,
+                    limit=normalized_limit,
+                ) if normalized_name else []
+                object_groups["receivable"] = _query_drilldown_receivables(
+                    conn,
+                    order_conditions=product_order_conditions,
+                    params=params,
+                    limit=normalized_limit,
+                ) if normalized_name else []
+                object_groups["inventory"] = _query_drilldown_inventory(
+                    conn,
+                    product_name=normalized_name,
+                    prefer_low_stock=True,
+                    limit=normalized_limit,
+                )
+                metric_description = "统计口径：库存缺口按当前库存与安全库存差值识别，支持下钻查看缺口商品及其关联客户、SKU、回款项与库存对象。"
+                default_group = "inventory"
+            else:
+                object_groups["inventory"] = _query_drilldown_inventory(conn, limit=normalized_limit)
+                metric_description = "统计口径：采购积压按未完成采购金额与单量识别。当前优先展示库存对象，辅助判断积压与去化压力。"
+                default_group = "inventory"
+
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported drilldown source")
+
+    return {
+        "title": title,
+        "metric_description": metric_description,
+        "default_group": default_group,
+        "context": context,
+        "group_labels": [{"key": key, "label": _OBJECT_GROUP_LABELS.get(key, key)} for key in _OBJECT_GROUP_ORDER],
+        "object_groups": object_groups,
+    }
+
+
 def _collect_dashboard_data() -> Dict[str, Any]:
     now = _utc_now()
     with engine.begin() as conn:
@@ -471,37 +1368,9 @@ def _collect_dashboard_data() -> Dict[str, Any]:
             """
         )
 
-        trend_rows = _query_rows(
-            conn,
-            """
-            WITH months AS (
-              SELECT date_trunc('month', CURRENT_DATE) - (gs * INTERVAL '1 month') AS month_start
-              FROM generate_series(11, 0, -1) AS gs
-            ),
-            sales AS (
-              SELECT date_trunc('month', order_date) AS month_start, SUM(total_amount) AS amount, COUNT(*) AS orders
-              FROM public.orders
-              WHERE order_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '11 month'
-              GROUP BY 1
-            ),
-            purchases AS (
-              SELECT date_trunc('month', purchase_date) AS month_start, SUM(total_amount) AS amount, COUNT(*) AS orders
-              FROM public.purchases
-              WHERE purchase_date >= date_trunc('month', CURRENT_DATE) - INTERVAL '11 month'
-              GROUP BY 1
-            )
-            SELECT
-              TO_CHAR(m.month_start, 'YYYY-MM') AS month,
-              COALESCE(s.amount, 0) AS sales_amount,
-              COALESCE(s.orders, 0) AS sales_orders,
-              COALESCE(p.amount, 0) AS purchase_amount,
-              COALESCE(p.orders, 0) AS purchase_orders
-            FROM months m
-            LEFT JOIN sales s ON s.month_start = m.month_start
-            LEFT JOIN purchases p ON p.month_start = m.month_start
-            ORDER BY m.month_start
-            """
-        )
+        monthly_trend_rows = _query_trend_rows_by_granularity(conn, "month")
+        weekly_trend_rows = _query_trend_rows_by_granularity(conn, "week")
+        quarterly_trend_rows = _query_trend_rows_by_granularity(conn, "quarter")
 
         payment_breakdown = _query_rows(
             conn,
@@ -845,20 +1714,12 @@ def _collect_dashboard_data() -> Dict[str, Any]:
         },
     ]
 
-    formatted_trends: List[Dict[str, Any]] = []
-    for row in trend_rows:
-        sales_amount_value = _to_float(row.get("sales_amount"))
-        purchase_amount_value = _to_float(row.get("purchase_amount"))
-        formatted_trends.append(
-            {
-                "month": row.get("month"),
-                "sales_amount": sales_amount_value,
-                "purchase_amount": purchase_amount_value,
-                "net_amount": sales_amount_value - purchase_amount_value,
-                "sales_orders": _to_int(row.get("sales_orders")),
-                "purchase_orders": _to_int(row.get("purchase_orders")),
-            }
-        )
+    formatted_trends = _format_trend_rows(monthly_trend_rows, "month")
+    trends_by_granularity = {
+        "month": formatted_trends,
+        "week": _format_trend_rows(weekly_trend_rows, "week"),
+        "quarter": _format_trend_rows(quarterly_trend_rows, "quarter"),
+    }
 
     category_profit_rows: List[Dict[str, Any]] = []
     for row in category_profit:
@@ -895,6 +1756,12 @@ def _collect_dashboard_data() -> Dict[str, Any]:
             },
         },
         "trends": formatted_trends,
+        "trends_by_granularity": trends_by_granularity,
+        "trend_granularity_options": [
+            {"key": "week", "label": "按周"},
+            {"key": "month", "label": "按月"},
+            {"key": "quarter", "label": "按季"},
+        ],
         "breakdowns": {
             "payment": payment_breakdown,
             "delivery": delivery_breakdown,
@@ -1023,6 +1890,32 @@ def warmup_decision_cache():
         print(f"[Decision] warmup completed (backend={backend})")
     except Exception as exc:
         print(f"[Decision] warmup failed: {exc}")
+
+
+@router.get("/drilldown")
+def get_decision_drilldown(
+    source: str = Query(description="trend | payment | delivery | purchase | risk | product | warehouse | category"),
+    granularity: str = Query(default="month", description="week | month | quarter"),
+    bucket: str | None = Query(default=None, description="Trend bucket, e.g. 2026-03 / 2026-W12 / 2026-Q1"),
+    status: str | None = Query(default=None, description="Status for payment / delivery / purchase drilldown"),
+    category: str | None = Query(default=None, description="Risk or product category"),
+    name: str | None = Query(default=None, description="Product, warehouse, or risk object name"),
+    limit: int = Query(default=8, ge=1, le=20, description="Rows per object group"),
+):
+    try:
+        return _build_drilldown_response(
+            source=source,
+            granularity=granularity,
+            bucket=bucket,
+            status=status,
+            category=category,
+            name=name,
+            limit=limit,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load decision drilldown: {exc}") from exc
 
 
 @router.get("/overview")

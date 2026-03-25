@@ -18,7 +18,15 @@ from admin_utils import (
     safe_upsert_profile,
 )
 from supabase_client import get_admin_supabase, require_supabase, engine
-from audit_pipeline import get_job_snapshot, cancel_audit_job, retry_audit_job, list_local_audit_jobs
+from audit_pipeline import (
+    get_job_snapshot,
+    get_case_report,
+    cancel_audit_job,
+    retry_audit_job,
+    list_local_audit_jobs,
+    resolve_case_job_ids,
+    _parse_date,
+)
 from documents_processing import get_embeddings
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
@@ -40,6 +48,8 @@ class AuditReviewPayload(BaseModel):
     job_id: str
     status: str
     comment: Optional[str] = None
+    case_id: Optional[str] = None
+    apply_to_case: Optional[bool] = None
 
 
 class RuleUpdatePayload(BaseModel):
@@ -199,6 +209,7 @@ def _build_audit_record_payload(job: Dict[str, Any], result: Dict[str, Any], rev
         "status": job.get("status"),
         "progress": job.get("progress"),
         "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
         "risk_level": risk_level,
         "summary": _audit_text(result.get("summary")),
         "review": review,
@@ -227,9 +238,13 @@ def _audit_record_matches_query(record: Dict[str, Any], query: str) -> bool:
     keyword = _audit_text(query).lower()
     if not keyword:
         return True
+    child_doc_types = record.get("child_doc_types") if isinstance(record.get("child_doc_types"), list) else []
+    child_file_names = record.get("child_file_names") if isinstance(record.get("child_file_names"), list) else []
+    child_job_ids = record.get("child_job_ids") if isinstance(record.get("child_job_ids"), list) else []
     haystack = " ".join(
         [
             _audit_text(record.get("job_id")),
+            _audit_text(record.get("case_id")),
             _audit_text(record.get("user_id")),
             _audit_text(record.get("file_name")),
             _audit_text(record.get("document_title")),
@@ -239,6 +254,9 @@ def _audit_record_matches_query(record: Dict[str, Any], query: str) -> bool:
             _audit_text(record.get("summary")),
             _audit_text(record.get("headline")),
             _audit_text(record.get("reviewer_id")),
+            " ".join(_audit_text(value) for value in child_doc_types),
+            " ".join(_audit_text(value) for value in child_file_names),
+            " ".join(_audit_text(value) for value in child_job_ids),
         ]
     ).lower()
     return keyword in haystack
@@ -263,8 +281,20 @@ def _record_matches_filters(
 ) -> bool:
     if user_id and _audit_text(record.get("user_id")) != _audit_text(user_id):
         return False
-    if doc_type and _audit_text(record.get("doc_type")).lower() != _audit_text(doc_type).lower():
-        return False
+    normalized_doc_type = _audit_text(doc_type).lower()
+    if normalized_doc_type:
+        if _audit_text(record.get("group_type")).lower() == "case":
+            child_doc_types = {
+                _audit_text(value).lower()
+                for value in (record.get("child_doc_types") if isinstance(record.get("child_doc_types"), list) else [])
+                if _audit_text(value)
+            }
+            if child_doc_types and normalized_doc_type not in child_doc_types:
+                return False
+            if not child_doc_types and _audit_text(record.get("doc_type")).lower() != normalized_doc_type:
+                return False
+        elif _audit_text(record.get("doc_type")).lower() != normalized_doc_type:
+            return False
     if status and _audit_text(record.get("status")).lower() != _audit_text(status).lower():
         return False
     if risk_level and _audit_text(record.get("risk_level")).lower() != _audit_text(risk_level).lower():
@@ -313,6 +343,339 @@ def _review_payload_from_row(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "updated_at": updated_at,
         "created_at": created_at,
     }
+
+
+def _resolve_review_scope(job_id: str, *, case_id: Optional[str] = None, apply_to_case: Optional[bool] = None) -> Dict[str, Any]:
+    normalized_job_id = _audit_text(job_id)
+    snapshot = get_job_snapshot(normalized_job_id) or {}
+    effective_case_id = _audit_text(case_id or snapshot.get("case_id"))
+    allow_case_scope = apply_to_case is not False
+    job_ids = [normalized_job_id] if normalized_job_id else []
+    if allow_case_scope and effective_case_id:
+        case_job_ids = resolve_case_job_ids(effective_case_id, include_job_id=normalized_job_id)
+        if len(case_job_ids) > 1:
+            job_ids = case_job_ids
+    return {
+        "type": "case" if len(job_ids) > 1 else "job",
+        "case_id": effective_case_id or None,
+        "job_ids": job_ids,
+        "affected_count": len(job_ids),
+    }
+
+
+def _save_review_row(
+    sb: Any,
+    *,
+    job_id: str,
+    status: str,
+    comment: Optional[str],
+    reviewer_id: str,
+    now: str,
+) -> None:
+    existing = sb.table("audit_reviews").select("id,created_at").eq("job_id", job_id).limit(1).execute()
+    row = existing.data[0] if existing.data else None
+    payload = {
+        "job_id": job_id,
+        "status": status,
+        "comment": comment,
+        "reviewer_id": reviewer_id,
+        "updated_at": now,
+    }
+    if row and row.get("id") is not None:
+        sb.table("audit_reviews").update(payload).eq("id", row["id"]).execute()
+        return
+    payload["created_at"] = now
+    sb.table("audit_reviews").insert(payload).execute()
+
+
+def _risk_rank(value: Any) -> int:
+    normalized = _audit_text(value).lower()
+    if normalized == "high":
+        return 3
+    if normalized == "medium":
+        return 2
+    if normalized == "low":
+        return 1
+    return 0
+
+
+def _status_rank(value: Any) -> int:
+    normalized = _audit_text(value).lower()
+    if normalized == "failed":
+        return 4
+    if normalized == "running":
+        return 3
+    if normalized == "pending":
+        return 2
+    if normalized == "done":
+        return 1
+    return 0
+
+
+def _pick_latest_record(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not records:
+        return {}
+    return sorted(
+        records,
+        key=lambda item: (
+            _audit_text(item.get("created_at") or item.get("document_date")),
+            _audit_text(item.get("job_id")),
+        ),
+        reverse=True,
+    )[0]
+
+
+def _pick_common_text(records: List[Dict[str, Any]], key: str) -> str:
+    values = [
+        _audit_text(record.get(key))
+        for record in records
+        if _audit_text(record.get(key))
+    ]
+    if not values:
+        return ""
+    counts: Dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return sorted(counts.items(), key=lambda item: (item[1], len(item[0]), item[0]), reverse=True)[0][0]
+
+
+def _aggregate_review_status(records: List[Dict[str, Any]]) -> str:
+    statuses = [_audit_text(record.get("review_status")).lower() for record in records if _audit_text(record.get("review_status"))]
+    if not statuses:
+        return ""
+    if len(statuses) < len(records):
+        return ""
+    unique = set(statuses)
+    if len(unique) == 1:
+        return statuses[0]
+    if "need_more" in unique:
+        return "need_more"
+    if "rejected" in unique:
+        return "rejected"
+    return ""
+
+
+def _aggregate_case_record(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    latest = _pick_latest_record(records)
+    if not latest:
+        return {}
+
+    case_id = _audit_text(latest.get("case_id"))
+    doc_count = len(records)
+    risk_counts = {"high": 0, "medium": 0, "low": 0}
+    status_values: List[str] = []
+    review_values: List[str] = []
+    total_findings = 0
+    total_checks = 0
+    passed_checks = 0
+    best_amount: Optional[float] = None
+    score_values: List[float] = []
+    child_labels: List[str] = []
+    child_doc_types: List[str] = []
+    child_file_names: List[str] = []
+
+    for record in records:
+        risk_value = _audit_text(record.get("risk_level")).lower() or "low"
+        if risk_value in risk_counts:
+            risk_counts[risk_value] += 1
+        status_value = _audit_text(record.get("status")).lower()
+        if status_value:
+            status_values.append(status_value)
+        review_value = _audit_text(record.get("review_status")).lower()
+        if review_value:
+            review_values.append(review_value)
+        finding_stats = record.get("finding_stats") if isinstance(record.get("finding_stats"), dict) else {}
+        check_stats = record.get("erp_check_stats") if isinstance(record.get("erp_check_stats"), dict) else {}
+        total_findings += int(finding_stats.get("total") or 0)
+        total_checks += int(check_stats.get("total") or 0)
+        passed_checks += int(check_stats.get("passed") or 0)
+        numeric_amount = _audit_float(record.get("amount"))
+        if numeric_amount is not None and (best_amount is None or numeric_amount > best_amount):
+            best_amount = numeric_amount
+        numeric_score = _audit_float(record.get("audit_score"))
+        if numeric_score is not None:
+            score_values.append(numeric_score)
+        child_label = _audit_text(record.get("file_name") or record.get("document_title"))
+        if child_label and child_label not in child_labels:
+            child_labels.append(child_label)
+        child_file_name = _audit_text(record.get("file_name"))
+        if child_file_name and child_file_name not in child_file_names:
+            child_file_names.append(child_file_name)
+        child_doc_type = _audit_text(record.get("doc_type")).lower()
+        if child_doc_type and child_doc_type not in child_doc_types:
+            child_doc_types.append(child_doc_type)
+
+    aggregated_risk = max(((_audit_text(record.get("risk_level")).lower() or "low") for record in records), key=_risk_rank, default="low")
+    aggregated_status = max(((_audit_text(record.get("status")).lower() or "done") for record in records), key=_status_rank, default="done")
+    aggregated_review = _aggregate_review_status(records)
+    representative_title = _pick_common_text(records, "company_name") or _pick_common_text(records, "document_title")
+    headline_parts = [
+        f"共 {doc_count} 份单据",
+        f"高风险 {risk_counts['high']} 份",
+        f"中风险 {risk_counts['medium']} 份",
+        f"低风险 {risk_counts['low']} 份",
+    ]
+    if child_labels:
+        headline_parts.append(f"包含：{' / '.join(child_labels[:3])}")
+
+    aggregate = dict(latest)
+    aggregate.update({
+        "group_type": "case",
+        "doc_type": "trade_case",
+        "doc_type_label": "Case",
+        "document_title": f"Case {case_id}" if case_id else f"整包汇总 · {doc_count}份单据",
+        "document_number": case_id or _audit_text(latest.get("document_number")),
+        "file_name": f"整包汇总 · {doc_count}份单据",
+        "risk_level": aggregated_risk,
+        "status": aggregated_status,
+        "review_status": aggregated_review,
+        "case_document_count": max(int(latest.get("case_document_count") or 0), doc_count),
+        "finding_stats": {
+            "high": risk_counts["high"],
+            "medium": risk_counts["medium"],
+            "low": risk_counts["low"],
+            "total": total_findings,
+        },
+        "erp_check_stats": {
+            "total": total_checks,
+            "passed": passed_checks,
+            "failed": max(total_checks - passed_checks, 0),
+        },
+        "headline": "；".join(headline_parts),
+        "summary": "；".join(headline_parts),
+        "amount": best_amount,
+        "audit_score": round(min(score_values), 2) if score_values else latest.get("audit_score"),
+        "company_name": representative_title or _pick_common_text(records, "company_name"),
+        "counterparty_name": _pick_common_text(records, "counterparty_name"),
+        "child_doc_types": child_doc_types,
+        "child_file_names": child_file_names,
+        "child_job_ids": [_audit_text(record.get("job_id")) for record in records if _audit_text(record.get("job_id"))],
+        "review": None,
+    })
+    return aggregate
+
+
+def _group_audit_records(records: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+    normalized_mode = _audit_text(mode).lower()
+    if normalized_mode != "case":
+        return list(records)
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for record in records:
+        case_id = _audit_text(record.get("case_id"))
+        job_id = _audit_text(record.get("job_id"))
+        group_key = f"case:{case_id}" if case_id else f"job:{job_id}"
+        grouped.setdefault(group_key, []).append(record)
+
+    output: List[Dict[str, Any]] = []
+    for values in grouped.values():
+        latest = _pick_latest_record(values)
+        case_id = _audit_text(latest.get("case_id"))
+        if case_id:
+            output.append(_aggregate_case_record(values))
+        else:
+            item = dict(latest)
+            item["group_type"] = "job"
+            output.append(item)
+    return output
+
+
+def _build_audit_record_stats(records: List[Dict[str, Any]]) -> Dict[str, int]:
+    normalized_records = [record for record in records if isinstance(record, dict)]
+    return {
+        "total": len(normalized_records),
+        "high": sum(1 for record in normalized_records if _audit_text(record.get("risk_level")).lower() == "high"),
+        "pending": sum(
+            1
+            for record in normalized_records
+            if not _audit_text(record.get("review_status"))
+            or _audit_text(record.get("review_status")).lower() == "need_more"
+        ),
+        "approved": sum(1 for record in normalized_records if _audit_text(record.get("review_status")).lower() == "approved"),
+    }
+
+
+def _load_latest_review_rows(job_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    normalized_job_ids = [_audit_text(value) for value in job_ids if _audit_text(value)]
+    if not normalized_job_ids:
+        return {}
+    try:
+        sb = require_supabase()
+        rows = (
+            sb.table("audit_reviews")
+            .select("job_id,status,comment,reviewer_id,updated_at,created_at")
+            .in_("job_id", normalized_job_ids)
+            .order("updated_at", desc=True)
+            .order("created_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        print(f"[Admin Audit] Load review rows failed: {e}")
+        return {}
+
+    latest_by_job: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        job_id = _audit_text(row.get("job_id"))
+        if not job_id or job_id in latest_by_job:
+            continue
+        latest_by_job[job_id] = dict(row)
+    return latest_by_job
+
+
+def _aggregate_review_payload(review_rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    normalized_rows = [dict(row) for row in review_rows if isinstance(row, dict)]
+    if not normalized_rows:
+        return None
+
+    statuses = [_audit_text(row.get("status")).lower() for row in normalized_rows if _audit_text(row.get("status"))]
+    comments = [_audit_text(row.get("comment")) for row in normalized_rows if _audit_text(row.get("comment"))]
+    latest = sorted(
+        normalized_rows,
+        key=lambda row: (
+            _audit_text(row.get("updated_at") or row.get("created_at")),
+            _audit_text(row.get("job_id")),
+        ),
+        reverse=True,
+    )[0]
+    status = _aggregate_review_status([{"review_status": value} for value in statuses]) if statuses else ""
+    comment = ""
+    if comments:
+        if len(set(comments)) == 1:
+            comment = comments[0]
+        else:
+            comment = _audit_text(latest.get("comment"))
+
+    if not any([status, comment, latest.get("reviewer_id"), latest.get("updated_at"), latest.get("created_at")]):
+        return None
+    return {
+        "status": status,
+        "comment": comment,
+        "reviewer_id": latest.get("reviewer_id"),
+        "updated_at": latest.get("updated_at"),
+        "created_at": latest.get("created_at"),
+    }
+
+
+def _build_case_detail_job(job: Dict[str, Any], case_report: Dict[str, Any], review_scope: Dict[str, Any]) -> Dict[str, Any]:
+    case_summary = case_report.get("case_summary") if isinstance(case_report.get("case_summary"), dict) else {}
+    case_documents = case_summary.get("documents") if isinstance(case_summary.get("documents"), list) else []
+    case_id = _audit_text(case_summary.get("case_id") or job.get("case_id") or review_scope.get("case_id"))
+    count = len(case_documents)
+    detail_job = dict(job or {})
+    detail_job.update({
+        "case_id": case_id,
+        "doc_type": "trade_case",
+        "group_type": "case",
+        "file_name": f"整包汇总 · {count}份单据" if count else (_audit_text(job.get("file_name")) or "整包汇总"),
+        "workflow_state": case_report.get("workflow_state") or job.get("workflow_state"),
+        "status": job.get("status") or "done",
+        "case_documents": case_documents,
+        "case_document_count": count,
+        "result": case_report,
+    })
+    return detail_job
 
 
 def _build_audit_record_from_db_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -837,27 +1200,33 @@ def list_audit_records(
     status: Optional[str] = None,
     review_status: Optional[str] = None,
     query: Optional[str] = None,
+    group_by: Optional[str] = None,
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
     ctx: Dict[str, Any] = Depends(require_role([ROLE_ADMIN, ROLE_AUDITOR])),
 ):
     _ = ctx
     search = _audit_text(query)
-    fetch_window = min(max(offset + limit + 120, 240), 2000)
+    group_mode = _audit_text(group_by).lower()
+    group_by_case = group_mode == "case"
+    fetch_window = min(
+        max((offset + limit + (80 if group_by_case else 120)) * (6 if group_by_case else 1), 240),
+        5000 if group_by_case else 2000,
+    )
 
     db_rows = _load_db_audit_record_rows(
         limit=fetch_window,
         user_id=user_id,
-        doc_type=doc_type,
-        status=status,
-        risk_level=risk_level,
-        review_status=review_status,
-        query=search,
+        doc_type=None if group_by_case else doc_type,
+        status=None if group_by_case else status,
+        risk_level=None if group_by_case else risk_level,
+        review_status=None if group_by_case else review_status,
+        query=None if group_by_case else search,
     )
     records_by_id: Dict[str, Dict[str, Any]] = {}
     for row in db_rows:
         record = _build_audit_record_from_db_row(row)
-        if not _record_matches_filters(
+        if not group_by_case and not _record_matches_filters(
             record,
             user_id=user_id,
             doc_type=doc_type,
@@ -878,7 +1247,7 @@ def list_audit_records(
             local_job.get("result") if isinstance(local_job.get("result"), dict) else {},
             None,
         )
-        if not _record_matches_filters(
+        if not group_by_case and not _record_matches_filters(
             local_record,
             user_id=user_id,
             doc_type=doc_type,
@@ -892,9 +1261,44 @@ def list_audit_records(
         if not job_id:
             continue
         existing = records_by_id.get(job_id)
-        records_by_id[job_id] = _merge_audit_record_payload(existing or {}, local_record) if existing else local_record
+        if not existing:
+            records_by_id[job_id] = local_record
+            continue
+        existing_updated = _parse_date(existing.get("updated_at") or existing.get("created_at"))
+        local_updated = _parse_date(local_record.get("updated_at") or local_record.get("created_at"))
+        prefer_local = existing_updated is None or (local_updated is not None and local_updated >= existing_updated)
+        primary = local_record if prefer_local else existing
+        fallback = existing if prefer_local else local_record
+        records_by_id[job_id] = _merge_audit_record_payload(primary, fallback)
 
     all_records = list(records_by_id.values())
+    stats_scope_records = list(all_records)
+    if group_by_case:
+        all_records = _group_audit_records(all_records, "case")
+        stats_scope_records = [
+            record
+            for record in all_records
+            if _record_matches_filters(
+                record,
+                user_id=user_id,
+                doc_type=doc_type,
+                query=search,
+            )
+        ]
+        all_records = [
+            record
+            for record in stats_scope_records
+            if _record_matches_filters(
+                record,
+                user_id=user_id,
+                doc_type=doc_type,
+                status=status,
+                risk_level=risk_level,
+                review_status=review_status,
+                query=search,
+            )
+        ]
+    stats = _build_audit_record_stats(stats_scope_records)
     all_records.sort(
         key=lambda item: (
             _audit_text(item.get("created_at") or item.get("document_date")),
@@ -913,6 +1317,7 @@ def list_audit_records(
             "offset": offset,
             "limit": limit,
             "has_more": has_more,
+            "stats": stats,
         },
     }
 
@@ -925,10 +1330,18 @@ def audit_record_detail(
     job = get_job_snapshot(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    sb = require_supabase()
-    review = sb.table("audit_reviews").select("*").eq("job_id", job_id).limit(1).execute()
-    review_row = review.data[0] if review.data else None
-    return {"success": True, "data": {"job": job, "review": review_row}}
+    review_scope = _resolve_review_scope(job_id, case_id=job.get("case_id"), apply_to_case=True)
+    target_job_ids = review_scope.get("job_ids") if isinstance(review_scope.get("job_ids"), list) else [job_id]
+    review_map = _load_latest_review_rows(target_job_ids)
+    review_row = _aggregate_review_payload(list(review_map.values()))
+
+    if review_scope.get("type") == "case" and _audit_text(review_scope.get("case_id")):
+        case_report = get_case_report(_audit_text(review_scope.get("case_id")))
+        if case_report:
+            case_job = _build_case_detail_job(job, case_report, review_scope)
+            return {"success": True, "data": {"job": case_job, "review": review_row, "review_scope": review_scope}}
+
+    return {"success": True, "data": {"job": job, "review": review_row, "review_scope": review_scope}}
 
 
 @router.post("/audit/review")
@@ -941,16 +1354,37 @@ def audit_review(
         raise HTTPException(status_code=400, detail="Invalid review status")
     sb = require_supabase()
     now = datetime.now(timezone.utc).isoformat()
-    sb.table("audit_reviews").upsert({
-        "job_id": payload.job_id,
-        "status": status,
-        "comment": payload.comment,
-        "reviewer_id": ctx["user_id"],
-        "updated_at": now,
-        "created_at": now,
-    }).execute()
-    log_admin_action(ctx["user_id"], "audit.review", payload.job_id, {"status": status})
-    return {"success": True}
+    review_scope = _resolve_review_scope(
+        payload.job_id,
+        case_id=payload.case_id,
+        apply_to_case=payload.apply_to_case,
+    )
+    target_job_ids = review_scope.get("job_ids") or []
+    if not target_job_ids:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    for target_job_id in target_job_ids:
+        _save_review_row(
+            sb,
+            job_id=target_job_id,
+            status=status,
+            comment=payload.comment,
+            reviewer_id=ctx["user_id"],
+            now=now,
+        )
+
+    log_admin_action(
+        ctx["user_id"],
+        "audit.review",
+        payload.case_id or payload.job_id,
+        {
+            "status": status,
+            "scope": review_scope.get("type"),
+            "affected_count": review_scope.get("affected_count"),
+            "case_id": review_scope.get("case_id"),
+        },
+    )
+    return {"success": True, "scope": review_scope}
 
 
 @router.get("/audit/rules/{doc_type}")

@@ -19,6 +19,8 @@ import {
 } from 'lucide-react';
 
 import decisionApi from '../api/decision';
+import StatePanel from '../components/StatePanel';
+import { getFriendlyRequestError, isAuthRequiredError, isPermissionDeniedError } from '../utils/requestErrors';
 
 const DATA_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const AI_AUTO_REFRESH_MS = 30 * 60 * 1000;
@@ -113,6 +115,46 @@ const STATUS_LABEL_MAP = {
   active: '活跃',
 };
 
+const TREND_GRANULARITY_LABELS = {
+  week: '按周',
+  month: '按月',
+  quarter: '按季',
+};
+
+const DECISION_METRIC_NOTES = {
+  trend: '按订单日期与采购日期分桶汇总金额，口径为含税总额，不按行项目数计。',
+  payment: '以订单金额统计付款状态结构，适合判断回款压力和催收优先级。',
+  delivery: '以订单金额统计履约状态结构，用于识别发货、交付和资金兑现之间的错配。',
+  purchase: '以采购单金额统计采购状态，重点看在途、处理中和已完成采购的资金占用。',
+  risk: '风险对象按客户回款、库存缺口、采购积压三类聚合，支持点选联动明细。',
+  product: '基于近180日销售额排序，同时补充销量和品类信息。',
+  category: '按品类汇总销售额、成本额和利润额，帮助定位利润贡献与承压区域。',
+  warehouse: '按当前库存快照统计仓库件数与行数，反映库存集中度和仓位压力。',
+};
+
+const DRILLDOWN_GROUP_META = {
+  customer: {
+    label: '客户',
+    Icon: Users,
+    emptyText: '当前维度下没有关联客户对象',
+  },
+  sku: {
+    label: 'SKU',
+    Icon: Package,
+    emptyText: '当前维度下没有关联 SKU',
+  },
+  receivable: {
+    label: '回款项',
+    Icon: CircleDollarSign,
+    emptyText: '当前维度下没有关联回款项',
+  },
+  inventory: {
+    label: '库存对象',
+    Icon: Database,
+    emptyText: '当前维度下没有关联库存对象',
+  },
+};
+
 function formatMetric(value, unit) {
   const numeric = Number(value || 0);
   if (unit === 'CNY') return compactCurrencyFormatter.format(numeric);
@@ -169,6 +211,47 @@ function formatStatusLabel(status) {
   if (!normalized) return '未分类';
   const mapped = STATUS_LABEL_MAP[normalized.toLowerCase()];
   return mapped || normalized;
+}
+
+function formatTrendBucketLabel(row, withYear = false) {
+  if (!row) return '-';
+  const granularity = String(row?.granularity || 'month');
+  const bucket = String(row?.bucket || row?.month || row?.label || '').trim();
+  if (granularity === 'week' || granularity === 'quarter') {
+    return String(row?.label || bucket || '-');
+  }
+  return formatTrendMonth(bucket, withYear);
+}
+
+function formatDrilldownMetricValue(value, unit) {
+  if (unit === 'CNY') return formatCurrency(value);
+  if (unit === 'count') return compactNumberFormatter.format(Number(value || 0));
+  if (unit === 'ratio') return percentFormatter.format(Number(value || 0));
+  if (unit === 'times') return `${ratioFormatter.format(Number(value || 0))} 次`;
+  if (unit === 'text') return String(value || '-');
+  const rawValue = String(value ?? '').trim();
+  return rawValue || '-';
+}
+
+function resolveFirstPopulatedGroup(objectGroups = {}, preferredGroup = 'customer') {
+  if (preferredGroup && Array.isArray(objectGroups?.[preferredGroup]) && objectGroups[preferredGroup].length) {
+    return preferredGroup;
+  }
+
+  const fallbackKey = Object.keys(DRILLDOWN_GROUP_META).find((key) => Array.isArray(objectGroups?.[key]) && objectGroups[key].length);
+  return fallbackKey || preferredGroup || 'customer';
+}
+
+function isSameDrilldownContext(left, right) {
+  if (!left || !right) return false;
+  return (
+    String(left.source || '') === String(right.source || '') &&
+    String(left.granularity || '') === String(right.granularity || '') &&
+    String(left.bucket || '') === String(right.bucket || '') &&
+    String(left.status || '') === String(right.status || '') &&
+    String(left.category || '') === String(right.category || '') &&
+    String(left.name || '') === String(right.name || '')
+  );
 }
 
 function escapeHtml(value) {
@@ -265,8 +348,12 @@ function buildDecisionFinancialReportHtml({ dashboardData, aiAnalysis, backendLa
   const categoryProfit = Array.isArray(dashboardData?.category_profit) ? dashboardData.category_profit : [];
   const totals = dashboardData?.totals || {};
   const capabilities = Array.isArray(cockpit?.capabilities) ? cockpit.capabilities : [];
-  const aiInsights = Array.isArray(aiAnalysis?.insights) ? aiAnalysis.insights : [];
-  const aiActions = Array.isArray(aiAnalysis?.actions) ? aiAnalysis.actions : [];
+  const aiInsights = Array.isArray(aiAnalysis?.risk_reasons || aiAnalysis?.insights)
+    ? (aiAnalysis?.risk_reasons || aiAnalysis?.insights)
+    : [];
+  const aiActions = Array.isArray(aiAnalysis?.suggested_actions || aiAnalysis?.actions)
+    ? (aiAnalysis?.suggested_actions || aiAnalysis?.actions)
+    : [];
 
   const title = `企业财政经营报表_${formatDateTime(new Date()).replace(/[^\d]/g, '').slice(0, 14)}`;
   const generatedAtText = formatDateTime(dashboardData?.generated_at);
@@ -275,7 +362,7 @@ function buildDecisionFinancialReportHtml({ dashboardData, aiAnalysis, backendLa
   const trendTable = buildTableHtml(
     ['期间', '销售额', '采购额', '净额', '销售单量', '采购单量'],
     trends.map((row) => [
-      formatTrendMonth(row.month, true),
+      formatTrendBucketLabel(row, true),
       formatCurrency(row.sales_amount),
       formatCurrency(row.purchase_amount),
       formatCurrency(row.net_amount),
@@ -846,8 +933,186 @@ function EmptyChartState({ label = '暂无可视化数据', heightClassName = 'h
   );
 }
 
-function StatusDonutCard({ title, subtitle, items = [], palette = BREAKDOWN_COLORS, delay = 0 }) {
+function MetricNote({ text }) {
+  return (
+    <div className="mt-3 inline-flex max-w-full items-start gap-2 rounded-2xl border border-slate-200/80 bg-slate-50/90 px-3 py-2 text-[11px] leading-5 text-slate-500 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
+      <Database size={13} className="mt-0.5 shrink-0 text-slate-400 dark:text-slate-500" />
+      <span>
+        <span className="font-semibold text-slate-700 dark:text-slate-100">指标说明：</span>
+        {text}
+      </span>
+    </div>
+  );
+}
+
+function DrilldownObjectCard({ item }) {
+  return (
+    <article className="rounded-2xl border border-slate-200/80 bg-white/95 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.05)] dark:border-slate-800 dark:bg-slate-950/30">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{item?.name || '-'}</div>
+          {!!item?.subtitle && <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{item.subtitle}</div>}
+        </div>
+        <div className="shrink-0 rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+          {item?.primary_label || '指标'}
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+            {formatDrilldownMetricValue(item?.primary_value, item?.primary_unit)}
+          </div>
+          {!!item?.primary_label && <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{item.primary_label}</div>}
+        </div>
+
+        {(item?.secondary_value || item?.secondary_value === 0) && (
+          <div className="text-right">
+            <div className="text-sm font-medium text-slate-700 dark:text-slate-200">
+              {formatDrilldownMetricValue(item?.secondary_value, item?.secondary_unit)}
+            </div>
+            {!!item?.secondary_label && <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{item.secondary_label}</div>}
+          </div>
+        )}
+      </div>
+
+      {(item?.meta || item?.note) && (
+        <div className="mt-4 space-y-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
+          {!!item?.meta && <div>{item.meta}</div>}
+          {!!item?.note && <div>{item.note}</div>}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function DecisionDrilldownPanel({
+  data,
+  loading = false,
+  error = '',
+  activeGroup = 'customer',
+  onGroupChange,
+}) {
+  const objectGroups = data?.object_groups || {};
+  const currentGroup = DRILLDOWN_GROUP_META[activeGroup] ? activeGroup : 'customer';
+  const currentItems = Array.isArray(objectGroups?.[currentGroup]) ? objectGroups[currentGroup] : [];
+  const context = data?.context || {};
+
+  if (loading) {
+    return (
+      <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-300">
+          <RefreshCw size={14} className="animate-spin" />
+          正在加载下钻明细...
+        </div>
+      </section>
+    );
+  }
+
+  if (error) {
+    return (
+      <section className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
+        {error}
+      </section>
+    );
+  }
+
+  if (!data) {
+    return (
+      <section className="rounded-2xl border border-dashed border-slate-300/80 bg-white/70 p-5 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-400">
+        点击上方图表、风险对象或榜单卡片后，这里会展示当前指标对应的客户、SKU、回款项和库存对象明细。
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-900">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan-700 dark:border-cyan-900/60 dark:bg-cyan-950/30 dark:text-cyan-300">
+            <BarChart3 size={12} />
+            Drilldown Workspace
+          </div>
+          <h2 className="mt-3 text-lg font-semibold text-slate-900 dark:text-slate-100">{data?.title || '经营明细下钻'}</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 dark:text-slate-300">{data?.metric_description || '暂无指标说明。'}</p>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2 text-[11px]">
+        {!!context?.label && (
+          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
+            周期: {context.label}
+          </span>
+        )}
+        {!!context?.status && (
+          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
+            状态: {formatStatusLabel(context.status)}
+          </span>
+        )}
+        {!!context?.category && (
+          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
+            类别: {context.category}
+          </span>
+        )}
+        {!!context?.name && (
+          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
+            对象: {context.name}
+          </span>
+        )}
+      </div>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        {Object.entries(DRILLDOWN_GROUP_META).map(([key, meta]) => {
+          const Icon = meta.Icon;
+          const itemCount = Array.isArray(objectGroups?.[key]) ? objectGroups[key].length : 0;
+          const active = currentGroup === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onGroupChange?.(key)}
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-2 text-xs font-medium transition-colors ${
+                active
+                  ? 'border-cyan-300 bg-cyan-50 text-cyan-700 dark:border-cyan-800 dark:bg-cyan-950/40 dark:text-cyan-300'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-cyan-200 hover:text-cyan-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-cyan-900/60 dark:hover:text-cyan-300'
+              }`}
+            >
+              <Icon size={13} />
+              {meta.label}
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-300">{itemCount}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="mt-5">
+        {currentItems.length ? (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            {currentItems.map((item, index) => (
+              <DrilldownObjectCard key={`${currentGroup}-${item?.id || item?.name || index}`} item={item} />
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-slate-300/80 bg-slate-50/70 px-4 py-8 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-950/30 dark:text-slate-400">
+            {DRILLDOWN_GROUP_META[currentGroup]?.emptyText || '当前维度下暂无关联对象'}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function StatusDonutCard({
+  title,
+  subtitle,
+  items = [],
+  palette = BREAKDOWN_COLORS,
+  delay = 0,
+  activeStatus = '',
+  onSelect,
+}) {
   const isReady = useEntranceAnimation(delay);
+  const isInteractive = typeof onSelect === 'function';
   const radius = 44;
   const stroke = 12;
   const circumference = 2 * Math.PI * radius;
@@ -930,7 +1195,10 @@ function StatusDonutCard({ title, subtitle, items = [], palette = BREAKDOWN_COLO
                   strokeLinecap="round"
                   strokeDasharray={`${isReady ? item.dash : 0} ${circumference}`}
                   strokeDashoffset={-item.offset}
+                  opacity={activeStatus && activeStatus !== item.status ? 0.28 : 1}
+                  onClick={() => onSelect?.(item)}
                   style={{
+                    cursor: isInteractive ? 'pointer' : 'default',
                     transition: 'stroke-dasharray 800ms cubic-bezier(0.22,1,0.36,1)',
                     transitionDelay: `${delay + index * 90}ms`,
                   }}
@@ -947,7 +1215,16 @@ function StatusDonutCard({ title, subtitle, items = [], palette = BREAKDOWN_COLO
 
         <div className="space-y-2.5">
           {arcSegments.map((item, index) => (
-            <div key={`${item.key}-legend`}>
+            <button
+              key={`${item.key}-legend`}
+              type="button"
+              onClick={() => onSelect?.(item)}
+              className={`block w-full rounded-2xl border px-3 py-2 text-left transition-colors ${
+                activeStatus && activeStatus === item.status
+                  ? 'border-cyan-200 bg-cyan-50/70 dark:border-cyan-900/60 dark:bg-cyan-950/20'
+                  : 'border-transparent hover:border-slate-200 hover:bg-slate-50/70 dark:hover:border-slate-800 dark:hover:bg-slate-950/20'
+              } ${isInteractive ? 'cursor-pointer' : 'cursor-default'}`}
+            >
               <div className="flex items-center justify-between gap-3 text-xs">
                 <span className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-200">
                   <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
@@ -970,7 +1247,7 @@ function StatusDonutCard({ title, subtitle, items = [], palette = BREAKDOWN_COLO
                 <span>{formatCompactCurrency(item.value)}</span>
                 <span>{compactNumberFormatter.format(item.count)} 笔</span>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       </div>
@@ -978,8 +1255,17 @@ function StatusDonutCard({ title, subtitle, items = [], palette = BREAKDOWN_COLO
   );
 }
 
-function StatusSegmentsCard({ title, subtitle, items = [], palette = BREAKDOWN_COLORS, delay = 0 }) {
+function StatusSegmentsCard({
+  title,
+  subtitle,
+  items = [],
+  palette = BREAKDOWN_COLORS,
+  delay = 0,
+  activeStatus = '',
+  onSelect,
+}) {
   const isReady = useEntranceAnimation(delay);
+  const isInteractive = typeof onSelect === 'function';
   const normalizedItems = useMemo(() => {
     const source = Array.isArray(items) ? items : [];
     const rows = source
@@ -1019,12 +1305,16 @@ function StatusSegmentsCard({ title, subtitle, items = [], palette = BREAKDOWN_C
       <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200/70 bg-slate-50 p-1.5 dark:border-slate-800 dark:bg-slate-950/40">
         <div className="flex h-16 items-stretch gap-1 overflow-hidden rounded-xl">
           {normalizedItems.map((item, index) => (
-            <div
+            <button
               key={`${item.key}-segment`}
-              className="relative flex min-w-[64px] flex-1 items-end overflow-hidden rounded-xl p-2 text-white"
+              type="button"
+              onClick={() => onSelect?.(item)}
+              className="relative flex min-w-[64px] flex-1 items-end overflow-hidden rounded-xl p-2 text-left text-white"
               style={{
                 background: `linear-gradient(135deg, ${item.color}, ${item.color}CC)`,
                 flexBasis: isReady ? `${Math.max(item.share * 100, 14)}%` : '0%',
+                opacity: activeStatus && activeStatus !== item.status ? 0.4 : 1,
+                cursor: isInteractive ? 'pointer' : 'default',
                 transition: 'flex-basis 800ms cubic-bezier(0.22,1,0.36,1)',
                 transitionDelay: `${delay + index * 80}ms`,
               }}
@@ -1034,14 +1324,23 @@ function StatusSegmentsCard({ title, subtitle, items = [], palette = BREAKDOWN_C
                 <div className="mt-1 text-sm font-semibold">{formatCompactCurrency(item.value)}</div>
               </div>
               <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.25),transparent_58%)]" />
-            </div>
+            </button>
           ))}
         </div>
       </div>
 
       <div className="mt-4 space-y-2">
         {normalizedItems.map((item) => (
-          <div key={`${item.key}-row`} className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/70 px-3 py-2 text-xs dark:border-slate-800">
+          <button
+            key={`${item.key}-row`}
+            type="button"
+            onClick={() => onSelect?.(item)}
+            className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2 text-left text-xs transition-colors ${
+              activeStatus && activeStatus === item.status
+                ? 'border-cyan-200 bg-cyan-50/70 dark:border-cyan-900/60 dark:bg-cyan-950/20'
+                : 'border-slate-200/70 hover:border-slate-300 hover:bg-slate-50/70 dark:border-slate-800 dark:hover:border-slate-700 dark:hover:bg-slate-950/20'
+            } ${isInteractive ? 'cursor-pointer' : 'cursor-default'}`}
+          >
             <span className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-200">
               <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
               {item.label}
@@ -1049,15 +1348,16 @@ function StatusSegmentsCard({ title, subtitle, items = [], palette = BREAKDOWN_C
             <span className="text-slate-500 dark:text-slate-400">
               {compactNumberFormatter.format(item.count)} 笔 / {(item.share * 100).toFixed(1)}%
             </span>
-          </div>
+          </button>
         ))}
       </div>
     </div>
   );
 }
 
-function RiskHeatGrid({ rows = [] }) {
+function RiskHeatGrid({ rows = [], activeCategory = '', onSelect }) {
   const isReady = useEntranceAnimation(160);
+  const isInteractive = typeof onSelect === 'function';
   const groups = useMemo(() => {
     const source = Array.isArray(rows) ? rows : [];
     const map = new Map();
@@ -1096,9 +1396,15 @@ function RiskHeatGrid({ rows = [] }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       {groups.map((group, index) => (
-        <div
+        <button
           key={group.key}
-          className="relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white/95 p-4 shadow-[0_8px_20px_rgba(15,23,42,0.05)] dark:border-slate-800 dark:bg-slate-900/90"
+          type="button"
+          onClick={() => onSelect?.(group)}
+          className={`relative overflow-hidden rounded-2xl border bg-white/95 p-4 text-left shadow-[0_8px_20px_rgba(15,23,42,0.05)] transition-colors dark:bg-slate-900/90 ${
+            activeCategory && activeCategory === group.key
+              ? 'border-cyan-300 dark:border-cyan-900/60'
+              : 'border-slate-200/80 dark:border-slate-800'
+          } ${isInteractive ? 'cursor-pointer hover:border-cyan-200 dark:hover:border-cyan-900/60' : 'cursor-default'}`}
         >
           <div
             className="pointer-events-none absolute inset-0"
@@ -1128,232 +1434,13 @@ function RiskHeatGrid({ rows = [] }) {
               {(group.examples || []).length ? group.examples.join(' · ') : '暂无代表对象'}
             </div>
           </div>
-        </div>
+        </button>
       ))}
     </div>
   );
 }
 
-function OrderVolumeChart({ rows = [] }) {
-  const isReady = useEntranceAnimation(140);
-  const containerRef = useRef(null);
-  const [hoveredIndex, setHoveredIndex] = useState(null);
-  const [chartSize, setChartSize] = useState({ width: 0, height: 0 });
-
-  const width = 820;
-  const height = 320;
-  const padLeft = 56;
-  const padRight = 24;
-  const padTop = 18;
-  const padBottom = 42;
-  const maxValue = Math.max(1, ...rows.map((item) => Math.max(Number(item.sales_orders || 0), Number(item.purchase_orders || 0))));
-  const innerWidth = width - padLeft - padRight;
-  const innerHeight = height - padTop - padBottom;
-  const groupWidth = innerWidth / Math.max(rows.length, 1);
-  const barWidth = Math.min(16, Math.max(10, groupWidth * 0.22));
-
-  useEffect(() => {
-    const node = containerRef.current;
-    if (!node) return undefined;
-
-    const updateSize = () => {
-      const nextWidth = node.clientWidth;
-      const nextHeight = node.clientHeight;
-      setChartSize((current) => {
-        if (current.width === nextWidth && current.height === nextHeight) return current;
-        return { width: nextWidth, height: nextHeight };
-      });
-    };
-
-    updateSize();
-
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateSize);
-      return () => window.removeEventListener('resize', updateSize);
-    }
-
-    const observer = new ResizeObserver(() => updateSize());
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
-  const xForIndex = (index) => padLeft + groupWidth * index + groupWidth / 2;
-  const yForValue = (value) => height - padBottom - (Number(value || 0) / maxValue) * innerHeight;
-  const yTicks = Array.from({ length: 5 }, (_, index) => (maxValue * (4 - index)) / 4);
-  const tickStep = Math.max(1, Math.ceil((rows.length - 1) / 5));
-  const xTickIndexes = [];
-  for (let index = 0; index < rows.length; index += tickStep) {
-    xTickIndexes.push(index);
-  }
-  if (rows.length > 0 && xTickIndexes[xTickIndexes.length - 1] !== rows.length - 1) {
-    xTickIndexes.push(rows.length - 1);
-  }
-
-  const activeIndex = hoveredIndex == null ? null : Math.max(0, Math.min(hoveredIndex, rows.length - 1));
-  const activeRow = activeIndex == null ? null : rows[activeIndex];
-  const activeX = activeIndex == null ? null : xForIndex(activeIndex);
-
-  const handlePointerMove = useCallback(
-    (event) => {
-      const rect = event.currentTarget.getBoundingClientRect();
-      if (!rect.width) return;
-      const rawX = ((event.clientX - rect.left) / rect.width) * width;
-      const clampedX = Math.max(padLeft, Math.min(rawX, width - padRight));
-      const nextIndex = Math.min(rows.length - 1, Math.max(0, Math.floor((clampedX - padLeft) / Math.max(groupWidth, 1))));
-      setHoveredIndex(nextIndex);
-    },
-    [groupWidth, rows.length]
-  );
-
-  const handlePointerLeave = useCallback(() => {
-    setHoveredIndex(null);
-  }, []);
-
-  if (!rows.length) {
-    return <EmptyChartState label="暂无订单量趋势数据" heightClassName="h-72" />;
-  }
-
-  const tooltipMetrics =
-    activeRow && activeX != null && chartSize.width && chartSize.height
-      ? (() => {
-          const tooltipWidth = 188;
-          const tooltipHeight = 110;
-          const pointX = (activeX / width) * chartSize.width;
-          const top = 14;
-          const left =
-            pointX > chartSize.width * 0.6
-              ? Math.max(12, pointX - tooltipWidth - 18)
-              : Math.min(chartSize.width - tooltipWidth - 12, pointX + 18);
-          return { left, top };
-        })()
-      : null;
-
-  return (
-    <div
-      ref={containerRef}
-      className="relative h-72 w-full overflow-hidden rounded-2xl border border-slate-200/70 bg-slate-950/[0.03] dark:border-slate-800"
-    >
-      {activeRow && tooltipMetrics && (
-        <div
-          className="pointer-events-none absolute z-10 w-48 rounded-2xl border border-slate-200/90 bg-white/95 p-3 text-xs shadow-[0_18px_40px_rgba(15,23,42,0.18)] backdrop-blur dark:border-slate-700 dark:bg-slate-900/95"
-          style={{ left: tooltipMetrics.left, top: tooltipMetrics.top }}
-        >
-          <div className="font-semibold text-slate-900 dark:text-slate-100">{formatTrendMonth(activeRow.month, true)}</div>
-          <div className="mt-2 space-y-1.5 text-slate-600 dark:text-slate-300">
-            <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-cyan-500" />
-                销售单量
-              </span>
-              <span className="font-medium text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(activeRow.sales_orders || 0))}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-violet-500" />
-                采购单量
-              </span>
-              <span className="font-medium text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(activeRow.purchase_orders || 0))}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3 border-t border-slate-200/80 pt-1.5 dark:border-slate-700">
-              <span>净额</span>
-              <span className="font-semibold text-slate-900 dark:text-slate-100">{formatCompactCurrency(activeRow.net_amount)}</span>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full">
-        {yTicks.map((value, index) => {
-          const y = yForValue(value);
-          return (
-            <g key={`orders-tick-${index}`}>
-              <line x1={padLeft} y1={y} x2={width - padRight} y2={y} stroke="rgba(100,116,139,0.16)" strokeDasharray="4 6" />
-              <text x={padLeft - 10} y={y + 4} textAnchor="end" fontSize="11" fill="#64748b">
-                {compactNumberFormatter.format(value)}
-              </text>
-            </g>
-          );
-        })}
-
-        {xTickIndexes.map((index) => (
-          <text
-            key={`orders-x-${index}`}
-            x={xForIndex(index)}
-            y={height - 12}
-            textAnchor="middle"
-            fontSize="11"
-            fill="#64748b"
-          >
-            {formatTrendMonth(rows[index].month, index === 0 || String(rows[index].month || '').endsWith('-01'))}
-          </text>
-        ))}
-
-        {rows.map((row, index) => {
-          const centerX = xForIndex(index);
-          const salesHeight = ((Number(row.sales_orders || 0) / maxValue) * innerHeight);
-          const purchaseHeight = ((Number(row.purchase_orders || 0) / maxValue) * innerHeight);
-          const salesY = height - padBottom - salesHeight;
-          const purchaseY = height - padBottom - purchaseHeight;
-          return (
-            <g key={`order-bar-${row.month}`}>
-              <rect
-                x={centerX - barWidth - 3}
-                y={isReady ? salesY : height - padBottom}
-                width={barWidth}
-                height={isReady ? salesHeight : 0}
-                rx="6"
-                fill="#06b6d4"
-                opacity={activeIndex === index ? 1 : 0.9}
-                style={{
-                  transition: 'all 800ms cubic-bezier(0.22,1,0.36,1)',
-                  transitionDelay: `${index * 30}ms`,
-                }}
-              />
-              <rect
-                x={centerX + 3}
-                y={isReady ? purchaseY : height - padBottom}
-                width={barWidth}
-                height={isReady ? purchaseHeight : 0}
-                rx="6"
-                fill="#8b5cf6"
-                opacity={activeIndex === index ? 1 : 0.85}
-                style={{
-                  transition: 'all 800ms cubic-bezier(0.22,1,0.36,1)',
-                  transitionDelay: `${index * 30 + 80}ms`,
-                }}
-              />
-            </g>
-          );
-        })}
-
-        {activeX != null && (
-          <line
-            x1={activeX}
-            y1={padTop}
-            x2={activeX}
-            y2={height - padBottom}
-            stroke="rgba(15,23,42,0.28)"
-            strokeDasharray="4 5"
-          />
-        )}
-
-        <rect
-          x={padLeft}
-          y={padTop}
-          width={innerWidth}
-          height={innerHeight}
-          fill="transparent"
-          style={{ cursor: 'crosshair' }}
-          onPointerMove={handlePointerMove}
-          onPointerDown={handlePointerMove}
-          onPointerLeave={handlePointerLeave}
-        />
-      </svg>
-    </div>
-  );
-}
-
-function CategoryProfitChart({ rows = [] }) {
+function CategoryProfitChart({ rows = [], activeCategory = '', onSelect }) {
   const isReady = useEntranceAnimation(180);
   const maxSales = Math.max(1, ...rows.map((row) => Number(row.sales_amount || 0)));
 
@@ -1374,9 +1461,15 @@ function CategoryProfitChart({ rows = [] }) {
             : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/30 dark:text-rose-300 dark:border-rose-900/60';
 
         return (
-          <div
+          <button
             key={row.category}
-            className="rounded-2xl border border-slate-200/80 bg-white/90 p-4 transition-transform duration-300 hover:-translate-y-0.5 dark:border-slate-800 dark:bg-slate-950/30"
+            type="button"
+            onClick={() => onSelect?.(row)}
+            className={`rounded-2xl border bg-white/90 p-4 text-left transition-transform duration-300 hover:-translate-y-0.5 dark:bg-slate-950/30 ${
+              activeCategory && activeCategory === row.category
+                ? 'border-cyan-300 dark:border-cyan-900/60'
+                : 'border-slate-200/80 dark:border-slate-800'
+            } ${typeof onSelect === 'function' ? 'cursor-pointer' : 'cursor-default'}`}
           >
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
@@ -1414,18 +1507,19 @@ function CategoryProfitChart({ rows = [] }) {
               <span>成本 {formatCompactCurrency(row.cost_amount)}</span>
               <span>利润 {formatCompactCurrency(row.profit_amount)}</span>
             </div>
-          </div>
+          </button>
         );
       })}
     </div>
   );
 }
 
-function DualLineChart({ rows = [] }) {
+function DualLineChart({ rows = [], activeBucket = '', onSelect }) {
   const isReady = useEntranceAnimation(80);
   const containerRef = useRef(null);
   const [hoveredIndex, setHoveredIndex] = useState(null);
   const [chartSize, setChartSize] = useState({ width: 0, height: 0 });
+  const isInteractive = typeof onSelect === 'function';
 
   const width = 800;
   const height = 320;
@@ -1554,7 +1648,7 @@ function DualLineChart({ rows = [] }) {
           className="pointer-events-none absolute z-10 w-48 rounded-2xl border border-slate-200/90 bg-white/95 p-3 text-xs shadow-[0_18px_40px_rgba(15,23,42,0.18)] backdrop-blur dark:border-slate-700 dark:bg-slate-900/95"
           style={{ left: tooltipMetrics.left, top: tooltipMetrics.top }}
         >
-          <div className="font-semibold text-slate-900 dark:text-slate-100">{formatTrendMonth(activeRow.month, true)}</div>
+          <div className="font-semibold text-slate-900 dark:text-slate-100">{formatTrendBucketLabel(activeRow, true)}</div>
           <div className="mt-2 space-y-1.5 text-slate-600 dark:text-slate-300">
             <div className="flex items-center justify-between gap-3">
               <span className="inline-flex items-center gap-1.5">
@@ -1607,10 +1701,7 @@ function DualLineChart({ rows = [] }) {
             fontSize="11"
             fill="#64748b"
           >
-            {formatTrendMonth(
-              rows[index].month,
-              index === 0 || String(rows[index].month || '').endsWith('-01')
-            )}
+            {formatTrendBucketLabel(rows[index], index === 0)}
           </text>
         ))}
 
@@ -1630,6 +1721,7 @@ function DualLineChart({ rows = [] }) {
           pathLength="1"
           strokeDasharray="1"
           strokeDashoffset={isReady ? 0 : 1}
+          opacity={activeBucket && activeRow?.bucket && activeBucket !== activeRow.bucket ? 0.4 : 1}
           style={{ transition: 'stroke-dashoffset 900ms cubic-bezier(0.22,1,0.36,1)' }}
         />
         <path
@@ -1642,6 +1734,7 @@ function DualLineChart({ rows = [] }) {
           pathLength="1"
           strokeDasharray="1"
           strokeDashoffset={isReady ? 0 : 1}
+          opacity={activeBucket && activeRow?.bucket && activeBucket !== activeRow.bucket ? 0.4 : 1}
           style={{ transition: 'stroke-dashoffset 900ms cubic-bezier(0.22,1,0.36,1)', transitionDelay: '120ms' }}
         />
 
@@ -1683,17 +1776,26 @@ function DualLineChart({ rows = [] }) {
           </g>
         ))}
 
-        <rect
-          x={padLeft}
-          y={padTop}
-          width={innerWidth}
-          height={innerHeight}
-          fill="transparent"
-          style={{ cursor: 'crosshair' }}
-          onPointerMove={handlePointerMove}
-          onPointerDown={handlePointerMove}
-          onPointerLeave={handlePointerLeave}
-        />
+        {rows.map((row, index) => {
+          const leftBoundary = index === 0 ? padLeft : (chartPoints[index - 1].x + chartPoints[index].x) / 2;
+          const rightBoundary = index === rows.length - 1 ? width - padRight : (chartPoints[index].x + chartPoints[index + 1].x) / 2;
+          return (
+            <rect
+              key={`line-hit-${row.bucket || row.month || index}`}
+              x={leftBoundary}
+              y={padTop}
+              width={Math.max(rightBoundary - leftBoundary, 10)}
+              height={innerHeight}
+              fill="transparent"
+              style={{ cursor: isInteractive ? 'pointer' : 'crosshair' }}
+              onPointerEnter={() => setHoveredIndex(index)}
+              onPointerMove={handlePointerMove}
+              onPointerDown={handlePointerMove}
+              onPointerLeave={handlePointerLeave}
+              onClick={() => onSelect?.(row)}
+            />
+          );
+        })}
       </svg>
     </div>
   );
@@ -1708,11 +1810,20 @@ function DecisionCenterPage() {
   const [exportingPdf, setExportingPdf] = useState(false);
   const [error, setError] = useState('');
   const [backend, setBackend] = useState('cloud');
+  const [trendGranularity, setTrendGranularity] = useState('month');
+  const [drilldownData, setDrilldownData] = useState(null);
+  const [drilldownLoading, setDrilldownLoading] = useState(false);
+  const [drilldownError, setDrilldownError] = useState('');
+  const [activeObjectGroup, setActiveObjectGroup] = useState('customer');
+  const [selectedDrilldownContext, setSelectedDrilldownContext] = useState(null);
   const dataRequestRef = useRef(null);
   const aiRequestRef = useRef(null);
+  const drilldownRequestRef = useRef(0);
+  const trendGranularityRefreshRef = useRef(new Set());
   const overviewBootstrappedRef = useRef(false);
   const currentAiBackendRef = useRef('cloud');
   const initialBackendRef = useRef(backend);
+  const drilldownSectionRef = useRef(null);
 
   const fetchDataSection = useCallback(async ({ refreshData = false, silent = false } = {}) => {
     if (dataRequestRef.current) return dataRequestRef.current;
@@ -1726,7 +1837,7 @@ function DecisionCenterPage() {
         setDashboardData(payload || null);
         return payload || null;
       } catch (fetchError) {
-        setError(fetchError?.message || '数据模块刷新失败');
+        setError(getFriendlyRequestError(fetchError, '数据模块刷新失败'));
         return null;
       } finally {
         dataRequestRef.current = null;
@@ -1751,7 +1862,7 @@ function DecisionCenterPage() {
           currentAiBackendRef.current = backend;
           return payload || null;
         } catch (fetchError) {
-          setError(fetchError?.message || 'AI分析模块刷新失败');
+          setError(getFriendlyRequestError(fetchError, 'AI分析模块刷新失败'));
           return null;
         } finally {
           aiRequestRef.current = null;
@@ -1763,6 +1874,44 @@ function DecisionCenterPage() {
     },
     [backend]
   );
+
+  const loadDrilldown = useCallback(async (params = {}) => {
+    const normalizedContext = {
+      source: params?.source || '',
+      granularity: params?.granularity || 'month',
+      bucket: params?.bucket || '',
+      status: params?.status || '',
+      category: params?.category || '',
+      name: params?.name || '',
+      limit: params?.limit || 8,
+    };
+
+    const requestId = drilldownRequestRef.current + 1;
+    drilldownRequestRef.current = requestId;
+    setSelectedDrilldownContext(normalizedContext);
+    setDrilldownLoading(true);
+    setDrilldownError('');
+
+    try {
+      const payload = await decisionApi.getDrilldown(normalizedContext);
+      if (drilldownRequestRef.current !== requestId) return null;
+      setDrilldownData(payload || null);
+      setActiveObjectGroup(resolveFirstPopulatedGroup(payload?.object_groups || {}, payload?.default_group || 'customer'));
+      window.requestAnimationFrame(() => {
+        drilldownSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      return payload || null;
+    } catch (fetchError) {
+      if (drilldownRequestRef.current !== requestId) return null;
+      setDrilldownError(getFriendlyRequestError(fetchError, '下钻明细加载失败'));
+      setDrilldownData(null);
+      return null;
+    } finally {
+      if (drilldownRequestRef.current === requestId) {
+        setDrilldownLoading(false);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -1784,7 +1933,7 @@ function DecisionCenterPage() {
         setLoading(false);
       } catch (dataError) {
         if (!disposed) {
-          setError(dataError?.message || '数据决策面板加载失败');
+          setError(getFriendlyRequestError(dataError, '数据决策面板加载失败'));
           setLoading(false);
         }
       }
@@ -1839,6 +1988,8 @@ function DecisionCenterPage() {
   const warnings = dashboardData?.warnings || [];
   const aiPending = Boolean(aiAnalysis?.pending);
   const trends = dashboardData?.trends || [];
+  const trendsByGranularity = dashboardData?.trends_by_granularity || {};
+  const trendGranularityOptions = dashboardData?.trend_granularity_options || [];
   const cockpit = dashboardData?.cockpit || {};
   const cockpitMeta = cockpit?.meta || {};
   const capabilities = cockpit?.capabilities || [];
@@ -1854,6 +2005,44 @@ function DecisionCenterPage() {
   const dataCache = dashboardData?.cache || {};
   const preaggregationPending = Boolean(dataCache?.preaggregation_pending_refresh);
   const preaggregationAgeSeconds = Number(dataCache?.preaggregation_age_seconds || 0);
+  const aiRiskReasons = aiAnalysis?.risk_reasons || aiAnalysis?.insights || [];
+  const aiSuggestedActions = aiAnalysis?.suggested_actions || aiAnalysis?.actions || [];
+  const aiEvidenceData = aiAnalysis?.evidence_data || [];
+  const selectedGranularityRows = Array.isArray(trendsByGranularity?.[trendGranularity]) ? trendsByGranularity[trendGranularity] : [];
+  const hasSelectedGranularityRows = selectedGranularityRows.length > 0;
+
+  const trendRows = useMemo(() => {
+    return hasSelectedGranularityRows ? selectedGranularityRows : trends;
+  }, [hasSelectedGranularityRows, selectedGranularityRows, trends]);
+  const trendWindowLabel = useMemo(() => {
+    if (trendGranularity === 'week') return '近12周';
+    if (trendGranularity === 'quarter') return '近8季';
+    return '近12月';
+  }, [trendGranularity]);
+  const isTrendGranularityFallback = useMemo(() => {
+    return trendGranularity !== 'month' && Boolean(trendRows.length) && !hasSelectedGranularityRows;
+  }, [hasSelectedGranularityRows, trendGranularity, trendRows.length]);
+
+  useEffect(() => {
+    if (!trendGranularityOptions.length) return;
+    const hasCurrent = trendGranularityOptions.some((item) => item?.key === trendGranularity);
+    if (!hasCurrent) {
+      setTrendGranularity(trendGranularityOptions[0]?.key || 'month');
+    }
+  }, [trendGranularity, trendGranularityOptions]);
+
+  useEffect(() => {
+    if (!dashboardData) return;
+    if (trendGranularity === 'month') return;
+    if (hasSelectedGranularityRows) return;
+    if (!trends.length) return;
+    if (refreshing) return;
+
+    const attempted = trendGranularityRefreshRef.current;
+    if (attempted.has(trendGranularity)) return;
+    attempted.add(trendGranularity);
+    void fetchDataSection({ refreshData: true, silent: true });
+  }, [dashboardData, fetchDataSection, hasSelectedGranularityRows, refreshing, trendGranularity, trends.length]);
 
   const displayKpis = useMemo(() => kpis.slice(0, 8), [kpis]);
   const topProductMaxRevenue = useMemo(() => Math.max(1, ...topProducts.map((item) => Number(item.revenue || 0))), [topProducts]);
@@ -1878,6 +2067,15 @@ function DecisionCenterPage() {
     const minutes = Math.ceil(seconds / 60);
     return `${minutes} 分钟后自动刷新`;
   }, [aiAnalysis]);
+  const filteredRiskTable = useMemo(() => {
+    if (selectedDrilldownContext?.source !== 'risk') return riskTable;
+    return riskTable.filter((row) => {
+      const categoryMatched = !selectedDrilldownContext?.category || row?.category === selectedDrilldownContext.category;
+      const nameMatched = !selectedDrilldownContext?.name || row?.name === selectedDrilldownContext.name;
+      return categoryMatched && nameMatched;
+    });
+  }, [riskTable, selectedDrilldownContext]);
+  const activeRiskCategory = selectedDrilldownContext?.source === 'risk' ? selectedDrilldownContext?.category || '' : '';
   const visualsReady = useEntranceAnimation(60);
   const summaryBadges = useMemo(
     () => [
@@ -1944,12 +2142,52 @@ function DecisionCenterPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-100 dark:bg-slate-950 flex items-center justify-center text-slate-600 dark:text-slate-300">
-        <div className="flex items-center gap-2 text-sm">
-          <RefreshCw size={16} className="animate-spin" />
-          正在加载数据决策系统...
-        </div>
-      </div>
+      <StatePanel
+        fullScreen
+        tone="slate"
+        title="正在加载数据决策系统"
+        description="系统正在聚合经营指标、风险预警和 AI 分析结果。"
+      />
+    );
+  }
+
+  if (!dashboardData && error) {
+    const permissionDenied = isPermissionDeniedError({ message: error });
+    const authRequired = isAuthRequiredError({ message: error });
+    return (
+      <StatePanel
+        fullScreen
+        tone={permissionDenied || authRequired ? 'amber' : 'rose'}
+        icon={permissionDenied ? 'permission' : authRequired ? 'auth' : 'error'}
+        title={
+          permissionDenied
+            ? '无权限访问决策中心'
+            : authRequired
+              ? '登录状态已失效'
+              : '决策中心加载失败'
+        }
+        description={error}
+        actions={[
+          { label: '返回工作台', href: '/' },
+          { label: '重新加载', onClick: () => window.location.reload(), primary: true },
+        ]}
+      />
+    );
+  }
+
+  if (!dashboardData) {
+    return (
+      <StatePanel
+        fullScreen
+        tone="slate"
+        icon="empty"
+        title="暂无可展示的决策数据"
+        description="当前还没有可用于驾驶舱展示的聚合结果。可以稍后刷新，或先返回工作台补充数据来源。"
+        actions={[
+          { label: '返回工作台', href: '/' },
+          { label: '刷新数据', onClick: () => void fetchDataSection({ refreshData: true, silent: false }), primary: true },
+        ]}
+      />
     );
   }
 
@@ -2142,6 +2380,8 @@ function DecisionCenterPage() {
                 </div>
               </div>
 
+              <MetricNote text={`${DECISION_METRIC_NOTES.payment} 点击任一分段可直接查看该状态下的对象明细。`} />
+
               <div className="mt-4 grid grid-cols-1 gap-4 2xl:grid-cols-3">
                 <StatusDonutCard
                   title="回款结构"
@@ -2149,6 +2389,13 @@ function DecisionCenterPage() {
                   items={paymentBreakdown}
                   palette={['#0ea5e9', '#22c55e', '#f59e0b', '#ef4444']}
                   delay={40}
+                  activeStatus={selectedDrilldownContext?.source === 'payment' ? selectedDrilldownContext?.status : ''}
+                  onSelect={(item) =>
+                    void loadDrilldown({
+                      source: 'payment',
+                      status: item?.status,
+                    })
+                  }
                 />
                 <StatusDonutCard
                   title="履约结构"
@@ -2156,6 +2403,13 @@ function DecisionCenterPage() {
                   items={deliveryBreakdown}
                   palette={['#06b6d4', '#10b981', '#8b5cf6', '#f97316']}
                   delay={120}
+                  activeStatus={selectedDrilldownContext?.source === 'delivery' ? selectedDrilldownContext?.status : ''}
+                  onSelect={(item) =>
+                    void loadDrilldown({
+                      source: 'delivery',
+                      status: item?.status,
+                    })
+                  }
                 />
                 <StatusSegmentsCard
                   title="采购状态"
@@ -2163,6 +2417,13 @@ function DecisionCenterPage() {
                   items={purchaseStatusBreakdown}
                   palette={['#6366f1', '#8b5cf6', '#14b8a6', '#f59e0b']}
                   delay={180}
+                  activeStatus={selectedDrilldownContext?.source === 'purchase' ? selectedDrilldownContext?.status : ''}
+                  onSelect={(item) =>
+                    void loadDrilldown({
+                      source: 'purchase',
+                      status: item?.status,
+                    })
+                  }
                 />
               </div>
             </article>
@@ -2192,8 +2453,16 @@ function DecisionCenterPage() {
               </span>
             </div>
 
-            <div className="mt-4 rounded-xl border border-cyan-200/70 dark:border-cyan-900/50 bg-cyan-50/50 dark:bg-cyan-950/20 p-3 text-sm leading-relaxed text-slate-700 dark:text-slate-200">
-              {aiAnalysis.summary || '暂无 AI 分析结果。'}
+            <div className="mt-4 rounded-xl border border-cyan-200/70 dark:border-cyan-900/50 bg-cyan-50/50 dark:bg-cyan-950/20 p-4 text-sm leading-relaxed text-slate-700 dark:text-slate-200">
+              <div className="flex items-start gap-3">
+                <div className="rounded-xl bg-cyan-100 p-2 text-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300">
+                  <Sparkles size={15} />
+                </div>
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-cyan-700 dark:text-cyan-300">核心结论</div>
+                  <div className="mt-2">{aiAnalysis.core_conclusion || aiAnalysis.summary || '暂无 AI 分析结果。'}</div>
+                </div>
+              </div>
             </div>
             {aiPending && (
               <div className="mt-2 text-xs text-cyan-700 dark:text-cyan-300 inline-flex items-center gap-1">
@@ -2205,31 +2474,37 @@ function DecisionCenterPage() {
             <div className="mt-4 grid grid-cols-1 gap-3">
               <div className="rounded-xl border border-slate-200/70 dark:border-slate-800 p-3">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">关键洞察</div>
-                  <div className="text-[11px] text-slate-400">{(aiAnalysis.insights || []).length} 条</div>
+                  <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                    <ShieldAlert size={13} />
+                    风险原因
+                  </div>
+                  <div className="text-[11px] text-slate-400">{aiRiskReasons.length} 条</div>
                 </div>
                 <ul className="mt-2 space-y-1.5 text-sm text-slate-700 dark:text-slate-200">
-                  {(aiAnalysis.insights || []).length ? (
-                    (aiAnalysis.insights || []).map((item, idx) => (
+                  {aiRiskReasons.length ? (
+                    aiRiskReasons.map((item, idx) => (
                       <li key={`insight-${idx}`} className="flex gap-2">
-                        <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-sky-500 shrink-0" />
+                        <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-rose-500 shrink-0" />
                         <span>{item}</span>
                       </li>
                     ))
                   ) : (
-                    <li className="text-sm text-slate-500 dark:text-slate-400">暂无关键洞察</li>
+                    <li className="text-sm text-slate-500 dark:text-slate-400">暂无风险原因</li>
                   )}
                 </ul>
               </div>
 
               <div className="rounded-xl border border-slate-200/70 dark:border-slate-800 p-3">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">建议动作</div>
-                  <div className="text-[11px] text-slate-400">{(aiAnalysis.actions || []).length} 条</div>
+                  <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                    <TrendingUp size={13} />
+                    建议动作
+                  </div>
+                  <div className="text-[11px] text-slate-400">{aiSuggestedActions.length} 条</div>
                 </div>
                 <ul className="mt-2 space-y-1.5 text-sm text-slate-700 dark:text-slate-200">
-                  {(aiAnalysis.actions || []).length ? (
-                    (aiAnalysis.actions || []).map((item, idx) => (
+                  {aiSuggestedActions.length ? (
+                    aiSuggestedActions.map((item, idx) => (
                       <li key={`action-${idx}`} className="flex gap-2">
                         <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
                         <span>{item}</span>
@@ -2240,6 +2515,31 @@ function DecisionCenterPage() {
                   )}
                 </ul>
               </div>
+
+              <div className="rounded-xl border border-slate-200/70 dark:border-slate-800 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                    <Database size={13} />
+                    证据数据
+                  </div>
+                  <div className="text-[11px] text-slate-400">{aiEvidenceData.length} 项</div>
+                </div>
+                {aiEvidenceData.length ? (
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {aiEvidenceData.map((item, idx) => (
+                      <div key={`evidence-${idx}`} className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+                        <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">{item?.label || `证据 ${idx + 1}`}</div>
+                        <div className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">
+                          {item?.display_value || formatDrilldownMetricValue(item?.value, item?.unit)}
+                        </div>
+                        <div className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">{item?.description || '暂无说明'}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-2 text-sm text-slate-500 dark:text-slate-400">暂无证据数据</div>
+                )}
+              </div>
             </div>
 
             <div className="mt-3 rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-3 text-xs leading-6 text-slate-600 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-300">
@@ -2249,34 +2549,80 @@ function DecisionCenterPage() {
           </article>
         </section>
 
+        <div ref={drilldownSectionRef}>
+          <DecisionDrilldownPanel
+            data={drilldownData}
+            loading={drilldownLoading}
+            error={drilldownError}
+            activeGroup={activeObjectGroup}
+            onGroupChange={setActiveObjectGroup}
+          />
+        </div>
+
         <div className="space-y-4 xl:space-y-0 xl:columns-2 xl:gap-4">
         <section className="grid grid-cols-1 gap-4 xl:contents">
           <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold">销售 vs 采购趋势</h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400">近12个月金额趋势（单位：人民币，悬停查看明细）</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">{trendWindowLabel}经营趋势，支持按周、按月、按季切换，点击任一周期直接查看对象明细</p>
               </div>
-              <div className="flex items-center gap-3 text-xs text-slate-500">
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-sky-500" />
-                  销售
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-orange-500" />
-                  采购
-                </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-3 text-xs text-slate-500">
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full bg-sky-500" />
+                    销售
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="h-2 w-2 rounded-full bg-orange-500" />
+                    采购
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50/80 p-1 dark:border-slate-800 dark:bg-slate-950/40">
+                  {(trendGranularityOptions.length ? trendGranularityOptions : Object.entries(TREND_GRANULARITY_LABELS).map(([key, label]) => ({ key, label }))).map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setTrendGranularity(option.key)}
+                      className={`rounded-full px-3 py-1 text-[11px] font-medium transition-colors ${
+                        trendGranularity === option.key
+                          ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                          : 'text-slate-500 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100'
+                      }`}
+                    >
+                      {option.label || TREND_GRANULARITY_LABELS[option.key] || option.key}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
+            <MetricNote text={`${DECISION_METRIC_NOTES.trend} 当前时间粒度：${TREND_GRANULARITY_LABELS[trendGranularity] || trendGranularity}。`} />
+            {isTrendGranularityFallback && (
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300">
+                当前仍在显示月度趋势。已尝试刷新数据快照；如果切到该粒度后仍无变化，说明当前后端还没返回对应的周/季聚合数据。
+              </div>
+            )}
+
             <div className="mt-4">
-              <DualLineChart rows={trends} />
+              <DualLineChart
+                key={trendGranularity}
+                rows={trendRows}
+                activeBucket={selectedDrilldownContext?.source === 'trend' ? selectedDrilldownContext?.bucket : ''}
+                onSelect={(row) =>
+                  void loadDrilldown({
+                    source: 'trend',
+                    granularity: row?.granularity || trendGranularity,
+                    bucket: row?.bucket,
+                  })
+                }
+              />
             </div>
 
             <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-              {trends.slice(-3).map((row) => (
-                <div key={row.month} className="rounded-lg bg-slate-50 dark:bg-slate-800/70 px-2 py-1.5">
-                  <div>{row.month}</div>
+              {trendRows.slice(-3).map((row, index) => (
+                <div key={row.bucket || row.month || index} className="rounded-lg bg-slate-50 dark:bg-slate-800/70 px-2 py-1.5">
+                  <div>{formatTrendBucketLabel(row, true)}</div>
                   <div className="font-medium text-slate-700 dark:text-slate-200">{formatMetric(row.net_amount, 'CNY')}</div>
                 </div>
               ))}
@@ -2323,55 +2669,28 @@ function DecisionCenterPage() {
                 <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">按客户回款、库存缺口、采购积压分类聚合</p>
               </div>
               <div className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                {riskTable.length} 条明细
+                {filteredRiskTable.length}/{riskTable.length} 条明细
               </div>
             </div>
 
+            <MetricNote text={DECISION_METRIC_NOTES.risk} />
+
             <div className="mt-4">
-              <RiskHeatGrid rows={riskTable} />
+              <RiskHeatGrid
+                rows={riskTable}
+                activeCategory={activeRiskCategory}
+                onSelect={(group) =>
+                  void loadDrilldown({
+                    source: 'risk',
+                    category: group?.key,
+                  })
+                }
+              />
             </div>
           </article>
         </section>
 
         <section className="grid grid-cols-1 gap-4 xl:contents">
-          <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold">订单活跃度</h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400">近12个月销售单量与采购单量柱状对比</p>
-              </div>
-              <div className="flex items-center gap-3 text-xs text-slate-500">
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-cyan-500" />
-                  销售单量
-                </span>
-                <span className="inline-flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-violet-500" />
-                  采购单量
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-4">
-              <OrderVolumeChart rows={trends} />
-            </div>
-
-            <div className="mt-4 grid grid-cols-3 gap-3">
-              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
-                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">销售订单</div>
-                <div className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(totals.order_count || 0))}</div>
-              </div>
-              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
-                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">采购订单</div>
-                <div className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(totals.purchase_count || 0))}</div>
-              </div>
-              <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
-                <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">活跃客户</div>
-                <div className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{compactNumberFormatter.format(Number(totals.active_customers_90d || 0))}</div>
-              </div>
-            </div>
-          </article>
-
           <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] xl:mb-4 xl:break-inside-avoid">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -2383,11 +2702,27 @@ function DecisionCenterPage() {
               </div>
             </div>
 
+            <MetricNote text={`${DECISION_METRIC_NOTES.product} 点击某个商品即可下钻到客户、SKU、回款项和库存对象。`} />
+
             <div className="mt-4 space-y-3">
               {topProducts.slice(0, 6).map((row, idx) => {
                 const width = (Number(row.revenue || 0) / topProductMaxRevenue) * 100;
                 return (
-                  <div key={`${row.prod_name}-${idx}`} className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/30">
+                  <button
+                    key={`${row.prod_name}-${idx}`}
+                    type="button"
+                    onClick={() =>
+                      void loadDrilldown({
+                        source: 'product',
+                        name: row?.prod_name,
+                      })
+                    }
+                    className={`rounded-2xl border bg-slate-50/80 p-3 text-left dark:bg-slate-950/30 ${
+                      selectedDrilldownContext?.source === 'product' && selectedDrilldownContext?.name === row?.prod_name
+                        ? 'border-cyan-300 dark:border-cyan-900/60'
+                        : 'border-slate-200/70 dark:border-slate-800'
+                    }`}
+                  >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
@@ -2413,7 +2748,7 @@ function DecisionCenterPage() {
                         }}
                       />
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -2425,8 +2760,19 @@ function DecisionCenterPage() {
             <h2 className="text-lg font-semibold">品类盈利结构</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">用销售额、成本额和毛利率的叠层结构看出利润贡献与承压位置</p>
 
+            <MetricNote text={`${DECISION_METRIC_NOTES.category} 点击某个品类可进入对象明细。`} />
+
             <div className="mt-4">
-              <CategoryProfitChart rows={categoryProfitRows} />
+              <CategoryProfitChart
+                rows={categoryProfitRows}
+                activeCategory={selectedDrilldownContext?.source === 'category' ? selectedDrilldownContext?.category : ''}
+                onSelect={(row) =>
+                  void loadDrilldown({
+                    source: 'category',
+                    category: row?.category,
+                  })
+                }
+              />
             </div>
           </article>
 
@@ -2442,6 +2788,8 @@ function DecisionCenterPage() {
               </div>
             </div>
 
+            <MetricNote text={`${DECISION_METRIC_NOTES.warehouse} 点击仓库条目可查看该仓库关联的客户、回款项和库存对象。`} />
+
             <div className="mt-4 grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-slate-200/70 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
                 <div className="text-[11px] uppercase tracking-[0.12em] text-slate-500">库存估值</div>
@@ -2455,31 +2803,25 @@ function DecisionCenterPage() {
               </div>
             </div>
 
-            <div className="mt-4 overflow-hidden rounded-full bg-slate-100 p-1 dark:bg-slate-800">
-              <div className="flex h-4 items-stretch gap-1 overflow-hidden rounded-full">
-                {warehouseRows.map((row, idx) => {
-                  const share = warehouseTotalUnits > 0 ? Number(row.units || 0) / warehouseTotalUnits : 0;
-                  return (
-                    <div
-                      key={`${row.warehouse}-strip`}
-                      className="rounded-full"
-                      style={{
-                        flexBasis: visualsReady ? `${Math.max(share * 100, 8)}%` : '0%',
-                        backgroundColor: CAPABILITY_COLORS[idx % CAPABILITY_COLORS.length],
-                        transition: 'flex-basis 800ms cubic-bezier(0.22,1,0.36,1)',
-                        transitionDelay: `${idx * 70}ms`,
-                      }}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-
             <div className="mt-4 space-y-3">
               {warehouseRows.map((row, idx) => {
                 const width = (Number(row.units || 0) / warehouseMaxUnits) * 100;
                 return (
-                  <div key={`${row.warehouse}-${idx}`} className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/30">
+                  <button
+                    key={`${row.warehouse}-${idx}`}
+                    type="button"
+                    onClick={() =>
+                      void loadDrilldown({
+                        source: 'warehouse',
+                        name: row?.warehouse,
+                      })
+                    }
+                    className={`rounded-2xl border bg-slate-50/80 p-3 text-left dark:bg-slate-950/30 ${
+                      selectedDrilldownContext?.source === 'warehouse' && selectedDrilldownContext?.name === row?.warehouse
+                        ? 'border-cyan-300 dark:border-cyan-900/60'
+                        : 'border-slate-200/70 dark:border-slate-800'
+                    }`}
+                  >
                     <div className="flex items-center justify-between gap-3 text-xs">
                       <span className="font-medium text-slate-700 dark:text-slate-200">{row.warehouse}</span>
                       <span className="text-slate-500 dark:text-slate-400">
@@ -2496,7 +2838,7 @@ function DecisionCenterPage() {
                         }}
                       />
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -2506,7 +2848,7 @@ function DecisionCenterPage() {
         <section className="grid grid-cols-1 gap-4 xl:contents">
           <article className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 shadow-[0_8px_28px_rgba(15,23,42,0.06)] overflow-x-auto xl:mb-4 xl:break-inside-avoid">
             <h2 className="text-lg font-semibold">风险明细</h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">客户回款、库存缺口与采购积压重点对象</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">客户回款、库存缺口与采购积压重点对象，点击任一对象会联动热力图和下钻面板</p>
 
             <table className="mt-4 min-w-full text-sm">
               <thead>
@@ -2519,8 +2861,24 @@ function DecisionCenterPage() {
                 </tr>
               </thead>
               <tbody>
-                {riskTable.slice(0, 12).map((row, idx) => (
-                  <tr key={`${row.category}-${row.name}-${idx}`} className="border-b border-slate-100 dark:border-slate-800/70">
+                {filteredRiskTable.slice(0, 12).map((row, idx) => (
+                  <tr
+                    key={`${row.category}-${row.name}-${idx}`}
+                    className={`cursor-pointer border-b border-slate-100 transition-colors dark:border-slate-800/70 ${
+                      selectedDrilldownContext?.source === 'risk' &&
+                      selectedDrilldownContext?.category === row?.category &&
+                      (!selectedDrilldownContext?.name || selectedDrilldownContext?.name === row?.name)
+                        ? 'bg-cyan-50/70 dark:bg-cyan-950/20'
+                        : 'hover:bg-slate-50/70 dark:hover:bg-slate-950/20'
+                    }`}
+                    onClick={() =>
+                      void loadDrilldown({
+                        source: 'risk',
+                        category: row?.category,
+                        name: row?.name,
+                      })
+                    }
+                  >
                     <td className="px-2 py-2 font-medium text-slate-700 dark:text-slate-200">{row.category}</td>
                     <td className="px-2 py-2 text-slate-600 dark:text-slate-300">{row.name}</td>
                     <td className="px-2 py-2 text-slate-700 dark:text-slate-200">

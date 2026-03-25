@@ -7,6 +7,8 @@ import {
   Loader2,
   Search,
 } from "lucide-react";
+import AuditHistoryPreview from "./AuditHistoryPreview";
+import AuditSourceFilesPanel from "../../components/AuditSourceFilesPanel";
 
 const OVERVIEW_TEXT = [
   "AI 合同审校与预警方案，覆盖合同上传、关键信息提取、风险识别预警与履约审核报告全流程。",
@@ -244,6 +246,8 @@ const AuditWorkspace = ({
   onAuditModelBackendChange,
   onFileSelect,
   auditState,
+  auditHistoryMeta,
+  auditHistoryEntries,
   auditFile,
   onReset,
   onErpAction,
@@ -761,7 +765,20 @@ const AuditWorkspace = ({
         )}
 
         {isFailed && <section className="rounded-2xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 p-4 text-sm">{auditState?.error_message || auditState?.error || "审单失败，请重试。"}</section>}
-        {showHistory && <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{historyText}</section>}
+        {(showAuditReport || isFailed) && (
+          <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 md:p-5">
+            <AuditSourceFilesPanel
+              title={isCaseAggregateReport || caseDocuments.length > 1 ? "关联单据" : "原始文件"}
+              hint="当前这次审单的原始文件都可以直接打开，不需要回到其他页面翻找。"
+              fileUrl={auditState?.file_url || result?.file_url}
+              fileName={auditState?.file_name || result?.file_name || auditFile?.name}
+              jobId={auditState?.jobId}
+              documents={caseDocuments}
+              emptyText="当前这次审单还没有可打开的原始文件地址。"
+            />
+          </section>
+        )}
+        {showHistory && <AuditHistoryPreview historyText={historyText} historyMeta={auditHistoryMeta} historyEntries={auditHistoryEntries} />}
         {showRetainedReportWhileBusy && (
           <section className="rounded-2xl border border-cyan-200 dark:border-cyan-900/60 bg-cyan-50/80 dark:bg-cyan-950/20 text-cyan-800 dark:text-cyan-200 p-4 text-sm">
             当前正在处理新文件，下面保留的是本审单包上一轮解析与核对结果。新文件完成后，整包比对会自动刷新。
@@ -897,9 +914,14 @@ const AuditWorkspace = ({
                             <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-xs text-slate-600 dark:text-slate-300 max-h-[280px] overflow-y-auto custom-scrollbar"><HighlightedText text={selectedReport.evidence || previewText} highlight={selectedReport.highlight} /></div>
                           </>
                         )}
+                        {isCaseAggregateReport && caseDocuments.length > 1 && (
+                          <div className="rounded-lg border border-cyan-200 dark:border-cyan-900/60 bg-cyan-50/80 dark:bg-cyan-950/20 px-3 py-2 text-xs leading-5 text-cyan-700 dark:text-cyan-300">
+                            当前是整包结果，下面的回写动作会对同一批次的 {caseDocuments.length} 份单据一起生效。
+                          </div>
+                        )}
                         <div className="flex flex-wrap gap-2 pt-1">
-                          <button type="button" onClick={() => onErpAction && onErpAction("approved")} disabled={!isDone || isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-emerald-600 text-white disabled:opacity-50">{isErpActionLoading ? "提交中..." : "回写通过"}</button>
-                          <button type="button" onClick={() => onErpAction && onErpAction("need_more")} disabled={!isDone || isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-amber-600 text-white disabled:opacity-50">回写补件</button>
+                          <button type="button" onClick={() => onErpAction && onErpAction("approved")} disabled={!isDone || isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-emerald-600 text-white disabled:opacity-50">{isErpActionLoading ? "提交中..." : (isCaseAggregateReport && caseDocuments.length > 1 ? "整包回写通过" : "回写通过")}</button>
+                          <button type="button" onClick={() => onErpAction && onErpAction("need_more")} disabled={!isDone || isErpActionLoading} className="px-3 py-1.5 rounded-md text-xs bg-amber-600 text-white disabled:opacity-50">{isCaseAggregateReport && caseDocuments.length > 1 ? "整包回写补件" : "回写补件"}</button>
                         </div>
                       </div>
                     </div>

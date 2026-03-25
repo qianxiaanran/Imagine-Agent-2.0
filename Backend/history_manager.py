@@ -1,5 +1,5 @@
 ﻿from sqlalchemy import text
-
+import json
 from datetime import datetime
 
 from supabase_client import engine, supabase
@@ -11,6 +11,7 @@ _SESSION_PREFERENCES_TABLE_FIXED = False
 _SESSION_LIST_LIMIT = 500
 _HISTORY_PAGE_LIMIT_DEFAULT = 40
 _HISTORY_PAGE_LIMIT_MAX = 100
+_MESSAGE_SOURCES_FUNC_TYPE = "message_sources"
 
 
 def _ensure_history_id_autoincrement():
@@ -155,6 +156,100 @@ def _normalize_history_page_limit(limit):
     except Exception:
         value = _HISTORY_PAGE_LIMIT_DEFAULT
     return max(1, min(value, _HISTORY_PAGE_LIMIT_MAX))
+
+
+def _safe_json_loads(value):
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return None
+
+
+def _load_message_sources_map(user_id, session_id, assistant_ids=None):
+    assistant_id_set = set()
+    for item in assistant_ids or []:
+        try:
+            assistant_id_set.add(int(item))
+        except Exception:
+            continue
+
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    SELECT content
+                    FROM public.history
+                    WHERE session_id = :session_id
+                      AND user_id = :user_id
+                      AND role = 'meta'
+                      AND func_type = :func_type
+                    ORDER BY id ASC
+                    """
+                ),
+                {
+                    "session_id": str(session_id),
+                    "user_id": str(user_id),
+                    "func_type": _MESSAGE_SOURCES_FUNC_TYPE,
+                },
+            )
+            rows = result.mappings().all()
+    except Exception as e:
+        print(f"Error fetching message sources: {e}")
+        return {}
+
+    source_map = {}
+    for row in rows:
+        payload = _safe_json_loads(row.get("content"))
+        if not isinstance(payload, dict):
+            continue
+        assistant_history_id = payload.get("assistant_history_id")
+        try:
+            assistant_history_id = int(assistant_history_id)
+        except Exception:
+            continue
+        if assistant_id_set and assistant_history_id not in assistant_id_set:
+            continue
+        sources = payload.get("sources")
+        if isinstance(sources, list) and sources:
+            source_map[assistant_history_id] = sources
+    return source_map
+
+
+def _attach_message_sources(user_id, session_id, rows):
+    normalized_rows = [dict(row) for row in (rows or [])]
+    assistant_ids = []
+    for row in normalized_rows:
+        if str(row.get("role") or "").strip().lower() != "assistant":
+            continue
+        try:
+            assistant_ids.append(int(row.get("id")))
+        except Exception:
+            continue
+
+    if not assistant_ids:
+        return normalized_rows
+
+    source_map = _load_message_sources_map(user_id, session_id, assistant_ids)
+    if not source_map:
+        return normalized_rows
+
+    enriched_rows = []
+    for row in normalized_rows:
+        next_row = dict(row)
+        if str(next_row.get("role") or "").strip().lower() == "assistant":
+            try:
+                assistant_id = int(next_row.get("id"))
+            except Exception:
+                assistant_id = None
+            if assistant_id in source_map:
+                next_row["sources"] = source_map[assistant_id]
+        enriched_rows.append(next_row)
+    return enriched_rows
 
 
 def _derive_session_title(role, content):
@@ -353,7 +448,7 @@ def get_history(user_id, session_id):
             .eq("user_id", str(user_id)) \
             .order("created_at") \
             .execute()
-        return res.data
+        return _attach_message_sources(user_id, session_id, res.data or [])
     except Exception as e:
         print(f"Error fetching history: {e}")
         return []
@@ -371,10 +466,15 @@ def get_history_context_bundle(user_id, session_id):
                     WHERE session_id = :session_id
                       AND user_id = :user_id
                       AND role IN ('context', 'meta')
+                      AND NOT (role = 'meta' AND func_type = :message_sources_func_type)
                     ORDER BY id ASC
                     """
                 ),
-                {"session_id": str(session_id), "user_id": str(user_id)},
+                {
+                    "session_id": str(session_id),
+                    "user_id": str(user_id),
+                    "message_sources_func_type": _MESSAGE_SOURCES_FUNC_TYPE,
+                },
             )
             return [dict(row) for row in result.mappings().all()]
     except Exception as e:
@@ -423,6 +523,7 @@ def get_history_page(user_id, session_id, limit=40, before_id=None, include_cont
         print(f"Error fetching history page: {e}")
         rows = []
 
+    rows = _attach_message_sources(user_id, session_id, rows)
     has_more = len(rows) > page_limit
     page_rows = rows[:page_limit]
     next_before_id = page_rows[-1].get("id") if has_more and page_rows else None

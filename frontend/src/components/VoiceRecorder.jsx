@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Loader2, Plus, X, Check } from 'lucide-react';
 import { convertWebMToWav } from '../utils/audio';
 
-const VoiceRecorder = ({ onCancel, onConfirm }) => {
+const VoiceRecorder = ({ onCancel, onConfirm, onError }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const canvasRef = useRef(null);
 
@@ -64,7 +64,7 @@ const VoiceRecorder = ({ onCancel, onConfirm }) => {
       drawWaveform(analyser);
     } catch (err) {
       console.error('Error accessing microphone:', err);
-      alert('无法访问麦克风，请检查浏览器权限设置');
+      onError?.('无法访问麦克风，请检查浏览器权限设置。');
       onCancel();
     }
   };
@@ -97,7 +97,7 @@ const VoiceRecorder = ({ onCancel, onConfirm }) => {
     if (recorder && recorder.state !== 'inactive') {
       const durationMs = Date.now() - (recordStartAtRef.current || Date.now());
       if (durationMs < 700) {
-        alert('录音时间太短，请至少说 1 秒再发送');
+        onError?.('录音时间太短，请至少说 1 秒再发送。');
         return;
       }
 
@@ -119,7 +119,7 @@ const VoiceRecorder = ({ onCancel, onConfirm }) => {
           }
         } catch (error) {
           console.error('Processing failed', error);
-          alert('音频处理失败，请重试');
+          onError?.('音频处理失败，请重试。');
           onCancel();
         } finally {
           stopRecordingCleanup();
