@@ -44,6 +44,7 @@ const TYPE_TABS = [
   { key: 'all', label: '全部类型' },
   { key: 'audit', label: '审单' },
   { key: 'ocr', label: 'OCR' },
+  { key: 'seal', label: '印章' },
   { key: 'voice', label: '语音' },
   { key: 'ppt', label: 'PPT' },
 ];
@@ -59,6 +60,7 @@ const STATUS_STYLES = {
 const TYPE_ICONS = {
   audit: Shield,
   ocr: FileText,
+  seal: FileBadge2,
   voice: Mic,
   ppt: Sparkles,
 };
@@ -225,11 +227,12 @@ function getAuditFindingSource(value) {
 }
 
 function AuditDetailSection({ icon: Icon = FileText, title, hint, children }) {
+  const iconNode = React.createElement(Icon, { size: 18 });
   return (
     <section className="overflow-hidden rounded-3xl border border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/40">
       <div className="flex items-start gap-3 border-b border-slate-200/80 bg-white/70 px-4 py-4 dark:border-slate-800 dark:bg-slate-900/80">
         <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white dark:bg-slate-800">
-          <Icon size={18} />
+          {iconNode}
         </div>
         <div className="min-w-0">
           <div className="text-sm font-semibold text-slate-900 dark:text-white">{title}</div>
@@ -242,6 +245,7 @@ function AuditDetailSection({ icon: Icon = FileText, title, hint, children }) {
 }
 
 function AuditMetricCard({ icon: Icon = Shield, label, value, hint, tone = 'slate' }) {
+  const iconNode = React.createElement(Icon, { size: 16 });
   const toneMap = {
     slate: 'from-slate-100 to-white border-slate-200 dark:from-slate-900 dark:to-slate-950 dark:border-slate-800',
     cyan: 'from-cyan-100 to-white border-cyan-200 dark:from-cyan-950/40 dark:to-slate-950 dark:border-cyan-800',
@@ -254,7 +258,7 @@ function AuditMetricCard({ icon: Icon = Shield, label, value, hint, tone = 'slat
       <div className="flex items-start justify-between gap-3">
         <div className="text-xs tracking-[0.18em] uppercase text-slate-500 dark:text-slate-400">{label}</div>
         <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-white/80 text-slate-700 dark:bg-slate-900 dark:text-slate-200">
-          <Icon size={16} />
+          {iconNode}
         </div>
       </div>
       <div className="mt-3 text-2xl font-semibold text-slate-900 dark:text-white">{value}</div>
@@ -264,10 +268,11 @@ function AuditMetricCard({ icon: Icon = Shield, label, value, hint, tone = 'slat
 }
 
 function AuditInfoRow({ icon: Icon = FileText, label, value, hint }) {
+  const iconNode = React.createElement(Icon, { size: 15 });
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900/80">
       <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
-        <Icon size={15} />
+        {iconNode}
         <div className="text-xs tracking-[0.18em] uppercase">{label}</div>
       </div>
       <div className="mt-2 text-sm font-medium break-all text-slate-900 dark:text-white">{value || '-'}</div>
@@ -636,6 +641,11 @@ export default function TaskCenterPage() {
       window.open(detailDownloadUrl, '_blank', 'noopener,noreferrer');
       return;
     }
+    const archiveUrl = task?.detail?.archive_url || task?.summary?.archive_url;
+    if (archiveUrl) {
+      window.open(archiveUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
     const resultLink = String(task?.result_link || '').trim();
     if (!resultLink || resultLink.startsWith('/tasks')) {
       handleSelectTask(task?.task_id);
@@ -657,11 +667,11 @@ export default function TaskCenterPage() {
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-white" style={{ minHeight: 'var(--app-height, 100vh)' }}>
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90">
         <div className="mx-auto flex max-w-[1580px] items-center justify-between px-4 py-4 sm:px-6">
-          <div>
-            <div className="text-xs tracking-[0.28em] uppercase text-slate-500 dark:text-slate-400">Task Center</div>
-            <div className="mt-1 text-xl font-semibold">统一任务中心</div>
-            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">聚合审单、OCR、语音转写与 PPT 生成任务，统一查看状态、失败原因和结果入口。</div>
-          </div>
+            <div>
+              <div className="text-xs tracking-[0.28em] uppercase text-slate-500 dark:text-slate-400">Task Center</div>
+              <div className="mt-1 text-xl font-semibold">统一任务中心</div>
+            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">聚合审单、OCR、印章提取、语音转写与 PPT 生成任务，统一查看状态、失败原因和结果入口。</div>
+            </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -746,7 +756,7 @@ export default function TaskCenterPage() {
               ) : tasks.length === 0 ? (
                 <EmptyState
                   title="暂无匹配任务"
-                  description="当前筛选条件下还没有任务记录。后续发起审单、OCR、语音转写或 PPT 生成后，这里会自动聚合展示。"
+                  description="当前筛选条件下还没有任务记录。后续发起审单、OCR、印章提取、语音转写或 PPT 生成后，这里会自动聚合展示。"
                 />
               ) : (
                 <div className="space-y-3">
@@ -957,6 +967,16 @@ export default function TaskCenterPage() {
                       <ExternalLink size={16} />
                       打开结果
                     </button>
+                    {(selectedTask?.detail?.archive_url || selectedTask?.summary?.archive_url) ? (
+                      <button
+                        type="button"
+                        onClick={() => window.open(selectedTask?.detail?.archive_url || selectedTask?.summary?.archive_url, '_blank', 'noopener,noreferrer')}
+                        className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        <ExternalLink size={16} />
+                        批量下载
+                      </button>
+                    ) : null}
                     {selectedTask.retry_supported && selectedTask.status === 'failed' ? (
                       <button
                         type="button"

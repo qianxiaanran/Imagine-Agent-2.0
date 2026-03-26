@@ -21,7 +21,7 @@ const WritingEntryHub = ({ onOpenAssistant, onOpenPptGenerator }) => (
             <PencilLine size={20} />
           </div>
           <div className="mt-4 text-xl font-semibold text-gray-900 dark:text-white">写作助手</div>
-          <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">营销文案、行业分析、建议咨询等内容生成</div>
+          <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">营销文案、企业邮件回复、建议咨询等内容生成</div>
           <div className="mt-4 inline-flex items-center gap-1 text-xs font-semibold text-gray-700 dark:text-gray-300">
             进入写作助手 <ArrowRight size={14} />
           </div>

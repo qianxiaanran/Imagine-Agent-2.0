@@ -21,7 +21,7 @@ function readEnv(...keys) {
 }
 
 const PORT = Number(readEnv("PORT") || 8080);
-const HOST = readEnv("FRONTEND_HOST", "HOST") || "0.0.0.0";
+const HOST = readEnv("FRONTEND_HOST", "HOST") || "127.0.0.1";
 const API_TARGET = readEnv("API_TARGET") || "http://127.0.0.1:18011";
 const apiUrl = new URL(API_TARGET);
 

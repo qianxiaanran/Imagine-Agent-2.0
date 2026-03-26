@@ -370,13 +370,20 @@ def add_history_to_supabase(user_id, session_id, func_type, role, content):
         return False
 
 
-def add_history_turn_to_supabase(user_id, session_id, func_type, user_content, assistant_content):
+def add_history_turn_to_supabase(user_id, session_id, func_type, user_content, assistant_content, include_user_message=True):
     """Insert a user/assistant turn and return the persisted history ids."""
     try:
         _ensure_history_id_autoincrement()
         with engine.begin() as conn:
-            result = conn.execute(
-                text(
+            params = {
+                "user_id": str(user_id),
+                "session_id": str(session_id),
+                "func_type": func_type,
+                "user_content": "" if user_content is None else str(user_content),
+                "assistant_content": "" if assistant_content is None else str(assistant_content),
+            }
+            if include_user_message:
+                sql = text(
                     """
                     INSERT INTO public.history (user_id, session_id, func_type, role, content)
                     VALUES
@@ -384,15 +391,17 @@ def add_history_turn_to_supabase(user_id, session_id, func_type, user_content, a
                         (:user_id, :session_id, :func_type, 'assistant', :assistant_content)
                     RETURNING id, role
                     """
-                ),
-                {
-                    "user_id": str(user_id),
-                    "session_id": str(session_id),
-                    "func_type": func_type,
-                    "user_content": "" if user_content is None else str(user_content),
-                    "assistant_content": "" if assistant_content is None else str(assistant_content),
-                },
-            )
+                )
+            else:
+                sql = text(
+                    """
+                    INSERT INTO public.history (user_id, session_id, func_type, role, content)
+                    VALUES
+                        (:user_id, :session_id, :func_type, 'assistant', :assistant_content)
+                    RETURNING id, role
+                    """
+                )
+            result = conn.execute(sql, params)
             id_map = {}
             for row in result.mappings().all():
                 role = str(row.get("role") or "").strip().lower()

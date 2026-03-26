@@ -13,6 +13,15 @@ import {
 } from "lucide-react";
 
 const cn = (...parts) => parts.filter(Boolean).join(" ");
+const SOURCE_LABELS = {
+  rule: "规则命中",
+  ai: "AI语义",
+  cross_doc: "跨单据核对",
+  anomaly: "异常检测",
+  history: "历史相似",
+  erp: "ERP校验",
+};
+const escapeRegExp = (v = "") => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const parseAuditHistoryText = (text) => {
   const lines = String(text || "")
@@ -79,7 +88,10 @@ const parseAuditHistoryText = (text) => {
       continue;
     }
     if (inIssues) {
-      parsed.issues.push(line.replace(/^\d+[\.\)、]\s*/, "").trim() || line);
+      const issueLine = line.replace(/^\d+[.、)]\s*/, "").trim() || line;
+      if (issueLine && issueLine !== "未发现明确问题") {
+        parsed.issues.push(issueLine);
+      }
       continue;
     }
     parsed.extras.push(line);
@@ -133,6 +145,130 @@ const normalizeDataSourceItems = (historyMeta, parsed) => {
   }).filter((item) => item.label);
 };
 
+const formatValue = (value) => {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "number") {
+    return Number.isInteger(value) ? String(value) : value.toLocaleString("zh-CN", { maximumFractionDigits: 4 });
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => formatValue(item)).filter((item) => item && item !== "-").join(" / ") || "-";
+  }
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+};
+
+const formatConfidence = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "";
+  return `${Math.round(Math.max(0, Math.min(1, numeric)) * 100)}%`;
+};
+
+const issueLevelLabel = (severity = "") => {
+  const normalized = String(severity || "").trim().toLowerCase();
+  if (normalized === "high") return "高风险";
+  if (normalized === "medium") return "中风险";
+  if (normalized === "low") return "低风险";
+  return "历史问题";
+};
+
+const issueLevelClass = (severity = "") => {
+  const normalized = String(severity || "").trim().toLowerCase();
+  if (normalized === "high") return "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-900/60";
+  if (normalized === "medium") return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-900/60";
+  if (normalized === "low") return "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/30 dark:text-emerald-300 dark:border-emerald-900/60";
+  return "bg-slate-50 text-slate-700 border-slate-200 dark:bg-slate-950/30 dark:text-slate-300 dark:border-slate-800";
+};
+
+const HighlightedText = ({ text, highlight }) => {
+  if (!text) return <span>暂无证据片段</span>;
+  if (!highlight) return <span>{text}</span>;
+  const safe = String(highlight);
+  const parts = String(text).split(new RegExp(`(${escapeRegExp(safe)})`, "gi"));
+  return (
+    <span>
+      {parts.map((part, idx) =>
+        part.toLowerCase() === safe.toLowerCase()
+          ? <mark key={idx} className="bg-amber-100 text-amber-700 px-0.5 rounded">{part}</mark>
+          : <span key={idx}>{part}</span>
+      )}
+    </span>
+  );
+};
+
+const normalizeHistoryIssueItems = (historyMeta, parsed) => {
+  const metaIssues = Array.isArray(historyMeta?.issues) ? historyMeta.issues : [];
+  const issueSource = metaIssues.length > 0 ? metaIssues : parsed?.issues || [];
+  return issueSource
+    .map((item, index) => {
+      if (!item) return null;
+      if (typeof item === "string") {
+        const text = String(item).trim();
+        if (!text) return null;
+        return {
+          id: `history-issue-${index}`,
+          title: text,
+          sourceLabel: "历史摘要",
+          severity: "",
+          levelLabel: "历史问题",
+          reason: "",
+          suggestion: "",
+          confidenceText: "",
+          evidenceText: "",
+          highlight: "",
+          actual: null,
+          expected: null,
+          ruleId: "",
+          documentName: "",
+          hasStructuredDetail: false,
+        };
+      }
+      if (typeof item !== "object") return null;
+      const severity = String(item.severity || item.level || "").trim().toLowerCase();
+      const source = String(item.source || item.source_key || "").trim().toLowerCase();
+      const documentName = String(item.documentName || item.document_name || "").trim();
+      const rawTitle = String(item.title || item.message || item.name || "风险项").trim();
+      const title = documentName && rawTitle && !rawTitle.startsWith(`${documentName}：`) ? `${documentName}：${rawTitle}` : rawTitle;
+      const evidenceRaw = item.evidence;
+      const evidenceText = String(
+        item.evidenceText
+        || item.evidence_text
+        || (typeof evidenceRaw === "string" ? evidenceRaw : evidenceRaw?.text)
+        || ""
+      ).trim();
+      const highlight = String(
+        item.highlight
+        || (typeof evidenceRaw === "object" && evidenceRaw ? evidenceRaw.highlight : "")
+        || ""
+      ).trim();
+      return {
+        id: String(item.id || item.ruleId || item.rule_id || `history-issue-${index}`),
+        title: title || "风险项",
+        sourceLabel: String(item.sourceLabel || item.source_label || SOURCE_LABELS[source] || "风险项").trim(),
+        severity,
+        levelLabel: issueLevelLabel(severity),
+        reason: String(item.reason || "").trim(),
+        suggestion: String(item.suggestion || "").trim(),
+        confidenceText: formatConfidence(item.confidence),
+        evidenceText,
+        highlight,
+        actual: item.actual ?? null,
+        expected: item.expected ?? null,
+        ruleId: String(item.ruleId || item.rule_id || "").trim(),
+        documentName,
+        hasStructuredDetail: Boolean(
+          String(item.reason || "").trim()
+          || String(item.suggestion || "").trim()
+          || evidenceText
+          || item.actual !== undefined
+          || item.expected !== undefined
+          || String(item.ruleId || item.rule_id || "").trim()
+        ),
+      };
+    })
+    .filter(Boolean);
+};
+
 const toneClass = (risk) => {
   const normalized = String(risk || "").toLowerCase();
   if (normalized.includes("高")) return "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/30 dark:text-red-300 dark:border-red-900/60";
@@ -148,6 +284,7 @@ const verdictToneClass = (verdict) => {
 };
 
 const HistoryMetricCard = ({ icon: Icon, label, value, hint, tone = "slate" }) => {
+  const iconNode = React.createElement(Icon, { size: 16 });
   const toneMap = {
     slate: "from-slate-100 to-white border-slate-200 dark:from-slate-900 dark:to-slate-950 dark:border-slate-800",
     cyan: "from-cyan-100 to-white border-cyan-200 dark:from-cyan-950/30 dark:to-slate-950 dark:border-cyan-800",
@@ -160,7 +297,7 @@ const HistoryMetricCard = ({ icon: Icon, label, value, hint, tone = "slate" }) =
       <div className="flex items-start justify-between gap-3">
         <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">{label}</div>
         <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-white/80 text-slate-700 dark:bg-slate-900 dark:text-slate-200">
-          <Icon size={16} />
+          {iconNode}
         </div>
       </div>
       <div className="mt-3 text-lg font-semibold text-slate-900 dark:text-slate-100 break-all">{value || "-"}</div>
@@ -203,10 +340,24 @@ const normalizeHistoryEntries = (historyText, historyMeta, historyEntries) => {
 
 const AuditHistoryCard = ({ historyText, historyMeta, compact = false, badge = "", timestamp = "" }) => {
   const parsed = parseAuditHistoryText(historyText);
-  const issueCount = parsed.issues.length;
+  const issueItems = React.useMemo(() => normalizeHistoryIssueItems(historyMeta, parsed), [historyMeta, parsed]);
+  const issueCount = issueItems.length;
   const historyDocuments = Array.isArray(historyMeta?.documents) ? historyMeta.documents.filter(Boolean) : [];
   const showDocumentList = historyDocuments.length > 1 || (parsed.isAggregate && historyDocuments.length > 0);
   const dataSources = normalizeDataSourceItems(historyMeta, parsed);
+  const [activeIssueId, setActiveIssueId] = React.useState(issueItems[0]?.id || null);
+
+  React.useEffect(() => {
+    if (!issueItems.length) {
+      setActiveIssueId(null);
+      return;
+    }
+    if (!issueItems.some((item) => item.id === activeIssueId)) {
+      setActiveIssueId(issueItems[0]?.id || null);
+    }
+  }, [issueItems, activeIssueId]);
+
+  const activeIssue = issueItems.find((item) => item.id === activeIssueId) || issueItems[0] || null;
 
   return (
     <section className="rounded-[28px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-[0_20px_50px_-24px_rgba(15,23,42,0.35)]">
@@ -255,19 +406,44 @@ const AuditHistoryCard = ({ historyText, historyMeta, compact = false, badge = "
               <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">历史记录中的重点问题会拆成独立条目，便于逐条查看。</div>
             </div>
             <div className="p-4 space-y-3">
-              {parsed.issues.length > 0 ? parsed.issues.map((issue, idx) => (
-                <div key={`${issue}-${idx}`} className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 px-4 py-3">
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                      <AlertTriangle size={15} />
+              {issueItems.length > 0 ? issueItems.map((issue, idx) => {
+                const isActive = issue.id === activeIssue?.id;
+                return (
+                  <button
+                    key={`${issue.id}-${idx}`}
+                    type="button"
+                    onClick={() => setActiveIssueId(issue.id)}
+                    className={cn(
+                      "w-full rounded-2xl border px-4 py-3 text-left transition",
+                      isActive
+                        ? "border-cyan-300 bg-cyan-50 shadow-sm dark:border-cyan-800 dark:bg-cyan-950/20"
+                        : "border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900 hover:border-slate-300 dark:hover:border-slate-700"
+                    )}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                        <AlertTriangle size={15} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="text-sm font-medium text-slate-900 dark:text-slate-100">问题 {idx + 1}</div>
+                          {issue.severity ? (
+                            <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium", issueLevelClass(issue.severity))}>
+                              {issue.levelLabel}
+                            </span>
+                          ) : null}
+                          {issue.sourceLabel ? (
+                            <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
+                              {issue.sourceLabel}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{issue.title}</div>
+                      </div>
                     </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-slate-900 dark:text-slate-100">问题 {idx + 1}</div>
-                      <div className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{issue}</div>
-                    </div>
-                  </div>
-                </div>
-              )) : (
+                  </button>
+                );
+              }) : (
                 <div className="rounded-2xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/20 px-4 py-4 text-sm text-emerald-700 dark:text-emerald-300">
                   <div className="flex items-center gap-2 font-medium">
                     <CheckCircle2 size={16} />
@@ -279,6 +455,63 @@ const AuditHistoryCard = ({ historyText, historyMeta, compact = false, badge = "
           </div>
 
           <div className="space-y-4">
+            {activeIssue ? (
+              <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium", issueLevelClass(activeIssue.severity))}>
+                    {activeIssue.levelLabel}
+                  </div>
+                  {activeIssue.sourceLabel ? (
+                    <div className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                      {activeIssue.sourceLabel}
+                    </div>
+                  ) : null}
+                  {activeIssue.confidenceText ? (
+                    <div className="text-[11px] text-slate-400 dark:text-slate-500">置信度：{activeIssue.confidenceText}</div>
+                  ) : null}
+                </div>
+                <div className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100 break-all">{activeIssue.title}</div>
+                {activeIssue.reason ? (
+                  <div className="mt-3 text-sm leading-6 text-slate-700 dark:text-slate-200">
+                    <span className="font-medium">触发原因：</span>{activeIssue.reason}
+                  </div>
+                ) : null}
+                {activeIssue.suggestion ? (
+                  <div className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-200">
+                    <span className="font-medium">建议动作：</span>{activeIssue.suggestion}
+                  </div>
+                ) : null}
+                {(activeIssue.actual !== null && activeIssue.actual !== undefined) || (activeIssue.expected !== null && activeIssue.expected !== undefined) ? (
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-3">
+                      <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">现值</div>
+                      <div className="mt-2 text-sm text-slate-700 dark:text-slate-200 break-all">{formatValue(activeIssue.actual)}</div>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-3">
+                      <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">期望</div>
+                      <div className="mt-2 text-sm text-slate-700 dark:text-slate-200 break-all">{formatValue(activeIssue.expected)}</div>
+                    </div>
+                  </div>
+                ) : null}
+                {activeIssue.evidenceText ? (
+                  <div className="mt-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-3 text-sm leading-6 text-slate-600 dark:text-slate-300 max-h-[240px] overflow-y-auto">
+                    <HighlightedText text={activeIssue.evidenceText} highlight={activeIssue.highlight} />
+                  </div>
+                ) : null}
+                {!activeIssue.hasStructuredDetail ? (
+                  <div className="mt-3 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                    这条历史记录只保留了问题摘要，未保存更多结构化细节。
+                  </div>
+                ) : null}
+                {(activeIssue.documentName || activeIssue.ruleId) ? (
+                  <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                    {activeIssue.documentName ? <span>关联文件：{activeIssue.documentName}</span> : null}
+                    {activeIssue.ruleId ? <span>规则ID：{activeIssue.ruleId}</span> : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             {dataSources.length > 0 ? (
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">

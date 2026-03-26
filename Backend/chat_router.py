@@ -172,12 +172,13 @@ class ChatRequest(BaseModel):
     modelId: Optional[str] = Field(default=None, description="Selected model ID from frontend")
 
     # 新字段：模型后端选择
-    model_backend: Optional[str] = Field(default="local", description="backend: local (Qwen) / cloud (DeepSeek)")
+    model_backend: Optional[str] = Field(default="cloud", description="backend: local (Qwen) / cloud (DeepSeek)")
 
     # 上下文内容（OCR/会议/订单文本）
     context_content: Optional[str] = None
     # 显式文件列表（保留）
     files: List[str] = []
+    hide_user_message: Optional[bool] = Field(default=False, description="若为 true，则该轮用户消息不写入可见历史")
     personalization: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1629,6 +1630,7 @@ def _save_history_turn(
         func_type: str,
         user_message: str,
         assistant_message: str,
+        hide_user_message: bool = False,
 ) -> Optional[Dict[str, Optional[int]]]:
     if user_id == "anonymous":
         return None
@@ -1638,6 +1640,7 @@ def _save_history_turn(
         func_type=func_type,
         user_content=user_message,
         assistant_content=assistant_message,
+        include_user_message=not hide_user_message,
     )
 
 
@@ -1647,6 +1650,7 @@ async def _save_history_turn_async(
         func_type: str,
         user_message: str,
         assistant_message: str,
+        hide_user_message: bool = False,
 ) -> Optional[Dict[str, Optional[int]]]:
     if user_id == "anonymous":
         return None
@@ -1657,6 +1661,7 @@ async def _save_history_turn_async(
         func_type,
         user_message,
         assistant_message,
+        hide_user_message,
     )
 
 
@@ -1722,7 +1727,7 @@ def _build_context_event_payload(
         "v": 1,
         "mode": mode or "general",
         "model_id": model_id or "",
-        "model_backend": model_backend or "local",
+        "model_backend": model_backend or "cloud",
         "has_context": bool((context_content or "").strip()),
         "context_chars": len(context_content or ""),
         "reply_language": personalization.get("replyLanguage", "zh-CN"),
@@ -1822,7 +1827,7 @@ def _make_context_compaction_key(
             str(user_id or "").strip(),
             str(session_id or "").strip(),
             str(mode or "").strip().lower() or "general",
-            str(model_backend or "local").strip().lower() or "local",
+            str(model_backend or "cloud").strip().lower() or "cloud",
         ]
     )
 
@@ -4639,6 +4644,7 @@ async def chat(
             func_type,
             user_message,
             assistant_message,
+            hide_user_message=bool(req.hide_user_message),
         )
         if not isinstance(saved, dict):
             return None
@@ -4752,7 +4758,7 @@ async def chat(
         print(f"[Chat] Cancel previous in-flight stream for {stream_key}")
 
     # 模型后端选择（local / cloud）
-    model_backend = req.model_backend or "local"
+    model_backend = req.model_backend or "cloud"
     model_id = (req.modelId or "").strip()
 
     mode = _normalize_mode(req.mode)
@@ -6050,6 +6056,7 @@ async def chat(
                     k=6,
                     match_threshold=0.25,
                     source_files=requested_source_files,
+                    search_scope="shared_kb",
                 )
             )
             rag_entries = _build_rag_chunk_entries(docs, max_chunks=RAG_MAX_CHUNKS)

@@ -19,8 +19,11 @@ SMART_EMAIL_PROMPT = """
 ### 用户指令
 {user_input}
 
+### 输出语言要求
+{language_requirement}
+
 ### 任务要求
-请根据指令和上下文生成（或修改）一封**内容完整、细节丰富**的专业邮件，信息要具体、可执行、可直接发送。
+请根据指令和上下文生成（或修改）一封**内容完整、细节丰富**的专业邮件，信息要具体、可执行、可直接发送。默认按企业业务往来中的“回复邮件”来处理，优先覆盖确认、解释、承诺、附件说明、下一步动作与时间节点。
 **必须**且**只能**输出包含以下字段的 JSON 数据（包裹在 ```json 代码块中）：
 
 JSON 结构示例：
@@ -228,7 +231,11 @@ def stream_report_or_email(user_input: str, history: Optional[List[Dict[str, str
         return
 
     if "[指令:起草邮件]" in user_input:
-        prompt = SMART_EMAIL_PROMPT.format(user_input=user_input, context=context_str)
+        prompt = SMART_EMAIL_PROMPT.format(
+            user_input=user_input,
+            context=context_str,
+            language_requirement="请严格遵循用户在指令中指定的输出语言；若未指定，默认使用简体中文。",
+        )
         yield "📧 正在撰写详细邮件内容...\n"
         yield from ask_llm_stream(prompt)
         return
@@ -269,7 +276,11 @@ def stream_report_or_email(user_input: str, history: Optional[List[Dict[str, str
     # --------------------------------------------------
 
     if final_intent == "email":
-        prompt = SMART_EMAIL_PROMPT.format(user_input=user_input, context=context_str)
+        prompt = SMART_EMAIL_PROMPT.format(
+            user_input=user_input,
+            context=context_str,
+            language_requirement="请严格遵循用户在指令中指定的输出语言；若未指定，默认使用简体中文。",
+        )
         prefix = "📧 正在优化/撰写邮件内容...\n"
     elif final_intent == "ppt":
         prompt = SMART_PPT_PROMPT.format(user_input=user_input, context=context_str)
@@ -305,7 +316,12 @@ def generate_email_draft(
     scene: str,
     key_points: str,
     tone: str,
+    language: str = "简体中文",
 ) -> str:
     user_input = f"主题：{subject}, 收件人：{receiver_role}, 场景：{scene}, 关键点：{key_points}, 语气：{tone}"
-    prompt = SMART_EMAIL_PROMPT.format(user_input=user_input, context="（表单生成模式，无历史上下文）")
+    prompt = SMART_EMAIL_PROMPT.format(
+        user_input=user_input,
+        context="（表单生成模式，无历史上下文）",
+        language_requirement=f"请使用{language}输出整封邮件；若用户明确要求双语，请按要求分段输出。",
+    )
     return ask_llm(prompt).strip()

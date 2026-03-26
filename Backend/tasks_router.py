@@ -8,6 +8,7 @@ from admin_utils import require_active_user
 from audit_pipeline import get_job_snapshot, list_local_audit_jobs, retry_audit_job_with_result
 from ocr_task_manager import get_ocr_task_detail, retry_ocr_task
 from presentation_router import refresh_presenton_task_record, retry_presenton_task
+from seal_task_manager import get_seal_task_detail
 from task_registry import build_task_result_link, get_task, list_tasks, normalize_task_status
 from voice_files_processing import retry_voice_task
 
@@ -19,6 +20,7 @@ def _task_type_label(task_type: str) -> str:
     mapping = {
         "audit": "审单任务",
         "ocr": "OCR 任务",
+        "seal": "印章提取",
         "voice": "语音转写",
         "ppt": "PPT 生成",
     }
@@ -57,7 +59,10 @@ def _compact_task(task: Dict[str, Any]) -> Dict[str, Any]:
             "case_id": detail.get("case_id"),
             "doc_type": detail.get("doc_type"),
             "provider": detail.get("provider"),
+            "item_count": detail.get("item_count"),
             "download_url": detail.get("download_url"),
+            "archive_url": detail.get("archive_url"),
+            "file_url": detail.get("file_url") or detail.get("source_url"),
         },
     }
 
@@ -192,6 +197,10 @@ def _resolve_task_for_user(user_id: str, task_id: str) -> Optional[Dict[str, Any
             task = refreshed
     if str(task.get("task_type") or "").strip().lower() == "ocr":
         detailed = get_ocr_task_detail(task_id)
+        if detailed:
+            task = detailed
+    if str(task.get("task_type") or "").strip().lower() == "seal":
+        detailed = get_seal_task_detail(task_id)
         if detailed:
             task = detailed
     return task

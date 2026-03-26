@@ -74,6 +74,9 @@ register_ocr_task = None
 complete_ocr_task = None
 fail_ocr_task = None
 set_ocr_task_runner = None
+register_seal_task = None
+complete_seal_task = None
+fail_seal_task = None
 extract_transparent_seal = None
 # 添加了可选的同步 ASR 可调用功能
 baidu_asr_from_bytes = None
@@ -197,6 +200,7 @@ try:
     from voice_files_processing import submit_file_task, get_task_result, submit_supabase_task, get_file_signed_url, upload_bytes_to_supabase, create_instant_task
     from ocr_manager import OCRManager, get_shared_ocr_manager
     from ocr_task_manager import register_ocr_task, complete_ocr_task, fail_ocr_task, set_ocr_task_runner
+    from seal_task_manager import register_seal_task, complete_seal_task, fail_seal_task
     from history_manager import save_context
     import share_manager
     from report_email_manager import generate_report_outline, generate_email_draft
@@ -404,6 +408,7 @@ class EmailRequest(BaseModel):
     scene: str
     key_points: str
     tone: str
+    language: Optional[str] = "简体中文"
 
 
 class TranscribeRequest(BaseModel):
@@ -626,8 +631,9 @@ async def ocr_seal_extract(
     if not extract_transparent_seal:
         return JSONResponse(status_code=503, content={"success": False, "error": "Seal extraction service unavailable"})
 
+    task_record = None
     try:
-        _resolve_request_user_id(request, allow_anonymous=True)
+        resolved_user_id = _resolve_request_user_id(request, allow_anonymous=True)
     except ValueError as exc:
         return JSONResponse(status_code=401, content={"success": False, "error": str(exc)})
 
@@ -648,6 +654,14 @@ async def ocr_seal_extract(
             "extract_mode": extract_mode,
             "prefer_paddle": prefer_paddle,
         }
+        if register_seal_task:
+            task_record = register_seal_task(
+                filename=file.filename or "seal-source.png",
+                user_id=resolved_user_id or "anonymous",
+                source_url=source_url,
+                file_type=file.content_type or "",
+                settings=settings,
+            )
 
         result = extract_transparent_seal(
             content,
@@ -690,6 +704,8 @@ async def ocr_seal_extract(
             )
 
         if not normalized_items:
+            if fail_seal_task and isinstance(task_record, dict):
+                fail_seal_task(str(task_record.get("task_id") or ""), "未生成可下载的印章结果。")
             return JSONResponse(status_code=400, content={"success": False, "error": "未生成可下载的印章结果。"})
 
         archive_url = ""
@@ -709,27 +725,44 @@ async def ocr_seal_extract(
             selected_index = 0
         selected_item = normalized_items[selected_index]
 
+        response_payload = {
+            **{key: value for key, value in result.items() if key not in {"result_png", "items"}},
+            **selected_item,
+            "source_url": source_url,
+            "source_name": file.filename or "seal-source",
+            "source_size_bytes": len(content),
+            "source_content_type": file.content_type or "",
+            "settings": settings,
+            "selected_index": selected_index,
+            "item_count": len(normalized_items),
+            "items": normalized_items,
+            "archive_url": archive_url,
+            "archive_download_name": archive_download_name,
+        }
+
+        if complete_seal_task and isinstance(task_record, dict):
+            complete_seal_task(str(task_record.get("task_id") or ""), response_payload)
+
         return {
             "success": True,
-            "data": {
-                **{key: value for key, value in result.items() if key not in {"result_png", "items"}},
-                **selected_item,
-                "source_url": source_url,
-                "source_name": file.filename or "seal-source",
-                "source_size_bytes": len(content),
-                "source_content_type": file.content_type or "",
-                "settings": settings,
-                "selected_index": selected_index,
-                "item_count": len(normalized_items),
-                "items": normalized_items,
-                "archive_url": archive_url,
-                "archive_download_name": archive_download_name,
-            },
+            "task_id": task_record.get("task_id") if isinstance(task_record, dict) else None,
+            "result_link": task_record.get("result_link") if isinstance(task_record, dict) else None,
+            "data": response_payload,
         }
     except RuntimeError as exc:
+        if fail_seal_task and isinstance(task_record, dict):
+            try:
+                fail_seal_task(str(task_record.get("task_id") or ""), str(exc))
+            except Exception:
+                pass
         return JSONResponse(status_code=400, content={"success": False, "error": str(exc)})
     except Exception as exc:
         print(f"[SealExtract] API error: {exc}")
+        if fail_seal_task and isinstance(task_record, dict):
+            try:
+                fail_seal_task(str(task_record.get("task_id") or ""), str(exc))
+            except Exception:
+                pass
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"success": False, "error": str(exc)})
@@ -944,7 +977,7 @@ def api_gen_report(req: ReportRequest):
 def api_gen_email(req: EmailRequest):
     if not generate_email_draft: return {"error": "Service Unavailable"}
     return {"success": True,
-            "result": generate_email_draft(req.subject, req.receiver_role, req.scene, req.key_points, req.tone)}
+            "result": generate_email_draft(req.subject, req.receiver_role, req.scene, req.key_points, req.tone, req.language)}
 
 
 if __name__ == "__main__":

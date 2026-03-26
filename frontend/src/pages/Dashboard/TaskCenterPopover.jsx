@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Clock3,
   ExternalLink,
+  FileBadge2,
   FileText,
   Loader2,
   Mic,
@@ -26,6 +27,7 @@ const TYPE_OPTIONS = [
   { key: 'all', label: '全部类型' },
   { key: 'audit', label: '审单' },
   { key: 'ocr', label: 'OCR' },
+  { key: 'seal', label: '印章' },
   { key: 'voice', label: '语音' },
   { key: 'ppt', label: 'PPT' },
 ];
@@ -41,6 +43,7 @@ const STATUS_STYLES = {
 const TYPE_ICONS = {
   audit: Shield,
   ocr: FileText,
+  seal: FileBadge2,
   voice: Mic,
   ppt: Sparkles,
 };
@@ -190,6 +193,11 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
       window.open(detailDownloadUrl, '_blank', 'noopener,noreferrer');
       return;
     }
+    const archiveUrl = task?.detail?.archive_url || task?.summary?.archive_url;
+    if (archiveUrl) {
+      window.open(archiveUrl, '_blank', 'noopener,noreferrer');
+      return;
+    }
     const resultLink = String(task?.result_link || '').trim();
     if (!resultLink || resultLink.startsWith('/tasks')) {
       setSelectedTaskId(String(task?.task_id || '').trim());
@@ -263,7 +271,7 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
               <div>
                 <div className="text-[11px] tracking-[0.26em] uppercase text-slate-500 dark:text-slate-400">Task Center</div>
                 <div className="mt-1 text-lg font-semibold text-slate-900 dark:text-white">统一任务中心</div>
-                <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">查看最近 50 条任务、失败原因和结果入口。</div>
+                <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">查看最近 50 条审单、OCR、印章提取、语音与 PPT 任务。</div>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -328,7 +336,7 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
               ) : error ? (
                 <InlineEmptyState title="任务列表加载失败" description={error} onRetry={() => void loadTasks()} retryLabel="重新加载" />
               ) : tasks.length === 0 ? (
-                <InlineEmptyState title="暂无任务" description="后续发起审单、OCR、语音转写或 PPT 生成后，这里会自动聚合展示。" />
+                <InlineEmptyState title="暂无任务" description="后续发起审单、OCR、印章提取、语音转写或 PPT 生成后，这里会自动聚合展示。" />
               ) : (
                 <div className="h-full space-y-3 overflow-y-auto pr-1">
                   {tasks.map((task) => {
@@ -432,10 +440,11 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
 
                     <div className="rounded-2xl border border-slate-200 bg-slate-50/90 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/60">
                       <div className="text-[10px] uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">任务信息</div>
-                      <div className="mt-3 space-y-2 text-xs text-slate-600 dark:text-slate-300">
+                        <div className="mt-3 space-y-2 text-xs text-slate-600 dark:text-slate-300">
                         <div>Task ID：{selectedTask.task_id}</div>
                         {selectedTask?.summary?.filename ? <div>文件：{selectedTask.summary.filename}</div> : null}
                         {selectedTask?.summary?.doc_type ? <div>单据类型：{selectedTask.summary.doc_type}</div> : null}
+                        {selectedTask?.summary?.item_count ? <div>印章数：{selectedTask.summary.item_count}</div> : null}
                         {selectedTask?.summary?.provider ? <div>来源：{selectedTask.summary.provider}</div> : null}
                         {selectedTask?.summary?.template ? <div>模板：{selectedTask.summary.template}</div> : null}
                       </div>
@@ -450,6 +459,16 @@ export default function TaskCenterPopover({ isOpen, onClose }) {
                         <ExternalLink size={14} />
                         打开结果
                       </button>
+                      {(selectedTask?.detail?.archive_url || selectedTask?.summary?.archive_url) ? (
+                        <button
+                          type="button"
+                          onClick={() => window.open(selectedTask?.detail?.archive_url || selectedTask?.summary?.archive_url, '_blank', 'noopener,noreferrer')}
+                          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                        >
+                          <ExternalLink size={14} />
+                          批量下载
+                        </button>
+                      ) : null}
                       {selectedTask.retry_supported && selectedTask.status === 'failed' ? (
                         <button
                           type="button"

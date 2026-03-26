@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy, useMemo, useCallback } from 'react';
 import {
-  Bot, Zap, FileText, Layout, PanelLeftOpen, ChevronDown, Check, User,
+  Bot, Zap, FileText, PanelLeftOpen, ChevronDown, Check, User,
   BookOpen, X, Mic, StopCircle, ArrowRight, Plus,
   Loader2, Sparkles, Database, Download, ScanText,
   ClipboardCheck, Mail, ArrowLeft, Share2, Copy, PencilLine, Presentation,
@@ -394,19 +394,50 @@ const getStandalonePptContentFocusConfig = (focusKey) => {
 const getStandalonePptTopicSuggestionPrompt = (topic) =>
   STANDALONE_PPT_TOPIC_SUGGESTION_PROMPTS[String(topic || "").trim()]
   || `PPT主题：\n内容方向：${String(topic || "").trim()}`;
+const WRITING_EMAIL_SCENE_OPTIONS = ["客户询盘回复", "报价/价格说明", "交期/发货更新", "资料补充/附件说明", "异常/投诉处理", "付款/对账跟进", "会议/拜访跟进", "内部协调回复"];
+const WRITING_EMAIL_RECIPIENT_OPTIONS = ["海外客户", "国内客户", "供应商", "货代/报关代理", "合作伙伴", "内部同事", "管理层"];
+const WRITING_EMAIL_TONE_OPTIONS = ["专业礼貌", "坚定清晰", "委婉协商", "热情跟进", "正式合规"];
+const WRITING_EMAIL_LANGUAGE_OPTIONS = [
+  { value: "zh-CN", label: "简体中文", promptLine: "输出语言要求：请使用简体中文输出整封邮件，除专有名词外不要夹杂其他语言。", isBilingual: false },
+  { value: "en", label: "English", promptLine: "Output language requirement: write the full email in English only.", isBilingual: false },
+  { value: "ja", label: "日本語", promptLine: "出力言語要件：メール全文を日本語で作成してください。", isBilingual: false },
+  { value: "ko", label: "한국어", promptLine: "출력 언어 요구사항: 메일 전체를 한국어로 작성하세요.", isBilingual: false },
+  { value: "fr", label: "Français", promptLine: "Exigence de langue : rédigez l'e-mail entièrement en français.", isBilingual: false },
+  { value: "de", label: "Deutsch", promptLine: "Sprachanforderung: Bitte verfassen Sie die komplette E-Mail auf Deutsch.", isBilingual: false },
+  { value: "es", label: "Español", promptLine: "Requisito de idioma: redacta el correo completo en español.", isBilingual: false },
+  { value: "pt", label: "Português", promptLine: "Requisito de idioma: redija o e-mail completo em português.", isBilingual: false },
+  { value: "ru", label: "Русский", promptLine: "Требование к языку: составьте письмо полностью на русском языке.", isBilingual: false },
+  { value: "ar", label: "العربية", promptLine: "متطلب اللغة: اكتب البريد الإلكتروني بالكامل باللغة العربية.", isBilingual: false },
+  { value: "zh-en", label: "中英双语", promptLine: "输出语言要求：先给出简体中文版本，再给出英文版本，两部分内容保持一致。", isBilingual: true },
+];
+const WRITING_EMAIL_DEFAULT_LANGUAGE = WRITING_EMAIL_LANGUAGE_OPTIONS[0].value;
 const WRITING_CONSULTING_TYPE_OPTIONS = ["流程优化建议", "合规风控建议", "增长策略咨询", "系统落地方案"];
 const WRITING_CONSULTING_ROLE_OPTIONS = ["管理层", "运营团队", "销售团队", "财务风控团队", "IT实施团队"];
 const WRITING_OUTPUT_FORMAT_OPTIONS = ["执行清单", "分阶段计划", "OKR/KPI方案", "风险-对策矩阵"];
 const WRITING_PROJECT_CONTEXT = "项目是 Enterprise Intelligent Office Agent 2.0，面向进出口企业，核心能力包括：智能对话、会议纪要、OCR识别、智能审单、企业数据库查询、数据决策驾驶舱，以及本地/云模型切换。";
+const getWritingEmailLanguageConfig = (value) => {
+  const normalized = String(value || "").trim();
+  return WRITING_EMAIL_LANGUAGE_OPTIONS.find((item) => item.value === normalized)
+    || WRITING_EMAIL_LANGUAGE_OPTIONS[0];
+};
+const normalizeWritingAssistantType = (value, fallback = "report") => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return fallback;
+  if (normalized === "ppt") return "mail";
+  if (normalized === "email") return "consulting";
+  return normalized;
+};
 const WRITING_FIELD_SUGGESTIONS = {
   report: {
     referenceContent: "围绕“企业智能办公助手”场景，突出会议纪要、OCR识别、智能审单、数据决策等能力，强调可在进出口企业真实业务中落地。",
     keywords: "进出口企业, 智能办公, 会议纪要, OCR识别, 智能审单",
   },
-  ppt: {
-    analysisInput: "PPT主题：进出口企业智能办公升级方案\n汇报目标：向管理层说明当前问题、建设思路、预期收益和推进计划。\n希望重点突出：效率提升、风险控制、跨部门协同和数据决策价值。",
+  mail: {
+    originalEmail: "原始来信摘要：客户确认收到报价，但希望你补充交期、付款条件和售后支持说明。\n当前目标：在今天内回复，并推动对方确认样品单。",
+    replyPoints: "1. 确认已收到对方需求\n2. 明确交期与付款节点\n3. 补充附件/资料说明\n4. 引导客户确认下一步动作",
+    emailConstraints: "保持专业礼貌；信息准确；不要承诺未确认的价格或库存；如缺少信息请保留占位符。",
   },
-  email: {
+  consulting: {
     consultingContext: "公司准备将智能办公系统用于进出口业务全流程，需要给出可执行的落地建议。",
     consultingConstraints: "预算有限；需分阶段实施；合规优先；兼容现有流程。",
   },
@@ -1109,7 +1140,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const [historyRenderTarget, setHistoryRenderTarget] = useState(INITIAL_MESSAGE_COUNT);
 
   // ✨ [新增] 模型后端状态 (local | cloud)
-  const [llmBackend, setLlmBackend] = useState('local');
+  const [llmBackend, setLlmBackend] = useState('cloud');
   const [isBackendDropdownOpen, setIsBackendDropdownOpen] = useState(false); // ✨ 后端选择下拉状态
 
 
@@ -2357,6 +2388,87 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       return Array.from(bucket.values());
   };
 
+  const normalizeAuditHistoryIssueEntry = (value, index = 0) => {
+      if (!value) return null;
+      if (typeof value === 'string') {
+          const text = String(value).trim();
+          if (!text || text === '未发现明确问题') return null;
+          return {
+              id: `issue-${index}`,
+              severity: '',
+              source: '',
+              sourceLabel: '历史摘要',
+              title: text,
+              message: text,
+              reason: '',
+              suggestion: '',
+              confidence: null,
+              evidenceText: '',
+              highlight: '',
+              actual: null,
+              expected: null,
+              ruleId: '',
+              documentName: '',
+          };
+      }
+      if (typeof value !== 'object') return null;
+      const severity = String(value.severity || value.level || '').trim().toLowerCase();
+      const sourceKey = normalizeAuditHistorySourceKey(value.source || value.source_key || value.type || value.channel) || '';
+      const documentName = String(value.document_name || value.documentName || '').trim();
+      const rawTitle = String(
+          value.title
+          || value.message
+          || value.name
+          || value.rule_name
+          || value.ruleName
+          || '风险项'
+      ).trim();
+      const title = documentName && rawTitle && !rawTitle.startsWith(`${documentName}：`)
+          ? `${documentName}：${rawTitle}`
+          : rawTitle;
+      const evidenceRaw = value.evidence || value.evidence_text || value.evidenceText || '';
+      const evidenceText = typeof evidenceRaw === 'string'
+          ? evidenceRaw
+          : String(evidenceRaw?.text || '').trim();
+      const highlight = typeof evidenceRaw === 'string'
+          ? String(value.highlight || '').trim()
+          : String(evidenceRaw?.highlight || value.highlight || '').trim();
+      const confidence = Number(value.confidence);
+      const normalized = {
+          id: String(value.id || value.rule_id || value.ruleId || `${sourceKey || 'issue'}-${index}`),
+          severity,
+          source: sourceKey,
+          sourceLabel: String(value.source_label || value.sourceLabel || AUDIT_HISTORY_SOURCE_LABELS[sourceKey] || '风险项').trim(),
+          title: title || '风险项',
+          message: String(value.message || rawTitle || '').trim(),
+          reason: String(value.reason || '').trim(),
+          suggestion: String(value.suggestion || '').trim(),
+          confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : null,
+          evidenceText: evidenceText.slice(0, 4000),
+          highlight: highlight.slice(0, 200),
+          actual: value.actual ?? null,
+          expected: value.expected ?? null,
+          ruleId: String(value.rule_id || value.ruleId || '').trim(),
+          documentName,
+      };
+      if (!normalized.title && !normalized.message && !normalized.reason && !normalized.suggestion) return null;
+      return normalized;
+  };
+
+  const buildAuditHistoryIssueItems = (result) => {
+      if (!result || typeof result !== 'object') return [];
+      const findings = Array.isArray(result.findings) ? result.findings : [];
+      const severityRank = { high: 3, medium: 2, low: 1 };
+      return findings
+          .map((item, index) => normalizeAuditHistoryIssueEntry(item, index))
+          .filter(Boolean)
+          .sort(
+              (left, right) =>
+                  (severityRank[String(right?.severity || '').toLowerCase()] || 0)
+                  - (severityRank[String(left?.severity || '').toLowerCase()] || 0)
+          );
+  };
+
   const buildAuditHistorySourceSummary = (result) => {
       if (!result || typeof result !== 'object') return [];
       const findings = Array.isArray(result.findings) ? result.findings : [];
@@ -2407,6 +2519,36 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const rawFileUrl = String(value.file_url || value.fileUrl || value.rawFileUrl || '').trim();
       const fileName = String(value.file_name || value.fileName || '').trim();
       const jobId = String(value.job_id || value.jobId || '').trim();
+      const caseId = String(value.case_id || value.caseId || '').trim();
+      const workflowState = String(value.workflow_state || value.workflowState || '').trim();
+      const summary = String(value.summary || '').trim();
+      const riskLevel = String(value.risk_level || value.riskLevel || '').trim().toLowerCase();
+      const findingBreakdown = value.finding_breakdown && typeof value.finding_breakdown === 'object'
+          ? value.finding_breakdown
+          : (value.findingBreakdown && typeof value.findingBreakdown === 'object' ? value.findingBreakdown : null);
+      const extractedFields = value.extracted_fields && typeof value.extracted_fields === 'object'
+          ? value.extracted_fields
+          : (value.extractedFields && typeof value.extractedFields === 'object' ? value.extractedFields : {});
+      const erpContext = value.erp_context && typeof value.erp_context === 'object'
+          ? value.erp_context
+          : (value.erpContext && typeof value.erpContext === 'object' ? value.erpContext : {});
+      const historyIntelligence = value.history_intelligence && typeof value.history_intelligence === 'object'
+          ? value.history_intelligence
+          : (value.historyIntelligence && typeof value.historyIntelligence === 'object' ? value.historyIntelligence : {});
+      const caseSummary = value.case_summary && typeof value.case_summary === 'object'
+          ? value.case_summary
+          : (value.caseSummary && typeof value.caseSummary === 'object' ? value.caseSummary : {});
+      const decisionTrace = Array.isArray(value.decision_trace || value.decisionTrace)
+          ? (value.decision_trace || value.decisionTrace)
+          : [];
+      const erpChecks = Array.isArray(value.erp_checks || value.erpChecks)
+          ? (value.erp_checks || value.erpChecks)
+          : [];
+      const recognizedDocType = String(value.recognized_doc_type || value.recognizedDocType || '').trim();
+      const recognizedDocTypeLabel = String(value.recognized_doc_type_label || value.recognizedDocTypeLabel || '').trim();
+      const recognizedDocSubtype = String(value.recognized_doc_subtype || value.recognizedDocSubtype || '').trim();
+      const recognizedDocSubtypeLabel = String(value.recognized_doc_subtype_label || value.recognizedDocSubtypeLabel || '').trim();
+      const nextAction = String(value.next_action || value.nextAction || '').trim();
       const primaryDocument = normalizeAuditHistoryDocument(value);
       const rawDocuments = Array.isArray(value.documents || value.case_documents || value.caseDocuments)
           ? (value.documents || value.case_documents || value.caseDocuments)
@@ -2420,17 +2562,40 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           || value.dataSources
           || []
       );
+      const issues = (Array.isArray(value.issues || value.problem_items || value.problemItems || value.findings)
+          ? (value.issues || value.problem_items || value.problemItems || value.findings)
+          : [])
+          .map((item, index) => normalizeAuditHistoryIssueEntry(item, index))
+          .filter(Boolean);
       if (primaryDocument && !documents.some((doc) => `${doc.rawFileUrl}|${doc.fileName}|${doc.jobId}` === `${primaryDocument.rawFileUrl}|${primaryDocument.fileName}|${primaryDocument.jobId}`)) {
           documents.unshift(primaryDocument);
       }
-      if (!primaryDocument && !documents.length && !dataSources.length) return null;
+      if (!primaryDocument && !documents.length && !dataSources.length && !issues.length) return null;
       return {
           rawFileUrl,
           sourceUrl: primaryDocument?.sourceUrl || '',
           fileName: fileName || primaryDocument?.fileName || '原始单据',
           jobId,
+          caseId,
+          workflowState,
+          summary,
+          riskLevel,
+          findingBreakdown,
+          isCaseReport: Boolean(value.is_case_report || value.isCaseReport || documents.length > 1),
           documents,
           dataSources,
+          issues,
+          extractedFields,
+          erpContext,
+          historyIntelligence,
+          caseSummary,
+          decisionTrace,
+          erpChecks,
+          recognizedDocType,
+          recognizedDocTypeLabel,
+          recognizedDocSubtype,
+          recognizedDocSubtypeLabel,
+          nextAction,
       };
   };
 
@@ -2438,16 +2603,20 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       state = auditState,
       fileRef = auditFile,
       fallbackMeta = auditHistoryMeta
-  ) => normalizeAuditHistoryMeta({
-      file_url: state?.file_url || state?.result?.file_url || fallbackMeta?.rawFileUrl || '',
-      file_name: state?.file_name || state?.result?.file_name || fileRef?.name || fallbackMeta?.fileName || '',
-      job_id: state?.jobId || fallbackMeta?.jobId || '',
-      documents: (
-          state?.result?.is_case_report
-            ? (Array.isArray(state?.caseDocuments) ? state.caseDocuments : [])
-            : (Array.isArray(fallbackMeta?.documents) ? fallbackMeta.documents : [])
-      )
-  });
+  ) => {
+      const issueItems = buildAuditHistoryIssueItems(state?.result);
+      return normalizeAuditHistoryMeta({
+          file_url: state?.file_url || state?.result?.file_url || fallbackMeta?.rawFileUrl || '',
+          file_name: state?.file_name || state?.result?.file_name || fileRef?.name || fallbackMeta?.fileName || '',
+          job_id: state?.jobId || fallbackMeta?.jobId || '',
+          documents: (
+              state?.result?.is_case_report
+                ? (Array.isArray(state?.caseDocuments) ? state.caseDocuments : [])
+                : (Array.isArray(fallbackMeta?.documents) ? fallbackMeta.documents : [])
+          ),
+          issues: issueItems.length > 0 ? issueItems : (Array.isArray(fallbackMeta?.issues) ? fallbackMeta.issues : []),
+      });
+  };
 
   const buildAuditSessionMetaPayload = (
       state = auditState,
@@ -2460,6 +2629,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
           file_url: normalized.rawFileUrl || '',
           file_name: normalized.fileName,
           job_id: normalized.jobId || state?.jobId || '',
+          case_id: state?.caseId || state?.result?.case_summary?.case_id || fallbackMeta?.caseId || '',
+          workflow_state: state?.result?.workflow_state || state?.workflow_state || fallbackMeta?.workflowState || '',
+          summary: state?.result?.summary || fallbackMeta?.summary || '',
+          risk_level: state?.result?.risk_level || fallbackMeta?.riskLevel || '',
+          finding_breakdown: state?.result?.finding_breakdown || fallbackMeta?.findingBreakdown || null,
+          is_case_report: Boolean(state?.result?.is_case_report || normalized.isCaseReport || fallbackMeta?.isCaseReport),
           documents: (normalized.documents || []).map((doc) => ({
               file_url: doc.rawFileUrl || '',
               file_name: doc.fileName || '',
@@ -2475,6 +2650,215 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               label: item.label,
               count: item.count || 0,
           })),
+          issues: (normalized.issues || []).map((item) => ({
+              id: item.id,
+              severity: item.severity || '',
+              source: item.source || '',
+              source_label: item.sourceLabel || '',
+              title: item.title || '',
+              message: item.message || '',
+              reason: item.reason || '',
+              suggestion: item.suggestion || '',
+              confidence: item.confidence,
+              evidence_text: item.evidenceText || '',
+              highlight: item.highlight || '',
+              actual: item.actual,
+              expected: item.expected,
+              rule_id: item.ruleId || '',
+              document_name: item.documentName || '',
+          })),
+          extracted_fields: state?.result?.extracted_fields || fallbackMeta?.extractedFields || {},
+          erp_context: state?.result?.erp_context || fallbackMeta?.erpContext || {},
+          history_intelligence: state?.result?.history_intelligence || fallbackMeta?.historyIntelligence || {},
+          case_summary: state?.result?.case_summary || fallbackMeta?.caseSummary || {},
+          decision_trace: Array.isArray(state?.result?.decision_trace)
+              ? state.result.decision_trace
+              : (Array.isArray(fallbackMeta?.decisionTrace) ? fallbackMeta.decisionTrace : []),
+          erp_checks: Array.isArray(state?.result?.erp_checks)
+              ? state.result.erp_checks
+              : (Array.isArray(fallbackMeta?.erpChecks) ? fallbackMeta.erpChecks : []),
+          recognized_doc_type: state?.result?.recognized_doc_type || fallbackMeta?.recognizedDocType || '',
+          recognized_doc_type_label: state?.result?.recognized_doc_type_label || fallbackMeta?.recognizedDocTypeLabel || '',
+          recognized_doc_subtype: state?.result?.recognized_doc_subtype || fallbackMeta?.recognizedDocSubtype || '',
+          recognized_doc_subtype_label: state?.result?.recognized_doc_subtype_label || fallbackMeta?.recognizedDocSubtypeLabel || '',
+          next_action: state?.result?.next_action || fallbackMeta?.nextAction || '',
+      };
+  };
+
+  const inferAuditRiskLevelFromIssues = (issues = []) => {
+      const severities = (Array.isArray(issues) ? issues : []).map((item) => String(item?.severity || '').toLowerCase());
+      if (severities.includes('high')) return 'high';
+      if (severities.includes('medium')) return 'medium';
+      return 'low';
+  };
+
+  const buildAuditFindingBreakdownFromIssues = (issues = []) => {
+      const bySeverity = { high: 0, medium: 0, low: 0 };
+      const bySource = {};
+      (Array.isArray(issues) ? issues : []).forEach((item) => {
+          const severity = String(item?.severity || 'low').toLowerCase();
+          const source = String(item?.source || 'rule').toLowerCase();
+          if (Object.prototype.hasOwnProperty.call(bySeverity, severity)) {
+              bySeverity[severity] += 1;
+          } else {
+              bySeverity.low += 1;
+          }
+          bySource[source] = (bySource[source] || 0) + 1;
+      });
+      return {
+          total: Array.isArray(issues) ? issues.length : 0,
+          by_severity: bySeverity,
+          by_source: bySource,
+      };
+  };
+
+  const extractAuditSummaryFromHistoryText = (content = '') => {
+      const text = String(content || '').trim();
+      if (!text) return '';
+      const summaryLine = text.split(/\r?\n/).find((line) => line.trim().startsWith('摘要：'));
+      if (summaryLine) return summaryLine.replace(/^摘要：\s*/, '').trim();
+      const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
+      return firstLine.replace(/^【智能审单】/, '').trim();
+  };
+
+  const buildAuditStateFromHistoryMeta = (meta, content = '') => {
+      if (!meta) return null;
+      const documents = (Array.isArray(meta.documents) ? meta.documents : []).map((doc) => ({
+          file_url: doc?.rawFileUrl || '',
+          file_name: doc?.fileName || '',
+          job_id: doc?.jobId || '',
+          doc_type: doc?.docType || '',
+          status: doc?.status || 'done',
+      }));
+      const findings = (Array.isArray(meta.issues) ? meta.issues : []).map((item) => ({
+          severity: item?.severity || 'low',
+          source: item?.source || 'rule',
+          source_label: item?.sourceLabel || '',
+          title: item?.title || item?.message || '风险项',
+          message: item?.message || item?.title || '风险项',
+          reason: item?.reason || '',
+          suggestion: item?.suggestion || '',
+          confidence: item?.confidence,
+          evidence: {
+              text: item?.evidenceText || '',
+              highlight: item?.highlight || '',
+          },
+          evidence_text: item?.evidenceText || '',
+          highlight: item?.highlight || '',
+          actual: item?.actual,
+          expected: item?.expected,
+          rule_id: item?.ruleId || '',
+          document_name: item?.documentName || '',
+      }));
+      const riskLevel = meta.riskLevel || inferAuditRiskLevelFromIssues(findings);
+      const findingBreakdown = meta.findingBreakdown || buildAuditFindingBreakdownFromIssues(findings);
+      const summary = meta.summary || extractAuditSummaryFromHistoryText(content);
+      const extractedFields = meta.extractedFields && typeof meta.extractedFields === 'object' ? meta.extractedFields : {};
+      const erpContext = meta.erpContext && typeof meta.erpContext === 'object' ? meta.erpContext : {};
+      const historyIntelligence = meta.historyIntelligence && typeof meta.historyIntelligence === 'object' ? meta.historyIntelligence : {};
+      const storedCaseSummary = meta.caseSummary && typeof meta.caseSummary === 'object' ? meta.caseSummary : {};
+      const normalizedCaseDocuments = (Array.isArray(storedCaseSummary.documents) ? storedCaseSummary.documents : documents).map((doc) => ({
+          file_url: doc?.file_url || doc?.rawFileUrl || '',
+          file_name: doc?.file_name || doc?.fileName || '',
+          job_id: doc?.job_id || doc?.jobId || '',
+          doc_type: doc?.doc_type || doc?.docType || '',
+          status: doc?.status || 'done',
+      }));
+      const synthesizedDocumentReports = documents.map((doc) => {
+          const relatedFindings = findings.filter((item) => {
+              const documentName = String(item?.document_name || '').trim();
+              if (!documentName) return documents.length === 1;
+              return documentName === String(doc?.file_name || '').trim();
+          });
+          const documentRiskLevel = inferAuditRiskLevelFromIssues(relatedFindings);
+          return {
+              file_name: doc?.file_name || '原始单据',
+              doc_type: doc?.doc_type || '',
+              status: doc?.status || 'done',
+              summary: relatedFindings[0]?.message || '',
+              findings_count: relatedFindings.length,
+              risk_level: documentRiskLevel,
+              pass: documentRiskLevel === 'low',
+          };
+      });
+      const documentReports = Array.isArray(storedCaseSummary.document_reports) && storedCaseSummary.document_reports.length > 0
+          ? storedCaseSummary.document_reports
+          : synthesizedDocumentReports;
+      const completenessPresent = normalizedCaseDocuments.map((doc) => doc?.doc_type || doc?.file_name || 'document').filter(Boolean);
+      const caseCompleteness = storedCaseSummary.completeness && typeof storedCaseSummary.completeness === 'object'
+          ? storedCaseSummary.completeness
+          : {
+              total_documents: normalizedCaseDocuments.length,
+              present: completenessPresent,
+              required: completenessPresent,
+              missing: [],
+              complete: normalizedCaseDocuments.length > 0,
+          };
+      const decisionTrace = Array.isArray(meta.decisionTrace) && meta.decisionTrace.length > 0
+          ? meta.decisionTrace
+          : [
+              {
+                  step: '历史恢复',
+                  detail: summary || '已从历史记录恢复审单结果',
+              },
+              {
+                  step: '风险判定',
+                  detail: `风险等级：${riskLevel || 'low'}；风险项：${findings.length} 条`,
+              },
+              ...(Array.isArray(meta.dataSources) && meta.dataSources.length > 0
+                  ? [{
+                      step: '数据来源',
+                      detail: meta.dataSources.map((item) => `${item?.label || item?.key || '数据源'}${item?.count ? `(${item.count})` : ''}`).join(' / '),
+                  }]
+                  : []),
+          ];
+      const mergedHistoryIntelligence = {
+          similar_cases: Array.isArray(historyIntelligence.similar_cases) ? historyIntelligence.similar_cases : [],
+          duplicate_signals: Array.isArray(historyIntelligence.duplicate_signals) ? historyIntelligence.duplicate_signals : [],
+          vendor_history: historyIntelligence.vendor_history && typeof historyIntelligence.vendor_history === 'object' ? historyIntelligence.vendor_history : {},
+      };
+
+      return {
+          status: 'done',
+          jobId: meta.jobId || null,
+          caseId: meta.caseId || null,
+          caseDocuments: normalizedCaseDocuments,
+          progress: 100,
+          stage: 'report',
+          workflow_state: meta.workflowState || 'done',
+          result: {
+              file_url: meta.rawFileUrl || '',
+              file_name: meta.fileName || '',
+              workflow_state: meta.workflowState || 'done',
+              summary,
+              risk_level: riskLevel,
+              pass: riskLevel === 'low',
+              findings,
+              finding_breakdown: findingBreakdown,
+              is_case_report: Boolean(meta.isCaseReport || normalizedCaseDocuments.length > 1),
+              case_summary: {
+                  case_id: storedCaseSummary.case_id || meta.caseId || '',
+                  documents: normalizedCaseDocuments,
+                  document_reports: documentReports,
+                  completeness: caseCompleteness,
+                  failed_count: storedCaseSummary.failed_count || 0,
+                  pending_count: storedCaseSummary.pending_count || 0,
+              },
+              history_intelligence: mergedHistoryIntelligence,
+              decision_trace: decisionTrace,
+              erp_context: erpContext,
+              erp_checks: Array.isArray(meta.erpChecks) ? meta.erpChecks : [],
+              extracted_fields: extractedFields,
+              recognized_doc_type: meta.recognizedDocType || extractedFields.doc_type || '',
+              recognized_doc_type_label: meta.recognizedDocTypeLabel || '',
+              recognized_doc_subtype: meta.recognizedDocSubtype || extractedFields.doc_subtype || '',
+              recognized_doc_subtype_label: meta.recognizedDocSubtypeLabel || '',
+              next_action: meta.nextAction || '',
+          },
+          file_url: meta.rawFileUrl || '',
+          file_name: meta.fileName || '',
+          error: null,
+          error_message: null,
       };
   };
 
@@ -3545,7 +3929,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       let targetModel = 0;
       let targetMode = 'general';
       let loadedAudioPath = null;
-      let savedBackend = 'local';
+      let savedBackend = 'cloud';
       let savedAuditMeta = null;
       let savedOcrWorkspaceView = 'ocr';
 
@@ -3627,6 +4011,10 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       setHistoryHasMoreServer(Boolean(messagePage.hasMore));
       scheduleHistoryExpand();
       const isSealHistorySession = targetModel === 2 && savedOcrWorkspaceView === 'seal';
+      const restoredAuditMeta = targetModel === 4 ? (latestAuditEntry?.historyMeta || savedAuditMeta) : null;
+      const restoredAuditState = targetModel === 4
+        ? buildAuditStateFromHistoryMeta(restoredAuditMeta, latestAuditEntry?.content || contextMsg?.content || '')
+        : null;
       setPanelContent(
         isStandalonePptHistory
           ? ''
@@ -3635,7 +4023,17 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             : (isSealHistorySession ? '' : (contextMsg ? contextMsg.content : '')))
       );
       setAuditHistoryEntries(targetModel === 4 ? auditEntries : []);
-      setAuditHistoryMeta(targetModel === 4 ? (latestAuditEntry?.historyMeta || savedAuditMeta) : null);
+      setAuditHistoryMeta(restoredAuditMeta);
+      if (targetModel === 4 && restoredAuditState) {
+        auditHistorySavedRef.current = restoredAuditState.jobId || '__history_restored__';
+        setAuditState(restoredAuditState);
+        setAuditFile(restoredAuditState.file_name ? {
+          name: restoredAuditState.file_name,
+          size: 0,
+          type: 'history/audit',
+          lastModified: 0,
+        } : null);
+      }
       currentSessionIdRef.current = sessionId;
       setCurrentSessionId(sessionId);
       setOcrWorkspaceView(isSealHistorySession ? 'seal' : 'ocr');
@@ -3810,6 +4208,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   const handleNewChat = () => {
       setChatHistory([]);
       setFeedbackState({});
+      setLlmBackend('cloud');
       currentSessionIdRef.current = null;
       sealHistoryPersistSignatureRef.current = '';
       resetHistoryPaginationState();
@@ -3963,7 +4362,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       }
   }, [userProfile.id]);
 
-  const saveSessionMeta = useCallback(async (sid, modelId, mode, audioPath = null, backend = 'local', extraMeta = null) => {
+  const saveSessionMeta = useCallback(async (sid, modelId, mode, audioPath = null, backend = 'cloud', extraMeta = null) => {
     if (!sid) return;
     try {
         const metaObj = {
@@ -5221,6 +5620,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
             files: attachedFileNames,
             // ✨ 传递用户选择的后端 (local / cloud)
             model_backend: effectiveBackend,
+            hide_user_message: !!options?.hideUserMessage,
             personalization: buildChatPersonalizationPayload(appSettings)
          };
 
@@ -5642,38 +6042,46 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const listOrNone = (items) => (Array.isArray(items) && items.length ? items.join('、') : '无');
       let prompt = "";
       const chosenBackend = reportFormData.modelBackend || llmBackend;
-      if (reportType === 'report') {
+      const activeType = normalizeWritingAssistantType(reportType, 'report');
+      if (activeType === 'report') {
           const minWords = Math.max(100, Number(reportFormData.minWords) || 200);
           prompt = `[指令:创意内容生成]\n项目背景：${WRITING_PROJECT_CONTEXT}\n我要写一个：${reportFormData.contentType || WRITING_CONTENT_TYPE_OPTIONS[0]}\n发布平台：${reportFormData.platform || WRITING_PLATFORM_OPTIONS[0]}\n目标人群：${listOrNone(reportFormData.targetAudiences)}\n语气风格：${reportFormData.tone || WRITING_TONE_OPTIONS[0]}\n字数不少于：${minWords}\n参考内容：${reportFormData.referenceContent || '无'}\n包含关键词：${reportFormData.keywords || '无'}\n是否允许适量emoji：${reportFormData.withEmoji ? '是' : '否'}\n请输出以下内容（使用中文，Markdown结构清晰）：\n1) 标题候选 3 个\n2) 正文 1 篇（至少 ${minWords} 字）\n3) 末尾行动引导（CTA）\n4) 适合该平台的标签/话题建议\n要求：必须结合“进出口企业办公协同”与本项目能力，不要写成泛泛的互联网文案。`;
-      } else if (reportType === 'ppt') {
-          const minWords = Math.max(200, Number(reportFormData.analysisMinWords) || 350);
-          const pptFocusConfig = getStandalonePptContentFocusConfig(reportFormData.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
+      } else if (activeType === 'mail') {
+          const minWords = Math.max(180, Number(reportFormData.emailMinWords) || 260);
+          const emailLanguageConfig = getWritingEmailLanguageConfig(reportFormData.emailLanguage);
           prompt = [
-              `[指令:PPT内容策划]`,
-              `项目背景：${WRITING_PROJECT_CONTEXT}`,
-              `内容导向：${pptFocusConfig.label}`,
+              `[指令:起草邮件]`,
+              `邮件任务：企业回复邮件`,
+              `适用范围：通用企业商务往来邮件，不预设任何具体产品、系统或项目背景；只有在用户提供的上下文里明确出现时，才能写入相关背景。`,
+              `邮件场景：${reportFormData.emailScene || WRITING_EMAIL_SCENE_OPTIONS[0]}`,
+              `收件对象：${reportFormData.receiverRole || WRITING_EMAIL_RECIPIENT_OPTIONS[0]}`,
+              `语气风格：${reportFormData.emailTone || WRITING_EMAIL_TONE_OPTIONS[0]}`,
+              `输出语言：${emailLanguageConfig.label}`,
               `字数不少于：${minWords}`,
-              `输入信息：${reportFormData.analysisInput || '无'}`,
-              `是否要求丰富数据指标：${reportFormData.requireMetrics ? '是' : '否'}`,
-              ...pptFocusConfig.promptLines,
-              "请输出一份适合直接制作成 PPT 的中文内容方案（Markdown）：",
-              "1) 演示标题与副标题",
-              "2) 适合开场页呈现的 3 条核心结论",
-              "3) 推荐目录（6-8 个章节）",
-              "4) 每个章节建议的页标题与 3-5 条页面要点",
-              "5) 建议补充的数据、案例或图表表达",
-              "6) 结尾页的行动建议、决策诉求或总结收束",
-              pptFocusConfig.emphasizeMetrics
-                  ? "要求：尽量补充效率、成本、时效、准确率、转化率、ROI 等可验证指标，避免只有观点没有支撑。"
-                  : "要求：尽量补充步骤、案例、注意事项和实操建议，确保内容适合讲解和培训场景。",
-              "表达要求：标题更像结论，正文更像提纲，适合直接转成页级演示内容，不要写成传统长篇报告。",
+              `原始来信/上下文：${reportFormData.originalEmail || '无'}`,
+              `必须回复的要点：${reportFormData.replyPoints || '无'}`,
+              `补充约束：${reportFormData.emailConstraints || '无'}`,
+              `署名/身份：${reportFormData.senderSignature || '无'}`,
+              emailLanguageConfig.promptLine,
+              "请直接输出一封可直接发送的企业回复邮件成稿。",
+              "输出格式要求：第一行直接给出邮件主题；空一行后直接写称呼、正文、结尾和署名。",
+              "不要输出“推荐邮件主题”“邮件正文”“下一步动作”“说明”这类栏目标题，不要写成提纲或分析报告。",
+              reportFormData.includeSubjectSuggestions
+                  ? "在完整邮件成稿之后，可以额外补充 2 个简短的主题备选，但不要影响主邮件正文的完整性。"
+                  : "除邮件成稿本身外，不要额外输出主题备选或解释说明。",
+              "要求：正文必须优先覆盖确认、解释、承诺、附件说明、下一步动作和时间节点，不要写成咨询方案或PPT提纲。",
+              "要求：如关键信息缺失，请用明确占位符标注，不要虚构价格、交期、库存、法规等事实。",
+              emailLanguageConfig.isBilingual
+                  ? "双语要求：请先输出中文完整邮件，再输出英文完整邮件，两封邮件都必须是可直接发送的最终成稿。"
+                  : `语言要求：最终正文和主题都必须使用 ${emailLanguageConfig.label} 输出。`,
+              "企业邮件要求：整体语气要像真实企业往来邮件，兼顾礼貌、效率与可执行性。",
           ].join('\n');
-      } else if (reportType === 'email') {
+      } else if (activeType === 'consulting') {
           const minWords = Math.max(200, Number(reportFormData.consultingMinWords) || 300);
           prompt = `[指令:建议咨询]\n项目背景：${WRITING_PROJECT_CONTEXT}\n咨询类型：${reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]}\n面向对象：${reportFormData.consultingRole || WRITING_CONSULTING_ROLE_OPTIONS[0]}\n输出形式偏好：${reportFormData.outputFormat || WRITING_OUTPUT_FORMAT_OPTIONS[0]}\n字数不少于：${minWords}\n业务背景：${reportFormData.consultingContext || '无'}\n约束条件：${reportFormData.consultingConstraints || '无'}\n是否需要分阶段时间表：${reportFormData.includeTimeline ? '是' : '否'}\n请给出一份可执行建议方案（Markdown）：\n1) 问题定义\n2) 方案建议（含优先级）\n3) 风险与应对\n4) 关键指标/KPI\n5) 执行步骤与负责人建议\n${reportFormData.includeTimeline ? '6) 分阶段时间表（周/月）' : ''}\n要求：建议必须贴合进出口企业场景，不要空泛。`;
       }
       if (!prompt.trim()) return;
-      handleSendMessage(prompt, false, { modelBackend: chosenBackend });
+      handleSendMessage(prompt, true, { modelBackend: chosenBackend, hideUserMessage: true });
   };
 
   const resolveStandalonePptInput = () => {
@@ -6812,7 +7220,8 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
   const buildDefaultReportFormData = (type, backend) => {
       const resolvedBackend = backend || llmBackend;
-      if (type === 'report') {
+      const resolvedType = normalizeWritingAssistantType(type, 'report');
+      if (resolvedType === 'report') {
           return {
               modelBackend: resolvedBackend,
               contentType: WRITING_CONTENT_TYPE_OPTIONS[0],
@@ -6825,15 +7234,19 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               withEmoji: true,
           };
       }
-      if (type === 'ppt') {
-          const defaultFocus = getStandalonePptContentFocusConfig(STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
+      if (resolvedType === 'mail') {
           return {
               modelBackend: resolvedBackend,
-              contentFocus: defaultFocus.key,
-              pptSlideCount: 6,
-              analysisMinWords: 350,
-              analysisInput: "",
-              requireMetrics: !!defaultFocus.emphasizeMetrics,
+              emailScene: WRITING_EMAIL_SCENE_OPTIONS[0],
+              receiverRole: WRITING_EMAIL_RECIPIENT_OPTIONS[0],
+              emailTone: WRITING_EMAIL_TONE_OPTIONS[0],
+              emailLanguage: WRITING_EMAIL_DEFAULT_LANGUAGE,
+              emailMinWords: 260,
+              originalEmail: "",
+              replyPoints: "",
+              emailConstraints: "",
+              senderSignature: "",
+              includeSubjectSuggestions: false,
           };
       }
       return {
@@ -6902,11 +7315,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   }, [writingEntryMode]);
 
   const applyReportType = (nextType) => {
-      if (!nextType) return;
-      setReportType(nextType);
+      const resolvedType = normalizeWritingAssistantType(nextType, '');
+      if (!resolvedType) return;
+      setReportType(resolvedType);
       setReportFormData((prev) => {
           const existingBackend = prev?.modelBackend || llmBackend;
-          return buildDefaultReportFormData(nextType, existingBackend);
+          return buildDefaultReportFormData(resolvedType, existingBackend);
       });
       setReportAudienceInput('');
       setIsPresentonGenerating(false);
@@ -6933,7 +7347,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   };
 
   const clearCurrentWritingForm = () => {
-      const activeType = reportType || 'report';
+      const activeType = normalizeWritingAssistantType(reportType, 'report');
       const backend = reportFormData?.modelBackend || llmBackend;
       setReportFormData(buildDefaultReportFormData(activeType, backend));
       setReportAudienceInput('');
@@ -8137,12 +8551,12 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
   };
 
   const renderReportWizard = () => {
-      const activeType = reportType || 'report';
+      const activeType = normalizeWritingAssistantType(reportType, 'report');
       const backend = reportFormData.modelBackend || llmBackend;
       const tabs = [
           { key: 'report', label: '创意内容生成', desc: '营销文案、功能发布', icon: FileText, activeClass: 'bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-900/30 dark:text-blue-200 dark:border-blue-500/50' },
-          { key: 'ppt', label: 'PPT内容策划', desc: '按演示结构生成内容', icon: Layout, activeClass: 'bg-indigo-50 text-indigo-700 border-indigo-300 dark:bg-indigo-900/30 dark:text-indigo-200 dark:border-indigo-500/50' },
-          { key: 'email', label: '建议/咨询', desc: '面向团队的落地方案', icon: Mail, activeClass: 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-900/30 dark:text-emerald-200 dark:border-emerald-500/50' },
+          { key: 'mail', label: '邮件助手', desc: '企业回复邮件，多语种输出', icon: Mail, activeClass: 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-900/30 dark:text-emerald-200 dark:border-emerald-500/50' },
+          { key: 'consulting', label: '建议/咨询', desc: '面向团队的落地方案', icon: TrendingUp, activeClass: 'bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-900/25 dark:text-amber-200 dark:border-amber-500/50' },
       ];
       const activeMeta = tabs.find((item) => item.key === activeType) || tabs[0];
       const labelClass = 'text-sm font-medium text-gray-700 dark:text-gray-200';
@@ -8150,7 +8564,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
       const textareaClass = `${inputClass} min-h-[110px] resize-y`;
       const writingSuggestions = WRITING_FIELD_SUGGESTIONS[activeType] || {};
       const audiences = Array.isArray(reportFormData.targetAudiences) ? reportFormData.targetAudiences : [];
-      const selectedPptFocus = getStandalonePptContentFocusConfig(reportFormData.contentFocus || STANDALONE_PPT_DEFAULT_CONTENT_FOCUS);
+      const selectedEmailLanguage = getWritingEmailLanguageConfig(reportFormData.emailLanguage);
 
       const updateField = (field, value) => {
           setReportFormData((prev) => ({ ...prev, [field]: value }));
@@ -8164,12 +8578,13 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
               ['语气风格', reportFormData.tone || WRITING_TONE_OPTIONS[0]],
               ['最少字数', `${Math.max(100, Number(reportFormData.minWords) || 200)} 字`],
             ]
-          : activeType === 'ppt'
+          : activeType === 'mail'
               ? [
-                  ['内容导向', selectedPptFocus.label],
-                  ['最少字数', `${Math.max(200, Number(reportFormData.analysisMinWords) || 350)} 字`],
-                  ['信息输入', reportFormData.analysisInput ? `已填写 ${String(reportFormData.analysisInput).length} 字` : '未填写'],
-                  ['内容提示', selectedPptFocus.description],
+                  ['邮件场景', reportFormData.emailScene || WRITING_EMAIL_SCENE_OPTIONS[0]],
+                  ['收件对象', reportFormData.receiverRole || WRITING_EMAIL_RECIPIENT_OPTIONS[0]],
+                  ['输出语言', selectedEmailLanguage.label],
+                  ['语气风格', reportFormData.emailTone || WRITING_EMAIL_TONE_OPTIONS[0]],
+                  ['原始来信', reportFormData.originalEmail ? `已填写 ${String(reportFormData.originalEmail).length} 字` : '未填写'],
                 ]
               : [
                   ['咨询类型', reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]],
@@ -8177,6 +8592,11 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                   ['输出形式', reportFormData.outputFormat || WRITING_OUTPUT_FORMAT_OPTIONS[0]],
                   ['最少字数', `${Math.max(200, Number(reportFormData.consultingMinWords) || 300)} 字`],
                 ];
+      const generationHint = activeType === 'report'
+          ? '点击“立即生成”后，会在对话区输出内容初稿。后续可继续追问细化，保持当前所有写作功能不变。'
+          : activeType === 'mail'
+              ? '点击“立即生成”后，会在对话区输出企业邮件回复初稿。你可以继续追问修改语气、补充附件说明，或切换输出语言。'
+              : '点击“立即生成”后，会在对话区输出建议方案。后续可继续追问补充负责人、时间表或KPI。';
 
       if (reportStep === 'selection') {
           return (
@@ -8315,29 +8735,45 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               </>
                           )}
 
-                          {activeType === 'ppt' && (
+                          {activeType === 'mail' && (
                               <>
                                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                      <label className="space-y-1.5"><span className={labelClass}>内容导向</span><select className={inputClass} value={selectedPptFocus.key} onChange={(event) => {
-                                          const nextFocus = getStandalonePptContentFocusConfig(event.target.value);
-                                          setReportFormData((prev) => ({
-                                              ...prev,
-                                              contentFocus: nextFocus.key,
-                                              requireMetrics: !!nextFocus.emphasizeMetrics,
-                                          }));
-                                      }}>{STANDALONE_PPT_CONTENT_FOCUS_OPTIONS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label>
-                                      <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={200} max={5000} className={inputClass} value={reportFormData.analysisMinWords ?? 350} onChange={(event) => updateField('analysisMinWords', event.target.value)} /></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>邮件场景</span><select className={inputClass} value={reportFormData.emailScene || WRITING_EMAIL_SCENE_OPTIONS[0]} onChange={(event) => updateField('emailScene', event.target.value)}>{WRITING_EMAIL_SCENE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>收件对象</span><select className={inputClass} value={reportFormData.receiverRole || WRITING_EMAIL_RECIPIENT_OPTIONS[0]} onChange={(event) => updateField('receiverRole', event.target.value)}>{WRITING_EMAIL_RECIPIENT_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                  </div>
+                                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                      <label className="space-y-1.5"><span className={labelClass}>输出语言</span><select className={inputClass} value={selectedEmailLanguage.value} onChange={(event) => updateField('emailLanguage', event.target.value)}>{WRITING_EMAIL_LANGUAGE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>语气风格</span><select className={inputClass} value={reportFormData.emailTone || WRITING_EMAIL_TONE_OPTIONS[0]} onChange={(event) => updateField('emailTone', event.target.value)}>{WRITING_EMAIL_TONE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
+                                      <label className="space-y-1.5"><span className={labelClass}>字数不少于(字)</span><input type="number" min={180} max={5000} className={inputClass} value={reportFormData.emailMinWords ?? 260} onChange={(event) => updateField('emailMinWords', event.target.value)} /></label>
                                   </div>
                                   <label className="space-y-1.5 block">
-                                      <span className={labelClass}>相关信息输入</span>
-                                      <textarea className={textareaClass} maxLength={2000} placeholder={writingSuggestions.analysisInput || '选填。输入汇报主题、业务背景、现状问题、目标和希望重点展开的方向。'} value={reportFormData.analysisInput || ''} onChange={(event) => updateField('analysisInput', event.target.value)} />
-                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.analysisInput || '').length} / 2000</span>
+                                      <span className={labelClass}>原始来信 / 业务上下文</span>
+                                      <textarea className={textareaClass} maxLength={2200} placeholder={writingSuggestions.originalEmail || '选填。可粘贴客户邮件、内部转述、往来背景或上一轮沟通摘要。'} value={reportFormData.originalEmail || ''} onChange={(event) => updateField('originalEmail', event.target.value)} />
+                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.originalEmail || '').length} / 2200</span>
                                   </label>
-                                  <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.requireMetrics} onChange={(event) => updateField('requireMetrics', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />要求结合丰富的数据指标</label>
+                                  <label className="space-y-1.5 block">
+                                      <span className={labelClass}>本次必须回复的要点</span>
+                                      <textarea className={textareaClass} maxLength={1200} placeholder={writingSuggestions.replyPoints || '选填。逐条写出必须覆盖的关键信息、承诺事项、附件说明、下一步动作等。'} value={reportFormData.replyPoints || ''} onChange={(event) => updateField('replyPoints', event.target.value)} />
+                                      <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.replyPoints || '').length} / 1200</span>
+                                  </label>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                      <label className="space-y-1.5 block">
+                                          <span className={labelClass}>补充约束 / 不能说的话</span>
+                                          <textarea className={textareaClass} maxLength={900} placeholder={writingSuggestions.emailConstraints || '选填。输入不能承诺的内容、合规限制、库存/价格注意事项或需要保留占位符的字段。'} value={reportFormData.emailConstraints || ''} onChange={(event) => updateField('emailConstraints', event.target.value)} />
+                                          <span className="block text-right text-xs text-gray-400 dark:text-gray-500">{String(reportFormData.emailConstraints || '').length} / 900</span>
+                                      </label>
+                                      <div className="space-y-4">
+                                          <label className="space-y-1.5 block">
+                                              <span className={labelClass}>署名 / 发件人身份</span>
+                                              <input className={inputClass} maxLength={120} placeholder="例如：海外销售经理 / 项目负责人 / 采购协调人" value={reportFormData.senderSignature || ''} onChange={(event) => updateField('senderSignature', event.target.value)} />
+                                          </label>
+                                          <label className="inline-flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300"><input type="checkbox" checked={!!reportFormData.includeSubjectSuggestions} onChange={(event) => updateField('includeSubjectSuggestions', event.target.checked)} className="h-4 w-4 rounded border-gray-300 dark:border-gray-600" />给出多个邮件主题备选</label>
+                                      </div>
+                                  </div>
                               </>
                           )}
 
-                          {activeType === 'email' && (
+                          {activeType === 'consulting' && (
                               <>
                                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                       <label className="space-y-1.5"><span className={labelClass}>咨询类型</span><select className={inputClass} value={reportFormData.consultingType || WRITING_CONSULTING_TYPE_OPTIONS[0]} onChange={(event) => updateField('consultingType', event.target.value)}>{WRITING_CONSULTING_TYPE_OPTIONS.map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -8363,7 +8799,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
 
                           <div className="pt-4 border-t border-gray-200 dark:border-gray-700 flex items-center justify-end gap-2">
                               <button type="button" onClick={clearCurrentWritingForm} className="rounded-xl border border-gray-200 dark:border-gray-700 px-4 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800">一键清空</button>
-                              <button type="button" onClick={handleSubmitReportForm} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium text-white ${activeType === 'report' ? 'bg-blue-600 hover:bg-blue-700' : (activeType === 'ppt' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-emerald-600 hover:bg-emerald-700')}`}><Sparkles size={15} />立即生成</button>
+                              <button type="button" onClick={handleSubmitReportForm} className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium text-white ${activeType === 'report' ? 'bg-blue-600 hover:bg-blue-700' : (activeType === 'mail' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700')}`}><Sparkles size={15} />立即生成</button>
                           </div>
                       </div>
 
@@ -8384,7 +8820,7 @@ const DashboardPage = ({ onLogout, currentMode, onModeChange }) => {
                               ))}
                           </div>
                           <div className="mt-4 rounded-2xl border border-blue-100 dark:border-blue-900/40 bg-blue-50/70 dark:bg-blue-900/25 p-4 text-sm text-blue-700 dark:text-blue-200 leading-relaxed">
-                              点击“立即生成”后，会在对话区输出初稿。后续可继续追问细化，保持当前所有写作功能不变。
+                              {generationHint}
                           </div>
                       </div>
                   </div>

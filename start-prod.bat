@@ -13,7 +13,7 @@ if not defined NPM_CONFIG_CACHE (
 
 set "FRONTEND_PORT=%~1"
 if not defined FRONTEND_PORT set "FRONTEND_PORT=8080"
-if not defined FRONTEND_HOST set "FRONTEND_HOST=0.0.0.0"
+if not defined FRONTEND_HOST set "FRONTEND_HOST=127.0.0.1"
 set "BACKEND_PORT=%~2"
 if not defined BACKEND_PORT set "BACKEND_PORT=18011"
 set "API_TARGET=http://127.0.0.1:%BACKEND_PORT%"
@@ -50,22 +50,29 @@ if not defined OLLAMA_BASE_URL set "OLLAMA_BASE_URL=http://127.0.0.1:11434"
 if not defined OLLAMA_NUM_PARALLEL set "OLLAMA_NUM_PARALLEL=2"
 if not defined OLLAMA_MAX_QUEUE set "OLLAMA_MAX_QUEUE=128"
 
-set "OLLAMA_HOSTPORT=127.0.0.1:11434"
-for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$u=[uri]'%OLLAMA_BASE_URL%'; Write-Output ($u.Host + ':' + $u.Port)"`) do set "OLLAMA_HOSTPORT=%%A"
+call :refresh_ollama_hostport
+set "OLLAMA_LOG=%ROOT%\.runtime\ollama-start.log"
+if not exist "%ROOT%\.runtime" mkdir "%ROOT%\.runtime" >nul 2>&1
 
 echo [0/4] Ensuring local Ollama is running...
 echo [INFO] Ollama concurrency: parallel=%OLLAMA_NUM_PARALLEL%, max_queue=%OLLAMA_MAX_QUEUE%
-curl.exe -sS --max-time 2 "%OLLAMA_BASE_URL%/api/tags" >nul 2>&1
+curl.exe -fsS --max-time 2 "%OLLAMA_BASE_URL%/api/tags" >nul 2>&1
 if errorlevel 1 (
   where ollama >nul 2>&1
   if errorlevel 1 (
     echo [WARN] Ollama not found in PATH. Local model may be unavailable.
   ) else (
-    start "Enterprise Ollama (%OLLAMA_HOSTPORT%)" /min cmd /c "set OLLAMA_HOST=%OLLAMA_HOSTPORT%&& set OLLAMA_NUM_PARALLEL=%OLLAMA_NUM_PARALLEL%&& set OLLAMA_MAX_QUEUE=%OLLAMA_MAX_QUEUE%&& ollama serve"
+    del "%OLLAMA_LOG%" >nul 2>&1
+    start "Enterprise Ollama (%OLLAMA_HOSTPORT%)" /min cmd /c "set OLLAMA_HOST=%OLLAMA_HOSTPORT%&& set OLLAMA_NUM_PARALLEL=%OLLAMA_NUM_PARALLEL%&& set OLLAMA_MAX_QUEUE=%OLLAMA_MAX_QUEUE%&& ollama serve >> ""%OLLAMA_LOG%"" 2>&1"
+    echo [INFO] Waiting for Ollama to become ready at %OLLAMA_BASE_URL%...
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
       "$ok=$false; for($i=0;$i -lt 20;$i++){ try { Invoke-RestMethod -Method Get -Uri '%OLLAMA_BASE_URL%/api/tags' -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
     if errorlevel 1 (
       echo [WARN] Ollama did not become ready at %OLLAMA_BASE_URL%.
+      if exist "%OLLAMA_LOG%" (
+        echo [WARN] Recent Ollama log:
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Path '%OLLAMA_LOG%' -Tail 20"
+      )
     ) else (
       echo [INFO] Ollama is ready at %OLLAMA_BASE_URL%.
     )
@@ -123,7 +130,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "if (Get-NetTCPConnection -State Listen -LocalPort %BACKEND_PORT% -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
 if errorlevel 1 (
   echo [1/2] Starting backend on %BACKEND_PORT%...
-  start "Enterprise Backend (%BACKEND_PORT%)" cmd /k "cd /d ""%ROOT%\Backend"" && set PYTHONUTF8=1 && set BACKEND_PORT=%BACKEND_PORT% && set OLLAMA_BASE_URL=%OLLAMA_BASE_URL% && .venv\Scripts\python.exe -X utf8 main.py"
+  start "Enterprise Backend (%BACKEND_PORT%)" cmd /k "cd /d ""%ROOT%\Backend"" && set PYTHONUTF8=1 && set BACKEND_PORT=%BACKEND_PORT% && set OLLAMA_BASE_URL=%OLLAMA_BASE_URL% && set OLLAMA_API_BASE=%OLLAMA_BASE_URL% && .venv\Scripts\python.exe -X utf8 main.py"
 ) else (
   echo [INFO] Backend already listening on %BACKEND_PORT%, skip start.
 )
@@ -147,3 +154,8 @@ echo Supabase API: http://127.0.0.1:54321
 echo Supabase Studio: http://127.0.0.1:54323
 echo.
 exit /b 0
+
+:refresh_ollama_hostport
+set "OLLAMA_HOSTPORT=127.0.0.1:11434"
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$u=[uri]'%OLLAMA_BASE_URL%'; Write-Output ($u.Host + ':' + $u.Port)"`) do set "OLLAMA_HOSTPORT=%%A"
+goto :eof

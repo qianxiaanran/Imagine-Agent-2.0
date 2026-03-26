@@ -7,7 +7,6 @@ import {
   Loader2,
   Search,
 } from "lucide-react";
-import AuditHistoryPreview from "./AuditHistoryPreview";
 import AuditSourceFilesPanel from "../../components/AuditSourceFilesPanel";
 
 const OVERVIEW_TEXT = [
@@ -107,6 +106,13 @@ const historyVendorStatusLabel = (value = "") => {
   if (value === "active") return "活跃主体";
   if (value === "new") return "新主体";
   return value || "-";
+};
+
+const resolveAuditDocTypeLabel = (value = "", docTypes = []) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "-";
+  const matched = (Array.isArray(docTypes) ? docTypes : []).find((item) => String(item?.value || "").trim() === normalized);
+  return matched?.label || normalized;
 };
 
 const BASE_FIELD_SECTIONS = [
@@ -238,7 +244,6 @@ const AUDIT_STAGE_STEP_MAP = {
 
 const AuditWorkspace = ({
   panelStyle,
-  panelContent,
   docTypes,
   docType,
   onDocTypeChange,
@@ -246,8 +251,6 @@ const AuditWorkspace = ({
   onAuditModelBackendChange,
   onFileSelect,
   auditState,
-  auditHistoryMeta,
-  auditHistoryEntries,
   auditFile,
   onReset,
   onErpAction,
@@ -286,10 +289,10 @@ const AuditWorkspace = ({
   const riskLevel = String(result.risk_level || "low").toLowerCase();
   const riskLabel = riskLevel === "high" ? "高风险" : (riskLevel === "medium" ? "中风险" : "低风险");
   const riskClass = riskBadgeClass(riskLevel);
-  const historyText = typeof panelContent === "string" ? panelContent.trim() : "";
-  const showHistory = !isBusy && !isDone && !isFailed && !!historyText;
   const showRetainedReportWhileBusy = isBusy && hasAuditResult && activeCaseDocCount > 0;
   const showAuditReport = hasAuditResult && !isFailed && (isDone || showRetainedReportWhileBusy);
+  const hasStartedAuditCase = Boolean(activeCaseId || activeCaseDocCount > 0 || hasAuditResult || (auditFile && auditState?.jobId));
+  const showAuditSetupCards = !hasStartedAuditCase;
   const openFilePicker = () => {
     if (isBusy) return;
     fileInputRef.current?.click();
@@ -315,6 +318,65 @@ const AuditWorkspace = ({
   const vendorHistory = (historyIntelligence.vendor_history && typeof historyIntelligence.vendor_history === "object") ? historyIntelligence.vendor_history : {};
   const recognizedDocType = String(result.recognized_doc_type || extracted.doc_type || "").toLowerCase();
   const docFieldSections = [...BASE_FIELD_SECTIONS, ...(DOC_FIELD_SECTIONS[recognizedDocType] || [])];
+  const workflow = String(result.workflow_state || auditState?.workflow_state || status || "idle").toLowerCase();
+  const workflowLabelMap = {
+    idle: "待处理",
+    uploading: "文件上传中",
+    pending: "排队中",
+    pending_docs: "待补件",
+    ocr: "文本解析中",
+    extract: "字段抽取中",
+    extracting: "字段抽取中",
+    rules: "规则校核中",
+    rule_checking: "规则校核中",
+    ai: "AI复核中",
+    ai_review: "AI复核中",
+    review: "结果汇总中",
+    report: "报告输出中",
+    aggregating: "报告输出中",
+    review_required: "需人工复核",
+    review_optional: "建议抽检",
+    ready_for_erp: "可回写ERP",
+    erp_pending_sync: "ERP同步中",
+    done: "已完成",
+    failed: "失败",
+  };
+  const workflowLabel = workflowLabelMap[workflow] || workflow || "待处理";
+  const selectedDocTypeLabel = (docTypes || []).find((item) => item.value === docType)?.label || "自动识别";
+  const modelLabel = auditModelBackend === "cloud" ? "云端审单" : "本地审单";
+  const aggregateDocTypeLabels = Array.from(new Set(
+    [...caseDocuments, ...documentReports]
+      .map((item) => item?.doc_type_label || item?.doc_type || item?.docType || "")
+      .map((item) => resolveAuditDocTypeLabel(item, docTypes))
+      .filter((item) => item && item !== "-")
+  ));
+  const aggregateDocNames = [...caseDocuments, ...documentReports]
+    .map((item) => item?.file_name || item?.fileName || "")
+    .filter(Boolean);
+  const aggregateSuggestion = result.next_action
+    || (riskLevel === "high"
+      ? "建议整包人工复核后再执行ERP回写"
+      : riskLevel === "medium"
+        ? "建议按风险项逐份复核后再执行ERP回写"
+        : "建议按整包结果执行ERP回写");
+  const effectiveDecisionTrace = Array.isArray(decisionTrace) && decisionTrace.length > 0
+    ? decisionTrace
+    : [
+      {
+        step: isCaseAggregateReport ? "案件归集" : "结果恢复",
+        detail: isCaseAggregateReport
+          ? `当前审单包共 ${caseDocuments.length || documentReports.length || 0} 份单据${aggregateDocTypeLabels.length ? `，类型：${aggregateDocTypeLabels.join(" / ")}` : ""}`
+          : (result.summary || "已生成审单结果"),
+      },
+      {
+        step: "风险汇总",
+        detail: `风险等级：${riskLabel}；高${findingBreakdown?.by_severity?.high || 0} / 中${findingBreakdown?.by_severity?.medium || 0} / 低${findingBreakdown?.by_severity?.low || 0}`,
+      },
+      {
+        step: "处理建议",
+        detail: aggregateSuggestion,
+      },
+    ];
 
   const warningRows = sortedFindings
     .filter((item) => {
@@ -323,7 +385,9 @@ const AuditWorkspace = ({
       return text.includes(keyword.trim().toLowerCase());
     })
     .map((item, idx) => {
-      const evidence = item?.evidence || {};
+      const evidenceRaw = item?.evidence || item?.evidence_text || item?.evidenceText || {};
+      const evidenceText = typeof evidenceRaw === "string" ? evidenceRaw : (evidenceRaw?.text || "");
+      const highlight = typeof evidenceRaw === "string" ? String(item?.highlight || "") : (evidenceRaw?.highlight || item?.highlight || "");
       const docName = typeof item?.document_name === "string" ? item.document_name.trim() : "";
       const baseTitle = item?.message || "规则命中";
       const resolvedTitle = docName && !String(baseTitle).startsWith(`${docName}：`) ? `${docName}：${baseTitle}` : baseTitle;
@@ -337,8 +401,8 @@ const AuditWorkspace = ({
         reason: item?.reason || "",
         suggestion: item?.suggestion || "",
         confidence: confidenceText(item?.confidence),
-        evidenceText: typeof evidence === "string" ? evidence : (evidence?.text || ""),
-        highlight: typeof evidence === "string" ? "" : (evidence?.highlight || ""),
+        evidenceText,
+        highlight,
         actual: item?.actual,
         expected: item?.expected,
       };
@@ -347,25 +411,78 @@ const AuditWorkspace = ({
   const effectiveRiskId = selectedRiskId || warningRows[0]?.id || "";
   const selectedRisk = warningRows.find((r) => r.id === effectiveRiskId) || null;
 
-  const fieldChecks = docFieldSections.flatMap((section, sectionIdx) =>
-    (section.items || []).map((item, idx) => {
-      const rawValue = item.source === "result" ? result?.[item.key] : extracted?.[item.key];
-      const value = formatValue(rawValue);
-      const pass = rawValue !== null && rawValue !== undefined && rawValue !== "";
-      return {
-        id: `field-${sectionIdx}-${idx}`,
-        group: section.group,
-        name: item.name,
-        value,
-        requirement: item.requirement,
-        pass,
-        actual: value,
-        expected: item.requirement,
-        evidence: pass ? `${item.name}：${value}` : `${item.name}未提取到值`,
-        highlight: pass ? String(value) : "",
-      };
-    })
-  );
+  const fieldChecks = isCaseAggregateReport
+    ? [
+      {
+        id: "aggregate-field-type",
+        group: "整包画像",
+        name: "识别类型",
+        value: "整包审单结果",
+        requirement: "应识别为整包案件汇总结果",
+        pass: true,
+        actual: "整包审单结果",
+        expected: "整包案件汇总结果",
+        evidence: `当前案件包含 ${caseDocuments.length || documentReports.length || 0} 份单据${aggregateDocNames.length ? `：${aggregateDocNames.join(" / ")}` : ""}`,
+        highlight: "整包审单结果",
+      },
+      {
+        id: "aggregate-field-subtype",
+        group: "整包画像",
+        name: "细分类",
+        value: aggregateDocTypeLabels.join(" / ") || `${caseDocuments.length || documentReports.length || 0}份单据`,
+        requirement: "应明确整包内单据构成",
+        pass: aggregateDocTypeLabels.length > 0 || caseDocuments.length > 0 || documentReports.length > 0,
+        actual: aggregateDocTypeLabels.join(" / ") || "未识别",
+        expected: "应识别出整包中的单据类型组合",
+        evidence: aggregateDocNames.length
+          ? aggregateDocNames.map((name, idx) => `${name} · ${aggregateDocTypeLabels[idx] || "待识别"}`).join("\n")
+          : "当前整包结果未返回逐单据画像",
+        highlight: aggregateDocTypeLabels[0] || "",
+      },
+      {
+        id: "aggregate-field-workflow",
+        group: "整包画像",
+        name: "流程状态",
+        value: workflowLabel,
+        requirement: "应生成明确的处理流转状态",
+        pass: Boolean(workflowLabel),
+        actual: workflowLabel,
+        expected: "应生成明确的处理流转状态",
+        evidence: `流程状态：${workflowLabel}；已完成 ${documentReports.filter((item) => String(item?.status || "").toLowerCase() === "done").length}/${documentReports.length || caseDocuments.length || 0} 份`,
+        highlight: workflowLabel,
+      },
+      {
+        id: "aggregate-field-next-action",
+        group: "整包画像",
+        name: "系统建议",
+        value: aggregateSuggestion,
+        requirement: "应给出下一步处理动作",
+        pass: true,
+        actual: aggregateSuggestion,
+        expected: "应给出下一步处理动作",
+        evidence: result.summary || `整包风险等级为${riskLabel}，建议结合各单据风险项逐份复核后再执行回写动作。`,
+        highlight: aggregateSuggestion,
+      },
+    ]
+    : docFieldSections.flatMap((section, sectionIdx) =>
+      (section.items || []).map((item, idx) => {
+        const rawValue = item.source === "result" ? result?.[item.key] : extracted?.[item.key];
+        const value = formatValue(rawValue);
+        const pass = rawValue !== null && rawValue !== undefined && rawValue !== "";
+        return {
+          id: `field-${sectionIdx}-${idx}`,
+          group: section.group,
+          name: item.name,
+          value,
+          requirement: item.requirement,
+          pass,
+          actual: value,
+          expected: item.requirement,
+          evidence: pass ? `${item.name}：${value}` : `${item.name}未提取到值`,
+          highlight: pass ? String(value) : "",
+        };
+      })
+    );
   const erpRows = erpChecks.map((item, idx) => ({
       id: `erp-${idx}`,
       group: "财务审单",
@@ -484,32 +601,6 @@ const AuditWorkspace = ({
   ];
 
   const widthClass = fullWidth ? "md:w-full md:border-r-0" : "md:w-1/2 md:border-r";
-  const workflow = String(result.workflow_state || auditState?.workflow_state || status || "idle").toLowerCase();
-  const workflowLabelMap = {
-    idle: "待处理",
-    uploading: "文件上传中",
-    pending: "排队中",
-    pending_docs: "待补件",
-    ocr: "文本解析中",
-    extract: "字段抽取中",
-    extracting: "字段抽取中",
-    rules: "规则校核中",
-    rule_checking: "规则校核中",
-    ai: "AI复核中",
-    ai_review: "AI复核中",
-    review: "结果汇总中",
-    report: "报告输出中",
-    aggregating: "报告输出中",
-    review_required: "需人工复核",
-    review_optional: "建议抽检",
-    ready_for_erp: "可回写ERP",
-    erp_pending_sync: "ERP同步中",
-    done: "已完成",
-    failed: "失败",
-  };
-  const workflowLabel = workflowLabelMap[workflow] || workflow || "待处理";
-  const selectedDocTypeLabel = (docTypes || []).find((item) => item.value === docType)?.label || "自动识别";
-  const modelLabel = auditModelBackend === "cloud" ? "云端审单" : "本地审单";
   const uploadCardTitle = canAppendToCase ? "继续向当前审单包添加文件" : "点击整个区域上传审单文件";
   const uploadCardDescription = canAppendToCase
     ? "新文件会继续归入当前案件，上下文、整包汇总和跨单据核对会自动延续。"
@@ -552,6 +643,9 @@ const AuditWorkspace = ({
     duplicateSignals.length > 0 ? `已提前发现 ${duplicateSignals.length} 项历史重复信号。` : "",
     auditState?.caseId ? `当前 Case：${auditState.caseId}` : "",
   ].filter(Boolean);
+  const caseActionDescription = canAppendToCase
+    ? "上传后的文件会继续并入当前 case，系统会沿用当前案件上下文、跨单据核对和整包汇总结果。"
+    : "当前 case 正在处理中，完成后即可继续上传新的关联文件。";
 
   return (
     <div className={`w-full ${widthClass} flex flex-col flex-shrink-0 border-b md:border-b-0 border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 transition-all duration-300 ${panelStyle.border} shadow-sm z-20`}>
@@ -561,7 +655,7 @@ const AuditWorkspace = ({
         <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">合同上传识别、风险预警、审核报告、溯源分析一体化工作台</div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs">
           <span className="px-2 py-1 rounded-full border border-slate-300 dark:border-slate-700 bg-white/85 dark:bg-slate-900 text-slate-700 dark:text-slate-100">流程状态：{workflowLabel}</span>
-          {isDone && <span className={`px-2 py-1 rounded-full border ${riskClass}`}>{riskLabel}</span>}
+          {isDone && <span className={`inline-flex items-center whitespace-nowrap px-2 py-1 rounded-full border ${riskClass}`}>{riskLabel}</span>}
           {isBusy && <span className="px-2 py-1 rounded-full border border-cyan-200 text-cyan-700 dark:border-cyan-800 dark:text-cyan-300"><Loader2 size={12} className="inline mr-1 animate-spin" />处理中</span>}
         </div>
       </div>
@@ -569,109 +663,138 @@ const AuditWorkspace = ({
       <div className="flex-1 p-4 overflow-y-auto custom-scrollbar space-y-4">
         {notice && <div className="rounded-xl border border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300 text-xs px-3 py-2">{notice}</div>}
 
-        <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-2">
-          {OVERVIEW_TEXT.map((line, idx) => <p key={idx} className="text-sm text-slate-600 dark:text-slate-300 leading-6">{line}</p>)}
-        </section>
+        {showAuditSetupCards ? (
+          <>
+            <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-2">
+              {OVERVIEW_TEXT.map((line, idx) => <p key={idx} className="text-sm text-slate-600 dark:text-slate-300 leading-6">{line}</p>)}
+            </section>
 
-        <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
-            <div className="w-full px-4 py-3 border-b border-slate-100 dark:border-slate-800">
-              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">审单设置</div>
-            </div>
-            <div className="px-4 pb-4 space-y-3">
-              <div className="pt-3">
-                <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">单据类型</div>
-                <div className="flex flex-wrap gap-2">
-                  {(docTypes || []).map((item) => (
-                    <button key={item.value} type="button" disabled={isBusy} onClick={() => onDocTypeChange && onDocTypeChange(item.value)} className={`px-3 py-1.5 rounded-full text-xs border ${docType === item.value ? "bg-cyan-600 border-cyan-600 text-white" : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300"}`}>{item.label}</button>
-                  ))}
+            <section className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+                <div className="w-full px-4 py-3 border-b border-slate-100 dark:border-slate-800">
+                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">审单设置</div>
                 </div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">审单模型</div>
-                <div className="flex gap-2">
-                  {["local", "cloud"].map((item) => (
-                    <button key={item} type="button" disabled={isBusy} onClick={() => onAuditModelBackendChange && onAuditModelBackendChange(item)} className={`px-3 py-1.5 rounded-full text-xs border ${auditModelBackend === item ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900" : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300"}`}>{item === "local" ? "本地" : "云端"}</button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div
-            role="button"
-            tabIndex={isBusy ? -1 : 0}
-            aria-disabled={isBusy}
-            onClick={openFilePicker}
-            onKeyDown={handleUploadCardKeyDown}
-            className={`rounded-2xl border-2 border-dashed p-5 min-h-[180px] bg-gradient-to-r transition-colors ${
-              isBusy
-                ? "border-slate-200 dark:border-slate-700 from-slate-100 to-white dark:from-slate-900/60 dark:to-slate-800/50 cursor-not-allowed opacity-80"
-                : "border-slate-300 dark:border-slate-600 from-slate-50 to-white dark:from-slate-900/70 dark:to-slate-800/60 cursor-pointer hover:border-cyan-400 dark:hover:border-cyan-500"
-            }`}
-          >
-            <div className="h-full flex flex-col items-center justify-center text-center">
-              <div className="w-12 h-12 rounded-2xl bg-slate-900 text-white dark:bg-white dark:text-slate-900 flex items-center justify-center">
-                <FileUp size={20} />
-              </div>
-              <div className="mt-4 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                {uploadCardTitle}
-              </div>
-              <div className="mt-1 max-w-md text-sm text-slate-600 dark:text-slate-300">
-                {uploadCardDescription}
-              </div>
-              <div className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-                {uploadCardHint}
-              </div>
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openFilePicker();
-                }}
-                disabled={isBusy}
-                className="mt-4 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-black text-white text-xs font-semibold disabled:opacity-50"
-              >
-                选择文件
-              </button>
-              {auditFile && (
-                <div className="mt-3 w-full max-w-xl space-y-2">
-                  <div className="max-w-full truncate text-xs text-slate-500 dark:text-slate-400">
-                    {isBatchUpload ? `当前处理：${auditFile.name} · ${auditFile.sizeLabel}` : `${auditFile.name} · ${auditFile.sizeLabel}`}
-                  </div>
-                  {auditQueue.length > 0 && (
-                    <div className="flex flex-wrap justify-center gap-2">
-                      {auditQueue.map((item, index) => {
-                        const itemStatus = String(item?.status || "queued").toLowerCase();
-                        const statusClass = itemStatus === "done"
-                          ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300"
-                          : itemStatus === "failed"
-                            ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
-                            : ["uploading", "pending", "running"].includes(itemStatus)
-                              ? "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/50 dark:bg-cyan-950/30 dark:text-cyan-300"
-                              : "border-slate-200 bg-white text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300";
-                        const statusLabel = itemStatus === "done"
-                          ? "已完成"
-                          : itemStatus === "failed"
-                            ? "失败"
-                            : ["uploading", "pending", "running"].includes(itemStatus)
-                              ? "处理中"
-                              : "待处理";
-                        return (
-                          <div key={item?.id || `${item?.name || "file"}-${index}`} className={`max-w-full rounded-full border px-3 py-1 text-[11px] ${statusClass}`}>
-                            <span className="font-medium">{index + 1}. {item?.name || "未命名文件"}</span>
-                            <span className="ml-2 opacity-80">{statusLabel}</span>
-                          </div>
-                        );
-                      })}
+                <div className="px-4 pb-4 space-y-3">
+                  <div className="pt-3">
+                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">单据类型</div>
+                    <div className="flex flex-wrap gap-2">
+                      {(docTypes || []).map((item) => (
+                        <button key={item.value} type="button" disabled={isBusy} onClick={() => onDocTypeChange && onDocTypeChange(item.value)} className={`px-3 py-1.5 rounded-full text-xs border ${docType === item.value ? "bg-cyan-600 border-cyan-600 text-white" : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300"}`}>{item.label}</button>
+                      ))}
                     </div>
-                  )}
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">审单模型</div>
+                    <div className="flex gap-2">
+                      {["local", "cloud"].map((item) => (
+                        <button key={item} type="button" disabled={isBusy} onClick={() => onAuditModelBackendChange && onAuditModelBackendChange(item)} className={`px-3 py-1.5 rounded-full text-xs border ${auditModelBackend === item ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900" : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300"}`}>{item === "local" ? "本地" : "云端"}</button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              )}
+              </div>
+
+              <div
+                role="button"
+                tabIndex={isBusy ? -1 : 0}
+                aria-disabled={isBusy}
+                onClick={openFilePicker}
+                onKeyDown={handleUploadCardKeyDown}
+                className={`rounded-2xl border-2 border-dashed p-5 min-h-[180px] bg-gradient-to-r transition-colors ${
+                  isBusy
+                    ? "border-slate-200 dark:border-slate-700 from-slate-100 to-white dark:from-slate-900/60 dark:to-slate-800/50 cursor-not-allowed opacity-80"
+                    : "border-slate-300 dark:border-slate-600 from-slate-50 to-white dark:from-slate-900/70 dark:to-slate-800/60 cursor-pointer hover:border-cyan-400 dark:hover:border-cyan-500"
+                }`}
+              >
+                <div className="h-full flex flex-col items-center justify-center text-center">
+                  <div className="w-12 h-12 rounded-2xl bg-slate-900 text-white dark:bg-white dark:text-slate-900 flex items-center justify-center">
+                    <FileUp size={20} />
+                  </div>
+                  <div className="mt-4 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    {uploadCardTitle}
+                  </div>
+                  <div className="mt-1 max-w-md text-sm text-slate-600 dark:text-slate-300">
+                    {uploadCardDescription}
+                  </div>
+                  <div className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                    {uploadCardHint}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openFilePicker();
+                    }}
+                    disabled={isBusy}
+                    className="mt-4 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-black text-white text-xs font-semibold disabled:opacity-50"
+                  >
+                    选择文件
+                  </button>
+                </div>
+              </div>
+            </section>
+          </>
+        ) : (
+          <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">当前审单 Case 持续审查中</div>
+                <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">{caseActionDescription}</div>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  {activeCaseId ? <span className="rounded-full border border-slate-200 dark:border-slate-700 px-2 py-1">Case：{activeCaseId}</span> : null}
+                  <span className="rounded-full border border-slate-200 dark:border-slate-700 px-2 py-1">已关联文件：{activeCaseDocCount || 1}</span>
+                  <span className="rounded-full border border-slate-200 dark:border-slate-700 px-2 py-1">工作流：{workflowLabel}</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={openFilePicker}
+                  disabled={!canAppendToCase}
+                  className="inline-flex items-center gap-2 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <FileUp size={16} />
+                  继续上传
+                </button>
+              </div>
             </div>
-            <input ref={fileInputRef} type="file" className="hidden" multiple accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={onFileSelect} disabled={isBusy} />
-          </div>
-        </section>
+            {auditFile && (
+              <div className="mt-4 space-y-2">
+                <div className="max-w-full truncate text-xs text-slate-500 dark:text-slate-400">
+                  {isBatchUpload ? `当前处理：${auditFile.name} · ${auditFile.sizeLabel}` : `${auditFile.name} · ${auditFile.sizeLabel}`}
+                </div>
+                {auditQueue.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {auditQueue.map((item, index) => {
+                      const itemStatus = String(item?.status || "queued").toLowerCase();
+                      const statusClass = itemStatus === "done"
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300"
+                        : itemStatus === "failed"
+                          ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+                          : ["uploading", "pending", "running"].includes(itemStatus)
+                            ? "border-cyan-200 bg-cyan-50 text-cyan-700 dark:border-cyan-900/50 dark:bg-cyan-950/30 dark:text-cyan-300"
+                            : "border-slate-200 bg-white text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300";
+                      const statusLabel = itemStatus === "done"
+                        ? "已完成"
+                        : itemStatus === "failed"
+                          ? "失败"
+                          : ["uploading", "pending", "running"].includes(itemStatus)
+                            ? "处理中"
+                            : "待处理";
+                      return (
+                        <div key={item?.id || `${item?.name || "file"}-${index}`} className={`max-w-full rounded-full border px-3 py-1 text-[11px] ${statusClass}`}>
+                          <span className="font-medium">{index + 1}. {item?.name || "未命名文件"}</span>
+                          <span className="ml-2 opacity-80">{statusLabel}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+        <input ref={fileInputRef} type="file" className="hidden" multiple accept="image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={onFileSelect} disabled={isBusy} />
 
         {isBusy && (
           <section className="rounded-[28px] border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden shadow-[0_20px_50px_-24px_rgba(15,23,42,0.35)]">
@@ -778,7 +901,6 @@ const AuditWorkspace = ({
             />
           </section>
         )}
-        {showHistory && <AuditHistoryPreview historyText={historyText} historyMeta={auditHistoryMeta} historyEntries={auditHistoryEntries} />}
         {showRetainedReportWhileBusy && (
           <section className="rounded-2xl border border-cyan-200 dark:border-cyan-900/60 bg-cyan-50/80 dark:bg-cyan-950/20 text-cyan-800 dark:text-cyan-200 p-4 text-sm">
             当前正在处理新文件，下面保留的是本审单包上一轮解析与核对结果。新文件完成后，整包比对会自动刷新。
@@ -811,7 +933,7 @@ const AuditWorkspace = ({
                     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/60 p-4 space-y-2">
                       {selectedRisk ? (
                         <>
-                          <div className={`inline-flex px-2 py-0.5 rounded-full border text-xs ${riskBadgeClass(selectedRisk.level)}`}>{selectedRisk.levelLabel}</div>
+                          <div className={`inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full border text-xs ${riskBadgeClass(selectedRisk.level)}`}>{selectedRisk.levelLabel}</div>
                           <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{selectedRisk.title}</div>
                           {selectedRisk.reason && <div className="text-xs text-slate-600 dark:text-slate-300">触发原因：{selectedRisk.reason}</div>}
                           {selectedRisk.suggestion && <div className="text-xs text-slate-600 dark:text-slate-300">建议：{selectedRisk.suggestion}</div>}
@@ -863,7 +985,7 @@ const AuditWorkspace = ({
                                     </div>
                                   </div>
                                   <div className="flex flex-col items-end gap-1">
-                                    <span className={`px-2 py-0.5 rounded-full border text-[11px] ${riskBadgeClass(itemRisk)}`}>
+                                    <span className={`inline-flex items-center whitespace-nowrap shrink-0 px-2 py-0.5 rounded-full border text-[11px] ${riskBadgeClass(itemRisk)}`}>
                                       {itemRisk === "high" ? "高风险" : itemRisk === "medium" ? "中风险" : "低风险"}
                                     </span>
                                     <span className="text-[11px] text-slate-500 dark:text-slate-400">{statusLabel}</span>
@@ -892,7 +1014,7 @@ const AuditWorkspace = ({
                           <button key={row.id} type="button" onClick={() => setSelectedReportId(row.id)} className={`w-full text-left p-3 border-t border-slate-100 dark:border-slate-800 ${effectiveReportId === row.id ? "bg-cyan-50 dark:bg-cyan-950/20" : ""}`}>
                             <div className="flex items-center justify-between gap-3">
                               <div className="text-xs text-slate-500 dark:text-slate-400">{row.group}</div>
-                              <span className={`px-2 py-0.5 rounded-full border text-[11px] ${row.pass ? riskBadgeClass("low") : riskBadgeClass("medium")}`}>{row.pass ? "已提取/通过" : "缺失/待复核"}</span>
+                              <span className={`inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full border text-[11px] ${row.pass ? riskBadgeClass("low") : riskBadgeClass("medium")}`}>{row.pass ? "已提取/通过" : "缺失/待复核"}</span>
                             </div>
                             <div className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">{row.name}</div>
                             <div className="text-xs text-slate-500 dark:text-slate-400">{row.value}</div>
@@ -904,7 +1026,7 @@ const AuditWorkspace = ({
                           <>
                             <div className="flex items-center gap-2">
                               <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{selectedReport.name}</div>
-                              <span className={`px-2 py-0.5 rounded-full border text-[11px] ${selectedReport.pass ? riskBadgeClass("low") : riskBadgeClass("medium")}`}>{selectedReport.pass ? "通过" : "待复核"}</span>
+                              <span className={`inline-flex items-center whitespace-nowrap px-2 py-0.5 rounded-full border text-[11px] ${selectedReport.pass ? riskBadgeClass("low") : riskBadgeClass("medium")}`}>{selectedReport.pass ? "通过" : "待复核"}</span>
                             </div>
                             <div className="text-xs text-slate-500 dark:text-slate-400">要求：{selectedReport.requirement}</div>
                             <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 dark:text-slate-300">
@@ -933,8 +1055,8 @@ const AuditWorkspace = ({
                     <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-slate-50 dark:bg-slate-900/60">
                       <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 mb-2">决策链路</div>
                       <div className="space-y-2 max-h-[320px] overflow-y-auto custom-scrollbar">
-                        {decisionTrace.map((item, idx) => <div key={idx} className="text-xs text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2">{item?.step || "step"}：{item?.detail || "-"}</div>)}
-                        {decisionTrace.length === 0 && <div className="text-xs text-slate-400">暂无链路数据</div>}
+                        {effectiveDecisionTrace.map((item, idx) => <div key={idx} className="text-xs text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-800 rounded-lg px-3 py-2">{item?.step || "step"}：{item?.detail || "-"}</div>)}
+                        {effectiveDecisionTrace.length === 0 && <div className="text-xs text-slate-400">暂无链路数据</div>}
                       </div>
                     </div>
                     <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-slate-50 dark:bg-slate-900/60">

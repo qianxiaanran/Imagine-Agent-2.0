@@ -5,7 +5,7 @@ import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import List, Tuple, Optional, Iterable, Set
+from typing import List, Tuple, Optional, Iterable, Set, Dict, Any
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from supabase_client import require_supabase
@@ -38,6 +38,9 @@ else:
 
 # 嵌入模型单例
 _embeddings = None
+SHARED_KB_SCOPE = "shared_kb"
+PRIVATE_VECTOR_TYPES = {"ocr", "memory"}
+SHARED_VECTOR_TYPES = {"knowledge_base", "kb", "document", "upload"}
 
 
 def _make_document(text: str, metadata: dict):
@@ -216,13 +219,63 @@ def _is_generic_summary_query(query: str) -> bool:
     return len(q) <= 48 or any(k in q for k in broad_keywords)
 
 
-def _get_recent_source_names(sb, user_id: str, max_sources: int = 2, scan_rows: int = 240) -> List[str]:
+def _normalize_metadata_type(metadata: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("type") or metadata.get("document_type") or "").strip().lower()
+
+
+def _normalize_metadata_scope(metadata: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("scope") or metadata.get("visibility") or "").strip().lower()
+
+
+def _metadata_matches_search_scope(
+    metadata: Optional[Dict[str, Any]],
+    user_id: str,
+    search_scope: str,
+) -> bool:
+    meta = dict(metadata or {})
+    normalized_scope = str(search_scope or SHARED_KB_SCOPE).strip().lower() or SHARED_KB_SCOPE
+    owner_user_id = str(meta.get("user_id") or "").strip()
+    doc_type = _normalize_metadata_type(meta)
+    doc_scope = _normalize_metadata_scope(meta)
+
+    if normalized_scope == "memory_private":
+        return owner_user_id == str(user_id or "").strip() and doc_type == "memory"
+
+    if normalized_scope == "user_private":
+        return owner_user_id == str(user_id or "").strip() and (
+            doc_type in PRIVATE_VECTOR_TYPES or doc_scope in {"private", "user_private"}
+        )
+
+    if doc_scope in {SHARED_KB_SCOPE, "shared", "public", "global", "kb_shared"}:
+        return True
+    if doc_type in PRIVATE_VECTOR_TYPES:
+        return owner_user_id == str(user_id or "").strip() and normalized_scope != SHARED_KB_SCOPE
+    if doc_type in SHARED_VECTOR_TYPES:
+        return True
+
+    # 兼容旧知识库数据：历史上传文档没有显式 type/scope，但会带 source/file_name/title/user_id。
+    if any(meta.get(key) for key in ("uploaded_at", "source", "file_name", "title")):
+        return normalized_scope == SHARED_KB_SCOPE
+
+    return False
+
+
+def _get_recent_source_names(
+    sb,
+    user_id: str,
+    max_sources: int = 2,
+    scan_rows: int = 240,
+    search_scope: str = SHARED_KB_SCOPE,
+) -> List[str]:
     rows = []
     try:
         rows = (
             sb.table("documents")
             .select("metadata, created_at")
-            .eq("metadata->>user_id", user_id)
             .order("created_at", desc=True)
             .limit(scan_rows)
             .execute()
@@ -232,7 +285,6 @@ def _get_recent_source_names(sb, user_id: str, max_sources: int = 2, scan_rows: 
             rows = (
                 sb.table("documents")
                 .select("metadata, id")
-                .eq("metadata->>user_id", user_id)
                 .order("id", desc=True)
                 .limit(scan_rows)
                 .execute()
@@ -244,6 +296,8 @@ def _get_recent_source_names(sb, user_id: str, max_sources: int = 2, scan_rows: 
     seen = set()
     for row in rows:
         metadata = dict(row.get("metadata") or {})
+        if not _metadata_matches_search_scope(metadata, user_id, search_scope):
+            continue
         source = (
             _normalize_source_name(metadata.get("source"))
             or _normalize_source_name(metadata.get("file_name"))
@@ -556,6 +610,8 @@ def upload_document_to_vector_store(file_bytes: bytes, filename: str, user_id: s
                 "source": display_name,
                 "file_name": file_name,
                 "title": title,
+                "type": "knowledge_base",
+                "scope": SHARED_KB_SCOPE,
                 "page": page_display,
                 "page_index": page_index,
                 "chunk_index": i,
@@ -618,6 +674,7 @@ def store_text_to_vector_store(
             metadata = {
                 "source": source,
                 "type": "ocr",
+                "scope": "user_private",
                 "user_id": user_id,
                 "timestamp": timestamp,
                 "page": 0,
@@ -692,7 +749,13 @@ def _content_boost(query: str, content: str) -> float:
     return 0.0
 
 
-def _fallback_documents_by_source(sb, user_id: str, source_names: List[str], k: int) -> List:
+def _fallback_documents_by_source(
+    sb,
+    user_id: str,
+    source_names: List[str],
+    k: int,
+    search_scope: str = SHARED_KB_SCOPE,
+) -> List:
     if not source_names:
         return []
 
@@ -706,7 +769,6 @@ def _fallback_documents_by_source(sb, user_id: str, source_names: List[str], k: 
             response = (
                 sb.table("documents")
                 .select("content, metadata")
-                .eq("metadata->>user_id", user_id)
                 .eq("metadata->>source", source_name)
                 .limit(per_source_limit)
                 .execute()
@@ -719,6 +781,8 @@ def _fallback_documents_by_source(sb, user_id: str, source_names: List[str], k: 
             if not content:
                 continue
             metadata = dict(row.get("metadata") or {})
+            if not _metadata_matches_search_scope(metadata, user_id, search_scope):
+                continue
             source = _normalize_source_name(metadata.get("source")) or source_name
             file_name = _normalize_source_name(metadata.get("file_name")) or source
             title = _normalize_source_name(metadata.get("title")) or file_name
@@ -753,10 +817,11 @@ def search_user_documents(
     match_threshold: float = 0.3,
     tags: Optional[List[str]] = None,
     source_files: Optional[List[str]] = None,
+    search_scope: str = SHARED_KB_SCOPE,
 ):
-    """Search user documents from vector store with optional source and tag filters."""
+    """Search documents from vector store with optional source and tag filters."""
     try:
-        print(f"[Search] user={user_id} query={query}", flush=True)
+        print(f"[Search] user={user_id} scope={search_scope} query={query}", flush=True)
 
         embeddings_model = get_embeddings()
         query_vector = embeddings_model.embed_query(query)
@@ -770,16 +835,25 @@ def search_user_documents(
 
         sb = require_supabase()
         summary_focus = (not source_filter_set) and _is_generic_summary_query(query)
-        recent_source_names = _get_recent_source_names(sb, user_id, max_sources=2) if summary_focus else []
+        recent_source_names = (
+            _get_recent_source_names(sb, user_id, max_sources=2, search_scope=search_scope)
+            if summary_focus else []
+        )
         recent_source_set = {name.lower() for name in recent_source_names}
 
-        fetch_multiplier = 8 if source_filter_set else (10 if summary_focus else 3)
+        normalized_scope = str(search_scope or SHARED_KB_SCOPE).strip().lower() or SHARED_KB_SCOPE
+        fetch_multiplier = 8 if source_filter_set else (12 if normalized_scope == SHARED_KB_SCOPE else (10 if summary_focus else 3))
         fetch_k = max(k * fetch_multiplier, k)
+        rpc_filter: Dict[str, Any] = {}
+        if normalized_scope == "memory_private":
+            rpc_filter = {"user_id": user_id, "type": "memory"}
+        elif normalized_scope == "user_private":
+            rpc_filter = {"user_id": user_id}
         rpc_params = {
             "query_embedding": query_vector,
             "match_threshold": float(match_threshold),
             "match_count": fetch_k,
-            "filter": {"user_id": user_id},
+            "filter": rpc_filter,
         }
 
         response = sb.rpc("match_documents", rpc_params).execute()
@@ -787,12 +861,12 @@ def search_user_documents(
         result_items = response.data or []
         if not result_items:
             if source_filter_names:
-                fallback_docs = _fallback_documents_by_source(sb, user_id, source_filter_names, k)
+                fallback_docs = _fallback_documents_by_source(sb, user_id, source_filter_names, k, search_scope=search_scope)
                 if fallback_docs:
                     print(f"[Search] fallback by source hit {len(fallback_docs)} chunks", flush=True)
                     return fallback_docs
             if summary_focus and recent_source_names:
-                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k)
+                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k, search_scope=search_scope)
                 if fallback_docs:
                     print(f"[Search] fallback by recent source hit {len(fallback_docs)} chunks", flush=True)
                     return fallback_docs
@@ -806,6 +880,8 @@ def search_user_documents(
         for item in result_items:
             content = item.get("content", "") or ""
             metadata = dict(item.get("metadata") or {})
+            if not _metadata_matches_search_scope(metadata, user_id, normalized_scope):
+                continue
 
             file_name = (
                 _normalize_source_name(metadata.get("file_name"))
@@ -856,12 +932,12 @@ def search_user_documents(
 
         if not scored_docs:
             if source_filter_names:
-                fallback_docs = _fallback_documents_by_source(sb, user_id, source_filter_names, k)
+                fallback_docs = _fallback_documents_by_source(sb, user_id, source_filter_names, k, search_scope=search_scope)
                 if fallback_docs:
                     print(f"[Search] fallback after filter hit {len(fallback_docs)} chunks", flush=True)
                     return fallback_docs
             if summary_focus and recent_source_names:
-                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k)
+                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k, search_scope=search_scope)
                 if fallback_docs:
                     print(f"[Search] fallback after summary filter hit {len(fallback_docs)} chunks", flush=True)
                     return fallback_docs
@@ -877,7 +953,7 @@ def search_user_documents(
             if recent_scored:
                 scored_docs = recent_scored
             elif recent_source_names:
-                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k)
+                fallback_docs = _fallback_documents_by_source(sb, user_id, recent_source_names, k, search_scope=search_scope)
                 if fallback_docs:
                     print(f"[Search] summary fallback to recent source returned {len(fallback_docs)} chunks", flush=True)
                     return fallback_docs

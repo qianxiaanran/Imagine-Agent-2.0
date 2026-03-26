@@ -273,6 +273,7 @@ class VectorMemory:
                     "source": self.MEMORY_SOURCE,
                     "user_id": user_id,
                     "type": "memory",
+                    "scope": "user_private",
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                     "importance": int(max(1, min(5, importance))),
                 },
@@ -285,7 +286,7 @@ class VectorMemory:
             return False, str(e)
 
     def retrieve(self, user_id: str, query: str, top_k: int = 5):
-        return search_user_documents(user_id, query, k=top_k)
+        return search_user_documents(user_id, query, k=top_k, search_scope="memory_private")
 
     def maybe_store_from_messages(self, user_id: str, messages: List[BaseMessage]):
         """轻量触发：只把更可能长期有用的信息写入长期记忆，避免污染。"""

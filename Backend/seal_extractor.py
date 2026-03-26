@@ -1097,15 +1097,23 @@ def _refine_crop_mask(roi_bgr: np.ndarray, seed_mask: np.ndarray, settings: Seal
         "detail": _cleanup_mask_components(detail_mask, support_zone),
     }
 
-    best_name = "hybrid"
-    best_mask = candidates["hybrid"]
-    best_score = float("-inf")
-    for name, candidate_mask in candidates.items():
-        candidate_score = _score_mask_quality(candidate_mask, blurred_response, support_zone, circle_support)
-        if candidate_score > best_score:
-            best_score = candidate_score
-            best_name = name
-            best_mask = candidate_mask
+    best_name = "balanced"
+    best_mask = candidates["balanced"]
+    best_score = _score_mask_quality(best_mask, blurred_response, support_zone, circle_support)
+
+    if int(np.count_nonzero(best_mask)) <= 0:
+        fallback_candidates = {
+            name: candidate_mask
+            for name, candidate_mask in candidates.items()
+            if name != "balanced"
+        }
+        best_score = float("-inf")
+        for name, candidate_mask in fallback_candidates.items():
+            candidate_score = _score_mask_quality(candidate_mask, blurred_response, support_zone, circle_support)
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_name = name
+                best_mask = candidate_mask
 
     if int(np.count_nonzero(best_mask)) <= 0:
         best_mask = _cleanup_mask_components(cv2.bitwise_or(seed, soft_mask), support_zone)
