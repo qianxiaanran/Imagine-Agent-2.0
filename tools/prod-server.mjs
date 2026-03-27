@@ -53,6 +53,7 @@ const COMPRESSIBLE_EXTENSIONS = new Set([
   ".map",
 ]);
 const COMPRESSION_MIN_BYTES = 1024;
+const MAX_COMPRESSION_CACHE_ENTRIES = 96;
 const compressionCache = new Map();
 
 function buildEtag(stat) {
@@ -119,6 +120,11 @@ function getCompressedPayload(filePath, stat, encoding) {
     : zlib.gzipSync(source, { level: 6 });
 
   compressionCache.set(cacheKey, buffer);
+  while (compressionCache.size > MAX_COMPRESSION_CACHE_ENTRIES) {
+    const oldestKey = compressionCache.keys().next().value;
+    if (!oldestKey) break;
+    compressionCache.delete(oldestKey);
+  }
   return buffer;
 }
 

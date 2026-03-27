@@ -12,6 +12,9 @@ __pycache__/
 .env
 .env.*
 .runtime/
+.runlogs/
+.codex_tmp/
+.tmp_compare/
 Backend/static/ocr/
 Backend/static/temp_audio/
 Backend/storage/
@@ -25,3 +28,6 @@ tmp_next_chunks/
 test-results/
 voice.wav
 frontend/src.zip
+artifacts/*.log
+artifacts/*.out.log
+artifacts/*.err.log

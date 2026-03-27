@@ -202,7 +202,6 @@ try:
     from ocr_task_manager import register_ocr_task, complete_ocr_task, fail_ocr_task, set_ocr_task_runner
     from seal_task_manager import register_seal_task, complete_seal_task, fail_seal_task
     from history_manager import save_context
-    import share_manager
     from report_email_manager import generate_report_outline, generate_email_draft
     from ocr_structured import parse_ocr_content, save_ocr_record
     from seal_extractor import extract_transparent_seal

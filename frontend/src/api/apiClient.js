@@ -45,9 +45,33 @@ const createApiError = (response, data, endpoint) => {
 };
 
 const parseResponseBody = async (response) => {
+  if (!response || response.status === 204 || response.status === 205) {
+    return null;
+  }
+
+  const contentLength = response.headers.get('content-length');
+  if (contentLength === '0') {
+    return null;
+  }
+
+  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
   const text = await response.text();
+  if (!text) {
+    return null;
+  }
+
+  const normalizedText = text.trimStart();
+  const shouldParseJson =
+    contentType.includes('application/json')
+    || contentType.includes('+json')
+    || normalizedText.startsWith('{')
+    || normalizedText.startsWith('[');
+  if (!shouldParseJson) {
+    return text;
+  }
+
   try {
-    return text ? JSON.parse(text) : null;
+    return JSON.parse(text);
   } catch {
     return text;
   }

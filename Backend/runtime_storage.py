@@ -203,8 +203,17 @@ def _cleanup_expired_tree(root: Path, ttl_seconds: int, *, recursive: bool = Tru
         return 0
     now = time.time()
     removed = 0
-    candidates = list(root.rglob("*")) if recursive else list(root.iterdir())
-    for path in sorted(candidates, key=lambda item: len(item.parts), reverse=True):
+    if recursive:
+        candidates: list[Path] = []
+        for current_root, dirnames, filenames in os.walk(root, topdown=False):
+            current_path = Path(current_root)
+            for name in filenames:
+                candidates.append(current_path / name)
+            for name in dirnames:
+                candidates.append(current_path / name)
+    else:
+        candidates = list(root.iterdir())
+    for path in candidates:
         try:
             if not path.exists():
                 continue

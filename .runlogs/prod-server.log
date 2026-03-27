@@ -1,2 +1,0 @@
-[prod-server] listening on http://0.0.0.0:8080
-[prod-server] proxy /api -> http://127.0.0.1:18001 
