@@ -134,6 +134,13 @@ if errorlevel 1 (
 ) else (
   echo [INFO] Backend already listening on %BACKEND_PORT%, skip start.
 )
+echo [1/2] Waiting for backend readiness on %BACKEND_PORT%...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$deadline=(Get-Date).AddSeconds(90); $ready=$false; while((Get-Date) -lt $deadline){ try { if(Get-NetTCPConnection -State Listen -LocalPort %BACKEND_PORT% -ErrorAction Stop){ $ready=$true; break } } catch {}; Start-Sleep -Seconds 2 }; if(-not $ready){ exit 1 }"
+if errorlevel 1 (
+  echo [ERROR] Backend did not become ready on %BACKEND_PORT% within timeout.
+  exit /b 1
+)
 
 echo [2/2] Checking frontend on %FRONTEND_PORT%...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^

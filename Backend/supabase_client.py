@@ -1,37 +1,12 @@
-import os
-
 from supabase import Client, create_client
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# 本地 Supabase 默认值（supabase 启动）
-DEFAULT_SUPABASE_URL = "http://127.0.0.1:54321"
-DEFAULT_SUPABASE_ANON_KEY = (
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9."
-    "CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0"
-)
-DEFAULT_SUPABASE_SERVICE_ROLE_KEY = (
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0."
-    "EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
-)
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", DEFAULT_SUPABASE_URL)
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", DEFAULT_SUPABASE_ANON_KEY)
-SUPABASE_SERVICE_ROLE_KEY = os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY", DEFAULT_SUPABASE_SERVICE_ROLE_KEY
-)
-
-# 数据库默认指向本地 Supabase Postgres
-DB_USER = os.getenv("SUPABASE_DB_USER", "postgres")
-DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "postgres")
-DB_HOST = os.getenv("SUPABASE_DB_HOST", "127.0.0.1")
-DB_PORT = os.getenv("SUPABASE_DB_PORT", "54322")
-DB_NAME = os.getenv("SUPABASE_DB_NAME", "postgres")
-SQLALCHEMY_DATABASE_URL = os.getenv(
-    "SUPABASE_SQLALCHEMY_DATABASE_URL",
-    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
+from app_settings import (
+    SQLALCHEMY_DATABASE_URL,
+    SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_ROLE_KEY,
+    SUPABASE_URL,
 )
 
 engine = create_engine(

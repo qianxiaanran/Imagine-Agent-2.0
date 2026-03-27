@@ -45,6 +45,8 @@ except ImportError:
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
+from app_settings import DEEPSEEK_KEY, DEEPSEEK_MODEL_NAME, DEEPSEEK_URL
+
 # =================================================
 # 🔥 配置：LLM 模型设置 (支持环境变量)
 # =================================================
@@ -62,11 +64,6 @@ OLLAMA_HTTP_CONNECT_TIMEOUT = float(os.getenv("OLLAMA_HTTP_CONNECT_TIMEOUT", "8"
 OLLAMA_HTTP_READ_TIMEOUT = float(os.getenv("OLLAMA_HTTP_READ_TIMEOUT", "120"))
 OLLAMA_HTTP_WRITE_TIMEOUT = float(os.getenv("OLLAMA_HTTP_WRITE_TIMEOUT", "30"))
 OLLAMA_HTTP_POOL_TIMEOUT = float(os.getenv("OLLAMA_HTTP_POOL_TIMEOUT", "30"))
-
-# 云端 DeepSeek 配置（按用户需求补充）
-DEEPSEEK_URL = "https://api.deepseek.com"
-DEEPSEEK_KEY = "***REMOVED_DEEPSEEK_KEY***"
-DEEPSEEK_MODEL_NAME = "deepseek-chat"  # V3
 
 print(f"🤖 [LLM Init] Local: {MODEL_NAME} @ {OLLAMA_BASE_URL} (ctx={OLLAMA_NUM_CTX})")
 print(

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import os
 import re
 import secrets
 from dataclasses import dataclass
@@ -371,11 +372,7 @@ def main() -> int:
     parser.add_argument("--local-url", default="http://127.0.0.1:54321")
     parser.add_argument(
         "--local-service-role-key",
-        default=(
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-            "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0."
-            "EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU"
-        ),
+        default=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
     )
     parser.add_argument(
         "--local-db-url",
@@ -384,6 +381,10 @@ def main() -> int:
     parser.add_argument("--no-reset-public", action="store_true")
     parser.add_argument("--skip-auth-users", action="store_true")
     args = parser.parse_args()
+
+    if not args.local_service_role_key:
+        print("[ERROR] missing local service role key. Set SUPABASE_SERVICE_ROLE_KEY or pass --local-service-role-key.")
+        return 1
 
     try:
         t_count, r_count = migrate_public_data(

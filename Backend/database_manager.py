@@ -2,12 +2,15 @@ import os
 import re
 import ast
 import time
+import json
 import hashlib
 import urllib.parse
 import logging
 from collections import OrderedDict
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Generator, Optional, Union, Callable
+from uuid import uuid4
 
 # ✅ [修复] 兼容 LangChain 新旧版本的导入路径
 try:
@@ -20,18 +23,14 @@ except ImportError:
         HumanMessage = None
 
 from langchain_community.utilities import SQLDatabase
+from openpyxl import Workbook
+from app_settings import DB_HOST, DB_NAME, DB_PASSWORD_RAW, DB_PORT, DB_SSLMODE, DB_USER
 from deepseek_llm import get_llm_instance
+from runtime_storage import RUNTIME_STATIC_ROOT, build_static_api_url
 
 # ============================================================
 # 🔌 数据库连接配置 (Supabase PostgreSQL)
 # ============================================================
-DB_HOST = os.getenv("SUPABASE_DB_HOST", "127.0.0.1")
-DB_USER = os.getenv("SUPABASE_DB_USER", "postgres")
-DB_PORT = os.getenv("SUPABASE_DB_PORT", "54322")
-DB_NAME = os.getenv("SUPABASE_DB_NAME", "postgres")
-DB_PASSWORD_RAW = os.getenv("SUPABASE_DB_PASSWORD", "postgres")
-DB_SSLMODE = os.getenv("SUPABASE_DB_SSLMODE", "disable")
-
 encoded_password = urllib.parse.quote_plus(DB_PASSWORD_RAW)
 DB_CONNECTION_STRING = (
     f"postgresql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
@@ -115,6 +114,9 @@ DB_LOCAL_SUMMARY_CONTEXT_MAX_CHARS = int(os.getenv("DB_LOCAL_SUMMARY_CONTEXT_MAX
 DB_LOCAL_SESSION_STATE_MAX_CHARS = int(os.getenv("DB_LOCAL_SESSION_STATE_MAX_CHARS", "600"))
 DB_LOCAL_ACTIVE_CONTEXT_MAX_CHARS = int(os.getenv("DB_LOCAL_ACTIVE_CONTEXT_MAX_CHARS", "500"))
 DB_LOCAL_RESULT_PROMPT_MAX_CHARS = int(os.getenv("DB_LOCAL_RESULT_PROMPT_MAX_CHARS", "1200"))
+DB_PREVIEW_ROW_LIMIT = max(1, int(os.getenv("DB_PREVIEW_ROW_LIMIT", "10")))
+DB_PREVIEW_CELL_MAX_CHARS = max(20, int(os.getenv("DB_PREVIEW_CELL_MAX_CHARS", "120")))
+DB_EXPORT_SUBDIR = (os.getenv("DB_EXPORT_SUBDIR", "db_exports") or "db_exports").strip().strip("/\\")
 
 # ============================================================
 # 🧭 DDL 与 规范定义 (已根据 SQL 脚本更新)
@@ -152,7 +154,7 @@ SQL_GENERATION_RULES = r"""
 2) 禁止执行除了 SELECT 以外的任何操作。
 3) 禁止查询上述 11 张表以外的任何表。
 4) 如果问题涉及时间，请使用 date_trunc 或 CURRENT_DATE 进行计算。
-5) 默认 LIMIT 10。
+5) 除非用户明确要求前 N 条、Top N 或单条排名结果，否则不要自行添加 LIMIT；系统会在回答阶段只展示前 10 行预览，并导出完整 Excel。
 """
 
 # ============================================================
@@ -327,22 +329,68 @@ def _extract_single_value(result_text: str) -> Optional[str]:
     return None
 
 
-_LIMIT_HINT_PATTERN = re.compile(
-    r"(limit\s+\d+|top\s+\d+|前\s*\d+|最近\s*\d+|只要\s*\d+|仅\s*\d+|\d+\s*条|\d+\s*行|\d+\s*个|\d+\s*条记录|\d+\s*个记录)",
+_EXPLICIT_LIMIT_PATTERNS = (
+    re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE),
+    re.compile(r"top\s*[-_:：]?\s*(\d+)", re.IGNORECASE),
+    re.compile(r"前\s*(\d+)\s*(?:条|行|个|位|名|家|项|条记录|个记录)?", re.IGNORECASE),
+    re.compile(r"最近\s*(\d+)\s*(?:条|行|个|位|名|家|项|条记录|个记录)?", re.IGNORECASE),
+    re.compile(r"(?:只要|仅|只看|保留|显示)\s*(\d+)\s*(?:条|行|个|位|名|家|项|条记录|个记录)?", re.IGNORECASE),
+)
+_NO_LIMIT_HINT_PATTERN = re.compile(
+    r"(全部|所有|全量|不限|完整|全部记录|所有记录|全部数据|所有数据)",
     re.IGNORECASE,
 )
-_NO_LIMIT_HINT_PATTERN = re.compile(r"(全部|所有|全量|不限|完整|全部记录|所有记录)", re.IGNORECASE)
+_SQL_TERMINAL_LIMIT_PATTERN = re.compile(r"\s+LIMIT\s+(\d+)\s*$", re.IGNORECASE)
+_SQL_TERMINAL_FETCH_PATTERN = re.compile(
+    r"\s+FETCH\s+FIRST\s+(\d+)\s+ROWS\s+ONLY\s*$",
+    re.IGNORECASE,
+)
 
 
-def _user_specified_limit(user_query: str) -> bool:
+def _parse_user_requested_limit(user_query: str) -> Optional[int]:
+    q = (user_query or "").strip().lower()
+    if not q:
+        return None
+    for pattern in _EXPLICIT_LIMIT_PATTERNS:
+        match = pattern.search(q)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except Exception:
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _user_requests_unlimited(user_query: str) -> bool:
     q = (user_query or "").strip().lower()
     if not q:
         return False
-    if _LIMIT_HINT_PATTERN.search(q):
-        return True
-    if _NO_LIMIT_HINT_PATTERN.search(q):
-        return True
-    return False
+    return bool(_NO_LIMIT_HINT_PATTERN.search(q))
+
+
+def _user_specified_limit(user_query: str) -> bool:
+    return _parse_user_requested_limit(user_query) is not None or _user_requests_unlimited(user_query)
+
+
+def _apply_user_requested_limit(sql: str, user_query: str) -> str:
+    requested_limit = _parse_user_requested_limit(user_query)
+    if not sql or not requested_limit:
+        return sql
+    if _SQL_TERMINAL_FETCH_PATTERN.search(sql):
+        return _SQL_TERMINAL_FETCH_PATTERN.sub(f" FETCH FIRST {requested_limit} ROWS ONLY", sql)
+    if _SQL_TERMINAL_LIMIT_PATTERN.search(sql):
+        return _SQL_TERMINAL_LIMIT_PATTERN.sub(f" LIMIT {requested_limit}", sql)
+    return f"{sql} LIMIT {requested_limit}"
+
+
+def _wrap_sql_with_user_limit(sql: str, user_query: str) -> str:
+    requested_limit = _parse_user_requested_limit(user_query)
+    if not sql or not requested_limit:
+        return sql
+    return f"SELECT * FROM ({sql}) AS _user_requested_limit_query LIMIT {requested_limit}"
 
 
 def _ensure_limit(sql: str, user_query: str, limit_value: int) -> str:
@@ -355,6 +403,24 @@ def _ensure_limit(sql: str, user_query: str, limit_value: int) -> str:
     if _user_specified_limit(user_query):
         return sql
     return f"{sql} LIMIT {limit_value}"
+
+
+_DEFAULT_LIMIT_CLAUSE_PATTERN = re.compile(
+    r"\s+LIMIT\s+(10|20|50|100|200)\s*$",
+    re.IGNORECASE,
+)
+_DEFAULT_FETCH_CLAUSE_PATTERN = re.compile(
+    r"\s+FETCH\s+FIRST\s+(10|20|50|100|200)\s+ROWS\s+ONLY\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_default_terminal_limit(sql: str, user_query: str) -> str:
+    if not sql or _user_specified_limit(user_query):
+        return sql
+    stripped = _DEFAULT_FETCH_CLAUSE_PATTERN.sub("", sql)
+    stripped = _DEFAULT_LIMIT_CLAUSE_PATTERN.sub("", stripped)
+    return stripped.strip()
 
 
 _AGG_FUNC_PATTERN = re.compile(r"\b(count|sum|avg|min|max)\s*\(", re.IGNORECASE)
@@ -456,6 +522,120 @@ def _trim_prompt_text(value: Optional[str], max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars]
+
+
+def _normalize_export_cell(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool, datetime)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    if isinstance(value, (dict, list, tuple, set)):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _preview_cell_text(value: Any, max_chars: int = DB_PREVIEW_CELL_MAX_CHARS) -> str:
+    normalized = _normalize_export_cell(value)
+    if normalized is None:
+        text = ""
+    else:
+        text = str(normalized)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>").replace("|", "\\|")
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
+
+
+def _build_preview_markdown(columns: list[str], rows: list[tuple[Any, ...]]) -> str:
+    normalized_columns = [str(col or f"column_{idx + 1}") for idx, col in enumerate(columns or [])]
+    if not normalized_columns and rows:
+        normalized_columns = [f"column_{idx + 1}" for idx in range(len(rows[0]))]
+    if not normalized_columns:
+        return ""
+
+    header_line = "| " + " | ".join(_preview_cell_text(col, max_chars=80) or "-" for col in normalized_columns) + " |"
+    separator_line = "| " + " | ".join(["---"] * len(normalized_columns)) + " |"
+    body_lines: list[str] = []
+    for row in rows[:DB_PREVIEW_ROW_LIMIT]:
+        row_values = list(row) if isinstance(row, (list, tuple)) else [row]
+        if len(row_values) < len(normalized_columns):
+            row_values.extend([None] * (len(normalized_columns) - len(row_values)))
+        body_lines.append(
+            "| " + " | ".join(_preview_cell_text(value) for value in row_values[: len(normalized_columns)]) + " |"
+        )
+
+    lines = [header_line, separator_line]
+    if body_lines:
+        lines.extend(body_lines)
+    return "\n".join(lines)
+
+
+def _save_query_result_excel(columns: list[str], rows: list[tuple[Any, ...]]) -> tuple[Path, str, str]:
+    export_day = datetime.now().strftime("%Y%m%d")
+    export_dir = RUNTIME_STATIC_ROOT / DB_EXPORT_SUBDIR / export_day
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"db_query_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}.xlsx"
+    file_path = export_dir / filename
+
+    workbook = Workbook(write_only=True)
+    worksheet = workbook.create_sheet(title="query_result")
+
+    normalized_columns = [str(col or f"column_{idx + 1}") for idx, col in enumerate(columns or [])]
+    if not normalized_columns and rows:
+        normalized_columns = [f"column_{idx + 1}" for idx in range(len(rows[0]))]
+
+    if normalized_columns:
+        worksheet.append(normalized_columns)
+
+    for row in rows:
+        row_values = list(row) if isinstance(row, (list, tuple)) else [row]
+        if normalized_columns and len(row_values) < len(normalized_columns):
+            row_values.extend([None] * (len(normalized_columns) - len(row_values)))
+        if normalized_columns:
+            row_values = row_values[: len(normalized_columns)]
+        worksheet.append([_normalize_export_cell(value) for value in row_values])
+
+    workbook.save(file_path)
+    workbook.close()
+    return file_path, build_static_api_url(DB_EXPORT_SUBDIR, export_day, filename), filename
+
+
+def _build_query_reply(
+    columns: list[str],
+    rows: list[tuple[Any, ...]],
+    *,
+    export_ready: bool,
+    export_error: str = "",
+) -> str:
+    total_rows = len(rows)
+    preview_rows = rows[:DB_PREVIEW_ROW_LIMIT]
+    preview_count = len(preview_rows)
+    lines = [f"本次查询共 {total_rows} 行数据。"]
+
+    if export_ready:
+        lines.append("完整结果已导出为 Excel，可在本条消息的来源中下载。")
+    elif export_error:
+        lines.append(f"Excel 导出失败：{export_error}")
+
+    if total_rows <= 0:
+        return "\n\n".join(lines)
+
+    if total_rows > DB_PREVIEW_ROW_LIMIT:
+        lines.append(f"对话中仅展示前 {preview_count} 行预览：")
+    else:
+        lines.append(f"以下为全部 {preview_count} 行数据：")
+
+    preview_markdown = _build_preview_markdown(columns, preview_rows)
+    if preview_markdown:
+        lines.append(preview_markdown)
+
+    return "\n\n".join(lines)
 
 
 class DatabaseManager:
@@ -587,21 +767,24 @@ class DatabaseManager:
             except Exception as e:
                 yield f"Model generation error: {e}"
                 return
-            raw_sql = _ensure_limit(raw_sql, user_query, DB_AUTO_LIMIT)
         else:
             status = _status_event("命中 SQL 缓存，准备执行查询...")
             if status:
                 yield status
 
+        raw_sql = _apply_user_requested_limit(raw_sql, user_query)
+        raw_sql = _strip_default_terminal_limit(raw_sql, user_query)
+        execution_sql = _wrap_sql_with_user_limit(raw_sql, user_query)
+
         # 2) 安全校验 (SELECT 限制)
-        if not _is_safe_readonly_sql(raw_sql):
+        if not _is_safe_readonly_sql(execution_sql):
             yield "🚫 SQL 校验拦截：仅允许 SELECT（或 WITH...SELECT）查询，禁止任何写操作。"
             return
 
         # 3) 表白名单严格校验
-        is_valid_table, table_err_msg = _validate_table_whitelist(raw_sql)
+        is_valid_table, table_err_msg = _validate_table_whitelist(execution_sql)
         if not is_valid_table:
-            print(f"🚫 表名校验拦截: {raw_sql}")
+            print(f"🚫 表名校验拦截: {execution_sql}")
             yield f"🚫 {table_err_msg}"
             return
 
@@ -623,112 +806,73 @@ class DatabaseManager:
             }
 
         # 4) 只执行一次 SQL（结果缓存）
-        result_cache_key = f"{db_name}::{raw_sql}"
-        query_result = _SQL_RESULT_CACHE.get(result_cache_key)
-        if query_result is None:
+        result_cache_key = f"{db_name}::{execution_sql}"
+        query_payload = _SQL_RESULT_CACHE.get(result_cache_key)
+        if query_payload is None:
             status = _status_event("正在执行数据库查询...")
             if status:
                 yield status
             if _should_stop():
                 return
-            print(f"🔍 [DB] 执行 SQL (via {model_type}): {raw_sql}")
+            print(f"🔍 [DB] 执行 SQL (via {model_type}): {execution_sql}")
             try:
-                query_result = self.db.run(raw_sql)
+                with self.db._engine.begin() as conn:
+                    result = conn.exec_driver_sql(execution_sql)
+                    query_payload = {
+                        "columns": list(result.keys()),
+                        "rows": [tuple(row) for row in result.fetchall()],
+                    }
             except Exception as db_err:
                 yield f"❌ 查询失败: {db_err}"
                 return
-            if query_result:
-                _SQL_RESULT_CACHE.set(result_cache_key, query_result)
+            _SQL_RESULT_CACHE.set(result_cache_key, query_payload)
 
-        if not query_result:
-            yield "未查询到数据。"
-            return
+        result_columns = list((query_payload or {}).get("columns") or [])
+        result_rows = [
+            tuple(row) if isinstance(row, (list, tuple)) else (row,)
+            for row in ((query_payload or {}).get("rows") or [])
+        ]
+        requested_limit = _parse_user_requested_limit(user_query)
+        if requested_limit and len(result_rows) > requested_limit:
+            result_rows = result_rows[:requested_limit]
 
-        if _is_simple_aggregate_sql(raw_sql):
-            single_value = _extract_single_value(query_result)
-            if single_value is not None:
-                yield f"结果：{single_value}"
-                return
-
-        # 5) 成功后进行总结（只总结一次，带缓存）
         if _should_stop():
             return
-        data_limit = min(DB_RESULT_PROMPT_MAX_CHARS, DB_LOCAL_RESULT_PROMPT_MAX_CHARS) if is_local_backend else DB_RESULT_PROMPT_MAX_CHARS
-        data_text, truncated = _truncate_result_text(query_result, data_limit)
-        truncate_note = "（数据已截断，仅供总结）" if truncated else ""
-        response_pref = (response_instruction or "").strip()
-        summary_context_parts = []
-        if session_state:
-            summary_context_parts.append(f"会话状态:\n{session_state}")
-        if summary_context:
-            summary_context_parts.append(f"摘要上下文:\n{summary_context}")
-        if history_context:
-            summary_context_parts.append(f"近期对话:\n{history_context}")
-        if active_context_content:
-            summary_context_parts.append(f"当前附加上下文:\n{active_context_content}")
-        summary_context_text = "\n\n".join(summary_context_parts).strip()
-        context_prefix = f"上下文:\n{summary_context_text}\n" if summary_context_text else ""
-        summary_prompt = (
-            f"用户问: {user_query}\n"
-            f"{context_prefix}"
-            f"SQL: {raw_sql}\n"
-            f"数据{truncate_note}: {data_text}\n"
-            "请简洁专业地回答。"
-        )
-        summary_prompt += (
-            "\n\n回答规则:\n"
-            "1) 只能基于“数据”中的事实回答，严禁编造任何数字、记录或结论。\n"
-            "2) 如果数据不足以回答问题，请明确说“数据库结果不足以回答该问题”。\n"
-            "3) 不要把上下文里的假设当成数据库事实。"
-        )
-        if response_pref:
-            summary_prompt += f"\n\n请同时遵循以下输出偏好（仅影响表达，不改变事实与结论）：\n{response_pref}"
 
-        summary_hash = hashlib.sha256(
-            f"{user_query}::{raw_sql}::{data_text}::{response_pref}::{context_sig}".encode("utf-8")
-        ).hexdigest()
-        summary_cache_key = f"{db_name}::{summary_hash}"
-        cached_summary = _SUMMARY_CACHE.get(summary_cache_key)
-        if cached_summary:
-            status = _status_event("命中总结缓存。")
-            if status:
-                yield status
-            yield cached_summary
-            return
-
-        # 也使用流式传输进行摘要
-        status = _status_event("正在整理查询结果...")
+        status = _status_event("正在生成 Excel 导出...")
         if status:
             yield status
-        summary_chunks = []
-        stream_iter = None
+
+        export_ready = False
+        export_error = ""
         try:
-            stream_iter = target_llm.stream([HumanMessage(content=summary_prompt)])
-            for chunk in stream_iter:
-                if _should_stop():
-                    break
-                if hasattr(chunk, "content"):
-                    summary_chunks.append(chunk.content)
-                    yield chunk.content
-                elif isinstance(chunk, str):
-                    summary_chunks.append(chunk)
-                    yield chunk
-        except Exception as e:
-            yield f"总结生成失败: {e}"
+            _, export_url, export_name = _save_query_result_excel(result_columns, result_rows)
+            export_ready = True
+            yield {
+                "type": "source",
+                "source": {
+                    "type": "excel",
+                    "title": "数据库查询结果 Excel",
+                    "name": export_name,
+                    "file_name": export_name,
+                    "url": export_url,
+                    "source": f"{len(result_rows)} 行",
+                    "snippet": f"完整导出 {len(result_rows)} 行数据",
+                },
+            }
+        except Exception as export_err:
+            export_error = str(export_err)
+            logging.exception("❌ [Database] Excel export failed")
+
+        if _should_stop():
             return
 
-        finally:
-            if stream_iter is not None:
-                close_fn = getattr(stream_iter, "close", None)
-                if callable(close_fn):
-                    try:
-                        close_fn()
-                    except Exception:
-                        pass
-
-        if summary_chunks:
-            _SUMMARY_CACHE.set(summary_cache_key, "".join(summary_chunks))
-
+        yield _build_query_reply(
+            result_columns,
+            result_rows,
+            export_ready=export_ready,
+            export_error=export_error,
+        )
         return
 
 

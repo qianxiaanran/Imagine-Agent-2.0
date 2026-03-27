@@ -1,32 +1,21 @@
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
 
-# 配置/supabase_config.py
-SUPABASE_URL = os.getenv("SUPABASE_URL", "http://127.0.0.1:54321")
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# 👇 前端等价权限（登录 / 查询 / 校验 JWT）
-SUPABASE_ANON_KEY = os.getenv(
-    "SUPABASE_ANON_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9."
-    "CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0",
+from app_settings import (
+    BAIDU_API_KEY,
+    BAIDU_APP_ID,
+    BAIDU_SECRET_KEY,
+    DEEPSEEK_KEY,
+    DEEPSEEK_MODEL_NAME,
+    DEEPSEEK_URL,
+    SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_ROLE_KEY,
+    SUPABASE_URL,
 )
 
-# 👇 后端管理员权限（仅后端使用）
-SUPABASE_SERVICE_ROLE_KEY = os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0."
-    "EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU",
-)
-
-# API 配置 (建议从环境变量获取)
-DEEPSEEK_URL = os.getenv("DEEPSEEK_URL", "https://api.deepseek.com")
-DEEPSEEK_KEY = os.getenv("DEEPSEEK_KEY", "sk-xxx")
-
-BAIDU_APP_ID = os.getenv("BAIDU_APP_ID" , "120885917")
-BAIDU_API_KEY = os.getenv("BAIDU_API_KEY", "YxsmdI5HeKcDzMfaOmqnYAp1")
-BAIDU_SECRET_KEY = os.getenv("BAIDU_SECRET_KEY", "YZzoL6rjEysCSo5PjJdWVI4XctrpnJx1")
+SUPABASE_PUBLIC_URL = SUPABASE_URL
+DEEPSEEK_MODEL = DEEPSEEK_MODEL_NAME
 
 # 向量模型路径 (可以是本地路径或 HuggingFace ID)
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "./bge-small-zh-v1.5")

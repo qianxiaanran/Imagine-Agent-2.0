@@ -19,19 +19,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-# -----------------------------------------------------------------------------
-# 🔧 配置区域：请在这里填入你的 API Key
-# -----------------------------------------------------------------------------
-# 1. Bing Web Search API (推荐，国内极稳): https://www.microsoft.com/en-us/bing/apis/bing-web-search-api
-BING_SUBSCRIPTION_KEY = os.environ.get("BING_SEARCH_V7_KEY", "") or os.environ.get("BING_API_KEY", "")
-BING_SEARCH_ENDPOINT = os.environ.get("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search").strip()
+from app_settings import (
+    BING_SEARCH_ENDPOINT,
+    BING_SUBSCRIPTION_KEY,
+    SERPAPI_API_KEY,
+    SERPER_API_KEY,
+    TAVILY_API_KEY,
+)
 
-# 2. SerpAPI (备选): https://serpapi.com/
-SERPAPI_API_KEY = os.environ.get("SERPAPI_API_KEY", "")
-# 3. Serper (Google Search API): https://serper.dev/
-SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
-# 4. Tavily Search API: https://tavily.com/
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+# -----------------------------------------------------------------------------
+# 🔧 搜索服务密钥统一从 Backend/app_settings.py 读取
+# -----------------------------------------------------------------------------
 SEARCH_PROVIDER_ORDER = [
     p.strip().lower()
     for p in os.getenv("SEARCH_PROVIDER_ORDER", "bing,serpapi,serper,tavily,scrape").split(",")

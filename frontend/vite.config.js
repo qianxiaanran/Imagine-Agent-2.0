@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
+const backendRoot = fileURLToPath(new URL("../Backend", import.meta.url));
 
 const includesAny = (id, patterns) => patterns.some((pattern) => id.includes(pattern));
 
@@ -85,10 +86,17 @@ const resolveManualChunk = (rawId) => {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, projectRoot, "");
+  const backendEnv = loadEnv(mode, backendRoot, "");
   const apiProxyTarget = env.VITE_API_PROXY_TARGET || "http://127.0.0.1:18011";
+  const publicSupabaseUrl = (backendEnv.SUPABASE_URL || env.VITE_SUPABASE_URL || "").trim();
+  const publicSupabaseAnonKey = (backendEnv.SUPABASE_ANON_KEY || env.VITE_SUPABASE_ANON_KEY || "").trim();
 
   return {
     plugins: [react(), tailwindcss()],
+    define: {
+      __APP_PUBLIC_SUPABASE_URL__: JSON.stringify(publicSupabaseUrl),
+      __APP_PUBLIC_SUPABASE_ANON_KEY__: JSON.stringify(publicSupabaseAnonKey),
+    },
 
     css: {
       modules: {

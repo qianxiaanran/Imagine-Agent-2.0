@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from app_settings import PRESENTON_API_KEY, PRESENTON_BASE_URL
 from admin_utils import ROLE_ADMIN, require_role
 from deepseek_llm import ask_llm
 from runtime_storage import (
@@ -32,8 +33,8 @@ router = APIRouter(prefix="/api/presentation", tags=["Presentation"])
 ensure_runtime_layout()
 migrate_legacy_runtime_files()
 
-DEFAULT_PRESENTON_BASE_URL = os.getenv("PRESENTON_BASE_URL", "http://127.0.0.1:5000").strip()
-DEFAULT_PRESENTON_API_KEY = os.getenv("PRESENTON_API_KEY", "").strip()
+DEFAULT_PRESENTON_BASE_URL = PRESENTON_BASE_URL.strip()
+DEFAULT_PRESENTON_API_KEY = PRESENTON_API_KEY.strip()
 
 LOCAL_GENERATE_PATH = os.getenv("PRESENTON_LOCAL_PATH", "/api/v1/ppt/presentation/generate").strip()
 CLOUD_SYNC_PATH = os.getenv("PRESENTON_SYNC_PATH", "/api/v1/ppt/presentation/generate/sync").strip()

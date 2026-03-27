@@ -79,6 +79,7 @@ const SourcePanel = ({ sources }) => {
             const sqlMarkdown = String(sourceObj?.markdown || '').trim() || (sqlText ? `\`\`\`sql\n${sqlText}\n\`\`\`` : '');
             const lowerSrc = String(label || '').toLowerCase();
             const isSqlSource = sourceType === 'sql' || Boolean(sqlText) || Boolean(sqlMarkdown) || lowerSrc.includes('sql');
+            const isExcelSource = sourceType === 'excel' || /\.xlsx$/i.test(String(label || href || ''));
 
             if (isSqlSource) {
               const content = sqlMarkdown || snippet || label;
@@ -100,28 +101,41 @@ const SourcePanel = ({ sources }) => {
 
             if (href) {
               const sourceMeta = [sourceObj?.source, sourceObj?.date].filter(Boolean).join(' · ');
+              const linkClassName = isExcelSource
+                ? 'w-full md:w-auto inline-flex items-start gap-2 px-2.5 py-2 rounded-md border text-xs font-medium bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300 border-emerald-100 dark:border-emerald-800 transition-all hover:opacity-90 hover:underline decoration-emerald-300 underline-offset-2'
+                : 'w-full md:w-auto inline-flex items-start gap-2 px-2.5 py-2 rounded-md border text-xs font-medium bg-sky-50 dark:bg-sky-900/20 text-sky-700 dark:text-sky-300 border-sky-100 dark:border-sky-800 transition-all hover:opacity-90 hover:underline decoration-sky-300 underline-offset-2';
+              const metaClassName = isExcelSource
+                ? 'truncate max-w-[320px] text-[10px] text-emerald-600/80 dark:text-emerald-200/80'
+                : 'truncate max-w-[320px] text-[10px] text-sky-600/80 dark:text-sky-200/80';
+              const hrefClassName = isExcelSource
+                ? 'truncate max-w-[320px] text-[10px] text-emerald-500/80 dark:text-emerald-300/80 underline'
+                : 'truncate max-w-[320px] text-[10px] text-sky-500/80 dark:text-sky-300/80 underline';
               return (
                 <a
                   key={i}
                   href={href}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="w-full md:w-auto inline-flex items-start gap-2 px-2.5 py-2 rounded-md border text-xs font-medium bg-sky-50 dark:bg-sky-900/20 text-sky-700 dark:text-sky-300 border-sky-100 dark:border-sky-800 transition-all hover:opacity-90 hover:underline decoration-sky-300 underline-offset-2"
+                  className={linkClassName}
                   title={label || href}
                 >
-                  <Globe size={12} className="text-sky-500 flex-shrink-0 mt-0.5" />
+                  {isExcelSource ? (
+                    <FileText size={12} className="text-emerald-500 flex-shrink-0 mt-0.5" />
+                  ) : (
+                    <Globe size={12} className="text-sky-500 flex-shrink-0 mt-0.5" />
+                  )}
                   <span className="min-w-0 flex-1 flex flex-col">
-                    <span className="truncate max-w-[320px] font-semibold">{label || 'Web Source'}</span>
+                    <span className="truncate max-w-[320px] font-semibold">{label || (isExcelSource ? 'Excel 导出文件' : 'Web Source')}</span>
                     {sourceMeta && (
-                      <span className="truncate max-w-[320px] text-[10px] text-sky-600/80 dark:text-sky-200/80">
+                      <span className={metaClassName}>
                         {sourceMeta}
                       </span>
                     )}
-                    <span className="truncate max-w-[320px] text-[10px] text-sky-500/80 dark:text-sky-300/80 underline">
+                    <span className={hrefClassName}>
                       {href}
                     </span>
                   </span>
-                  <ExternalLink size={10} className="text-sky-400 opacity-70 mt-0.5" />
+                  <ExternalLink size={10} className={`${isExcelSource ? 'text-emerald-400' : 'text-sky-400'} opacity-70 mt-0.5`} />
                 </a>
               );
             }

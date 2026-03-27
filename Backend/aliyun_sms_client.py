@@ -1,5 +1,4 @@
 # 阿里云短信认证客户端
-import os
 import json
 from typing import Optional
 
@@ -7,6 +6,8 @@ from aliyunsdkcore.client import AcsClient
 from aliyunsdkcore.acs_exception.exceptions import ClientException, ServerException
 from aliyunsdkdypnsapi.request.v20170525.SendSmsVerifyCodeRequest import SendSmsVerifyCodeRequest
 from aliyunsdkdypnsapi.request.v20170525.CheckSmsVerifyCodeRequest import CheckSmsVerifyCodeRequest
+
+from app_settings import ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET
 
 """
 只使用【号码认证-短信认证服务】来发送 & 校验验证码，不再走短信服务(SMS)。
@@ -17,9 +18,8 @@ from aliyunsdkdypnsapi.request.v20170525.CheckSmsVerifyCodeRequest import CheckS
 2. 本文件里 ACCESS_KEY 建议从环境变量读取，别写死真实密钥。
 """
 
-# === 建议：改成从环境变量读取 ===
-ACCESS_KEY_ID = os.getenv("ALIYUN_ACCESS_KEY_ID", "***REMOVED_ALIYUN_ACCESS_KEY_ID***")
-ACCESS_KEY_SECRET = os.getenv("ALIYUN_ACCESS_KEY_SECRET", "***REMOVED_ALIYUN_ACCESS_KEY_SECRET***")
+ACCESS_KEY_ID = ALIYUN_ACCESS_KEY_ID
+ACCESS_KEY_SECRET = ALIYUN_ACCESS_KEY_SECRET
 
 REGION_ID = "cn-hangzhou"  # 号码认证服务所在地域就是杭州
 

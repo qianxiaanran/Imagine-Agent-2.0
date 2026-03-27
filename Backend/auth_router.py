@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from fastapi import APIRouter, HTTPException, Header, UploadFile, File, Query, Request, Response
 from pydantic import BaseModel, Field, ConfigDict, AliasChoices
 
+from app_settings import SUPABASE_ANON_KEY, SUPABASE_URL
 from supabase_client import require_supabase
 from aliyun_sms_client import send_login_code, verify_login_code
 from supabase_client import get_admin_supabase, get_anon_supabase
@@ -108,12 +109,10 @@ def _get_sb_url_and_key(sb) -> tuple[str, str]:
     # 优先从 supabase client 对象里取（不同版本字段名可能不同）
     url = getattr(sb, "supabase_url", None) or getattr(sb, "_supabase_url", None) or ""
     key = getattr(sb, "supabase_key", None) or getattr(sb, "_supabase_key", None) or ""
-    # 兜底从环境变量取（你 supabase_client 里通常也是从环境变量读）
     if not url:
-        url = os.getenv("SUPABASE_URL", "") or os.getenv("SUPABASE_PROJECT_URL", "")
+        url = SUPABASE_URL
     if not key:
-        # 此处必须使用匿名密钥（不是服务角色）。
-        key = os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_KEY", "")
+        key = SUPABASE_ANON_KEY
     if not url or not key:
         raise HTTPException(status_code=500, detail="后端缺少 SUPABASE_URL / SUPABASE_ANON_KEY 配置")
     return url.rstrip("/"), key
