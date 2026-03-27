@@ -17,7 +17,8 @@ search:
   default_lang: ""
 
 server:
-  secret_key: "35c04362904c22da4ae786769fa577d7"
+  # Replace this placeholder before deploying SearXNG outside local testing.
+  secret_key: "CHANGE-ME-SEARXNG-SECRET"
   limiter: false
   public_instance: false
 
