@@ -242,18 +242,6 @@ function resolveFirstPopulatedGroup(objectGroups = {}, preferredGroup = 'custome
   return fallbackKey || preferredGroup || 'customer';
 }
 
-function isSameDrilldownContext(left, right) {
-  if (!left || !right) return false;
-  return (
-    String(left.source || '') === String(right.source || '') &&
-    String(left.granularity || '') === String(right.granularity || '') &&
-    String(left.bucket || '') === String(right.bucket || '') &&
-    String(left.status || '') === String(right.status || '') &&
-    String(left.category || '') === String(right.category || '') &&
-    String(left.name || '') === String(right.name || '')
-  );
-}
-
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -1140,19 +1128,24 @@ function StatusDonutCard({
   const totalValue = sumBy(normalizedItems, 'value');
   const totalCount = sumBy(normalizedItems, 'count');
 
-  const arcSegments = useMemo(() => {
-    let offset = 0;
-    return normalizedItems.map((item) => {
-      const dash = item.share * circumference;
-      const segment = {
-        ...item,
-        dash,
-        offset,
-      };
-      offset += dash;
-      return segment;
-    });
-  }, [circumference, normalizedItems]);
+  const arcSegments = useMemo(
+    () =>
+      normalizedItems.reduce((segments, item) => {
+        const previousSegment = segments[segments.length - 1];
+        const offset = previousSegment ? previousSegment.offset + previousSegment.dash : 0;
+        const dash = item.share * circumference;
+
+        return [
+          ...segments,
+          {
+            ...item,
+            dash,
+            offset,
+          },
+        ];
+      }, []),
+    [circumference, normalizedItems]
+  );
 
   if (!normalizedItems.length) {
     return (
@@ -1178,7 +1171,7 @@ function StatusDonutCard({
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-[150px_1fr] sm:items-center">
+      <div className="mt-4 grid grid-cols-1 gap-4">
         <div className="flex justify-center">
           <div className="relative h-36 w-36">
             <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90">
@@ -1213,39 +1206,25 @@ function StatusDonutCard({
           </div>
         </div>
 
-        <div className="space-y-2.5">
-          {arcSegments.map((item, index) => (
+        <div className="grid grid-cols-2 gap-2">
+          {arcSegments.map((item) => (
             <button
               key={`${item.key}-legend`}
               type="button"
               onClick={() => onSelect?.(item)}
-              className={`block w-full rounded-2xl border px-3 py-2 text-left transition-colors ${
+              className={`min-w-0 rounded-xl border px-2.5 py-2 text-left transition-colors ${
                 activeStatus && activeStatus === item.status
                   ? 'border-cyan-200 bg-cyan-50/70 dark:border-cyan-900/60 dark:bg-cyan-950/20'
-                  : 'border-transparent hover:border-slate-200 hover:bg-slate-50/70 dark:hover:border-slate-800 dark:hover:bg-slate-950/20'
+                  : 'border-slate-200/70 hover:border-slate-300 hover:bg-slate-50/70 dark:border-slate-800 dark:hover:border-slate-700 dark:hover:bg-slate-950/20'
               } ${isInteractive ? 'cursor-pointer' : 'cursor-default'}`}
             >
-              <div className="flex items-center justify-between gap-3 text-xs">
-                <span className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-200">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                  {item.label}
-                </span>
-                <span className="text-slate-500 dark:text-slate-400">{(item.share * 100).toFixed(1)}%</span>
+              <div className="flex min-w-0 items-center gap-2 text-xs text-slate-700 dark:text-slate-200">
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
+                <span className="truncate">{item.label}</span>
               </div>
-              <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-                <div
-                  className="h-full rounded-full"
-                  style={{
-                    width: isReady ? `${Math.max(item.share * 100, 5)}%` : '0%',
-                    backgroundColor: item.color,
-                    transition: 'width 800ms cubic-bezier(0.22,1,0.36,1)',
-                    transitionDelay: `${delay + index * 90 + 120}ms`,
-                  }}
-                />
-              </div>
-              <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-                <span>{formatCompactCurrency(item.value)}</span>
-                <span>{compactNumberFormatter.format(item.count)} 笔</span>
+              <div className="mt-1 flex min-w-0 items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                <span className="shrink-0">{(item.share * 100).toFixed(1)}%</span>
+                <span className="truncate">{formatCompactCurrency(item.value)}</span>
               </div>
             </button>
           ))}
@@ -1302,51 +1281,24 @@ function StatusSegmentsCard({
       <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</div>
       <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{subtitle}</div>
 
-      <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200/70 bg-slate-50 p-1.5 dark:border-slate-800 dark:bg-slate-950/40">
-        <div className="flex h-16 items-stretch gap-1 overflow-hidden rounded-xl">
-          {normalizedItems.map((item, index) => (
-            <button
-              key={`${item.key}-segment`}
-              type="button"
-              onClick={() => onSelect?.(item)}
-              className="relative flex min-w-[64px] flex-1 items-end overflow-hidden rounded-xl p-2 text-left text-white"
-              style={{
-                background: `linear-gradient(135deg, ${item.color}, ${item.color}CC)`,
-                flexBasis: isReady ? `${Math.max(item.share * 100, 14)}%` : '0%',
-                opacity: activeStatus && activeStatus !== item.status ? 0.4 : 1,
-                cursor: isInteractive ? 'pointer' : 'default',
-                transition: 'flex-basis 800ms cubic-bezier(0.22,1,0.36,1)',
-                transitionDelay: `${delay + index * 80}ms`,
-              }}
-            >
-              <div className="relative z-10">
-                <div className="text-[10px] font-semibold uppercase tracking-[0.14em]">{item.label}</div>
-                <div className="mt-1 text-sm font-semibold">{formatCompactCurrency(item.value)}</div>
-              </div>
-              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.25),transparent_58%)]" />
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="mt-4 space-y-2">
+      <div className="mt-4 grid grid-cols-1 gap-2">
         {normalizedItems.map((item) => (
           <button
             key={`${item.key}-row`}
             type="button"
             onClick={() => onSelect?.(item)}
-            className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2 text-left text-xs transition-colors ${
+            className={`flex w-full min-w-0 items-center justify-between gap-3 rounded-xl border px-3 py-2 text-left text-xs transition-colors ${
               activeStatus && activeStatus === item.status
                 ? 'border-cyan-200 bg-cyan-50/70 dark:border-cyan-900/60 dark:bg-cyan-950/20'
                 : 'border-slate-200/70 hover:border-slate-300 hover:bg-slate-50/70 dark:border-slate-800 dark:hover:border-slate-700 dark:hover:bg-slate-950/20'
             } ${isInteractive ? 'cursor-pointer' : 'cursor-default'}`}
           >
-            <span className="inline-flex items-center gap-2 text-slate-700 dark:text-slate-200">
-              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-              {item.label}
+            <span className="inline-flex min-w-0 items-center gap-2 text-slate-700 dark:text-slate-200">
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
+              <span className="truncate">{item.label}</span>
             </span>
-            <span className="text-slate-500 dark:text-slate-400">
-              {compactNumberFormatter.format(item.count)} 笔 / {(item.share * 100).toFixed(1)}%
+            <span className="min-w-[96px] shrink-0 text-right text-slate-500 dark:text-slate-400">
+              {compactNumberFormatter.format(item.count)} 笔 / {(isReady ? item.share * 100 : 0).toFixed(1)}%
             </span>
           </button>
         ))}
@@ -1599,23 +1551,20 @@ function DualLineChart({ rows = [], activeBucket = '', onSelect }) {
   const activeRow = activeIndex == null ? null : rows[activeIndex];
   const activePoint = activeIndex == null ? null : chartPoints[activeIndex];
 
-  const handlePointerMove = useCallback(
-    (event) => {
-      const rect = event.currentTarget.getBoundingClientRect();
-      if (!rect.width) return;
+  const handlePointerMove = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!rect.width) return;
 
-      const rawX = ((event.clientX - rect.left) / rect.width) * width;
-      const clampedX = Math.max(padLeft, Math.min(rawX, width - padRight));
-      const ratio = (clampedX - padLeft) / Math.max(innerWidth, 1);
-      const nextIndex = Math.round(ratio * Math.max(rows.length - 1, 0));
-      setHoveredIndex(nextIndex);
-    },
-    [innerWidth, rows.length]
-  );
+    const rawX = ((event.clientX - rect.left) / rect.width) * width;
+    const clampedX = Math.max(padLeft, Math.min(rawX, width - padRight));
+    const ratio = (clampedX - padLeft) / Math.max(innerWidth, 1);
+    const nextIndex = Math.round(ratio * Math.max(rows.length - 1, 0));
+    setHoveredIndex(nextIndex);
+  };
 
-  const handlePointerLeave = useCallback(() => {
+  const handlePointerLeave = () => {
     setHoveredIndex(null);
-  }, []);
+  };
 
   if (!rows.length) {
     return <div className="h-56 rounded-2xl border border-dashed border-slate-300/70 bg-white/50" />;
